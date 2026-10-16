@@ -69,6 +69,61 @@ Each release needs just one image: the board tells Windows Mobile its screen siz
 
 ---
 
+## What's emulated: hardware and software
+
+✅ done · 🟡 partial · ❌ missing (not yet)
+
+### Hardware
+
+| Device feature | Status | How |
+|---|---|---|
+| CPU (ARMv5TE, ARM920T-class) | ✅ | From-scratch interpreter + ARM64 JIT |
+| Screen, any resolution, rotation | ✅ | S3C2410 LCD; size passed to WM at boot |
+| Touch screen | ✅ | S3C2410 ADC / touch |
+| Hardware keys, D-pad, slide-out keyboard | ✅ | Skin keys, X1-style fold keyboard, Android IME |
+| Battery level, charging, temperature | ✅ | DE battery device ← Android |
+| Backlight brightness | ✅ | Follows Android's brightness |
+| Speaker / audio out | ✅ | IIS + DMA → AAudio, ringer/media routing |
+| Microphone | ✅ | Opened only while WM records |
+| Notification LED, vibration | ✅ | DE LED device → skin light, phone vibrator |
+| Camera (stills, video) | ✅ | Camera device + `wmdcam.dll`, Camera2 |
+| GPS | ✅ | NMEA on COM1 |
+| Cellular radio: signal, carrier, data type | ✅ | FakeRIL (5.0, 6.5.3) / virtual GSM modem (6.1.4) |
+| Phone calls in and out | ✅ | Through Android Telecom |
+| SMS in and out | ✅ | Modem `+CMT` / helper |
+| MMS | 🟡 | Receive pictures only; sending ❌ |
+| Network / internet | ✅ | NE2000 card on a user-mode NAT |
+| Wi-Fi | 🟡 | Status icon mirrors Android; WM's own Wi-Fi radio/scan ❌ |
+| Infrared (IrDA) | ✅ | Emulated SIR transceiver → Bluetooth LE or InfraWAN |
+| Bluetooth | 🟡 | Send/receive files via Android; WM's Bluetooth stack (headsets, pairing) ❌ |
+| Storage card | ✅ | Folder share of phone storage |
+| Standby / resume | 🟡 | 6.1.4, 6.5.3 ✅; WM 5.0's own standby ❌ (hidden) |
+| Accelerometer / light / proximity sensors for apps | ❌ | Only used for screen rotation |
+| USB / ActiveSync to a PC | ❌ | — |
+| FM radio | ❌ | — |
+
+### Software
+
+| Feature | Status |
+|---|---|
+| Windows Mobile 6.5.3 Pro, 6.1.4 Pro, 5.0 Pocket PC Phone | ✅ |
+| Windows Mobile Standard (Smartphone, keypad only) | ❌ ([#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) |
+| WM 6.0 / 6.1, 2003 SE | ❌ (6.0/6.1 run but aren't offered; 2003 SE doesn't boot) |
+| Android 10 or newer | ✅ (older: [#1](https://github.com/UiharuKazari2008/StylusPPC/issues/1)) |
+| Snapshots, quick resume, Savepoint, warm reboot | ✅ |
+| Material You theme, wallpaper sync | ✅ |
+| Status bar (battery, signal, carrier, G/E/3G/H or 1X/Ev, Wi-Fi) | ✅ |
+| Your own phone number in WM | ✅ |
+| Clipboard sync, Android keyboard | ✅ |
+| Contacts and calendar sync | ✅ |
+| Tasks and notes sync | ❌ |
+| Launcher mode, Android Apps folder, app dock | ✅ |
+| .NET Compact Framework 3.5 (auto-installed on 5.0/6.1.4) | ✅ |
+| Modern HTTPS websites (TLS 1.2+) | ❌ in progress (local-CA TLS proxy) |
+| Windows Live Messenger via Escargot | ❌ planned (after the TLS proxy) |
+
+---
+
 ## Getting started
 
 1. Install the latest APK from the [Download](#download) links above.
@@ -286,6 +341,34 @@ How it works: each Android app is a tiny native ARM program on the storage card 
 - **Auto-standby** is switched off inside Windows Mobile, because Android decides when the phone sleeps.
 - **.NET CF 3.5 bootstrap** (`guest/Autorun`): a 6.6 KB native ARM program, built with the Android NDK's clang and wrapped as a Windows CE executable. On releases without .NET CF 3.5 (WM 5–6.1.4) it installs Microsoft's redistributable silently with `wceload /noui`, then starts the helper.
 </details>
+
+---
+
+## Settings reference
+
+Device settings are per OS. They're in Settings → **Device Settings** on Android and in Windows Mobile under Settings → System → **PocketStylus**; most apply live.
+
+| Page | Settings |
+|---|---|
+| **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android |
+| **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Opacity · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
+| **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
+| **Power** | Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
+| **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts · Android App Dock (off / top / bottom) · Dock Size (4–8) · Dock Apps |
+| **Device** | Screen resolution (phone shape / 480×854 / 480×800 / 480×640 / 480×480; restarts WM) · Memory · Screen DPI · Storage Card (mode, root, folders) |
+
+Other pages in the Android Settings screen:
+- **System:** choose the OS and image, or cold boot this OS.
+- **Skin:** import or paste a skin JSON, or use the built-in skin.
+- **Storage:** private / chosen folders, and all-files access.
+- **Phone calls:**
+  - enable calls;
+  - Use Windows Mobile's call screen (default phone app);
+  - Use Phone's Ringer;
+  - My phone number;
+  - Defer Incoming SMS Messages.
+- **Contacts & calendar sync**
+- **Infrared:** transport, InfraWAN server and credentials, and a connection test.
 
 ---
 
