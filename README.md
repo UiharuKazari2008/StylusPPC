@@ -1,10 +1,19 @@
-# PocketStylus
+<h1><img src="docs/images/icon.png" width="64" height="64" align="absmiddle" alt=""> PocketStylus</h1>
 
 **Native Pocket PC and Windows Mobile hypervisor for Android.**
 
 PocketStylus boots the original, unmodified Windows Mobile ROM images that Microsoft shipped for its Device Emulator: Windows Mobile 5.0, 6.1.4 and 6.5.3. It runs them full-screen on a modern Android phone, and your phone becomes the Windows Mobile device. Its battery, signal, carrier, Wi-Fi, GPS, camera, speaker, vibration motor, clipboard, keyboard, wallpaper, colour theme and phone line all show up inside Windows Mobile as that device's own hardware.
 
 It was built and tuned on a Galaxy Z Fold7. On a foldable, opening the phone turns it into an Xperia X1-style slider with a landscape screen above a hardware keyboard.
+
+### Download
+
+| | Latest release |
+|---|---|
+| GitHub | [**PocketStylus.apk**](https://github.com/UiharuKazari2008/StylusPPC/releases/latest/download/PocketStylus.apk) · [release notes](https://github.com/UiharuKazari2008/StylusPPC/releases/latest) |
+| yozora | [**PocketStylus.apk.zip**](https://yozora.bluesteel.737.jp.net/UiharuKazari2008/StylusPPC/releases/download/latest/PocketStylus.apk.zip) (the APK, zipped) · [release notes](https://yozora.bluesteel.737.jp.net/UiharuKazari2008/StylusPPC/releases/latest) |
+
+These links always point to the newest release. Android 10 or newer, ARM64.
 
 ---
 
@@ -45,7 +54,7 @@ Each release keeps its own saved sessions and its own device settings, so you ca
 
 ## Getting started
 
-1. Install the latest `PocketStylus-<version>.apk` from the release page (Android 10 or newer, ARM64).
+1. Install the latest APK from the [Download](#download) links above.
 2. **Get the ROM images.** They are Microsoft's and are not included in PocketStylus. Download the [Windows Mobile Emulation Images Archive](https://archive.org/details/windows-mobile-emulation-images-archive.-7z) from the Internet Archive and extract it with 7-Zip. The images PocketStylus uses are in each release's `Emulation Images` folder under `ARM-based/`:
    - `Windows Mobile 6.5.3 Professional/Emulation Images`
    - `Windows Mobile 6.1.4 Professional/Emulation Images`
