@@ -74,7 +74,13 @@ object NativeBridge {
                               numeric: String, data: String, number: String)
     /** The real call's progress for a call Windows Mobile dialled: pending, dialing, active, held, ended. */
     external fun modemCallState(handle: Long, id: Int, state: String)
-    /** Call events from the modem, one per line, like the helper's "call ..." lines: dial, end, hold, mute. */
+    /** An incoming call rings in Windows Mobile ("" or "-": withheld); answered by a ringing / noring event. */
+    external fun modemRing(handle: Long, number: String)
+    /** An incoming text message for Windows Mobile: an SMS-DELIVER PDU in hex, with a leading SMSC field. */
+    external fun modemSms(handle: Long, pdu: String)
+    /** The answer to the modem event "smssend <mr> <pdu>": the phone sent the message (or failed to). */
+    external fun modemSmsResult(handle: Long, mr: Int, sent: Boolean)
+    /** Call events from the modem, one per line, like the helper's "call ..." lines: dial, ringing, noring, answer, end, hold, mute. */
     external fun modemEvents(handle: Long): String
     /** Windows Mobile's radio driver talks to the modem (COM1 is the radio, not the GPS). */
     external fun modemActive(handle: Long): Boolean

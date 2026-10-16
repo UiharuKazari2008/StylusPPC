@@ -18,6 +18,7 @@ add_library(wmcore STATIC
   src/board/de_devices.cpp
   src/board/nled.cpp  # notification LED / vibrator decoder
   src/board/modem.cpp  # virtual GSM modem on UART0 (rilgsm images)
+  src/board/irda.cpp  # infrared (SIR) transceiver on UART2 (docs/research-irda.md)
   src/board/audio.cpp
   src/board/folder_share.cpp
   src/board/pcmcia.cpp
@@ -34,6 +35,6 @@ if(ANDROID)
 endif()
 
 if(WMCORE_CLI)
-  add_executable(wmcore-cli cli/main.cpp)
+  add_executable(wmcore-cli cli/main.cpp cli/irda_link.cpp)
   target_link_libraries(wmcore-cli wmcore)
 endif()

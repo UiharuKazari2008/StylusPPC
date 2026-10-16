@@ -13,6 +13,8 @@
 #include "../src/board/camera.h"
 #include "../src/board/modem.h"
 #include "../src/board/codepatch.h"
+#include "../src/board/irda.h"  // infrared bridge on UART2
+#include "irda_link.h"
 #include "../src/util/log.h"
 #include <chrono>
 #include <cstdio>
@@ -20,6 +22,7 @@
 #include <cstring>
 #include <string>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <thread>
 #include <dirent.h>
@@ -269,7 +272,14 @@ int main(int argc, char **argv) {
                         "  --cmd T:text     the app's next mailbox command at T (numbered like the app)\n"
                         "  --cmd-burst T:N  N mixed commands (status, rotate, wallpaper, theme, backlight, ...)\n"
                         "  --quiet-share    no folder share call trace\n"
-                        "  --no-remount     after --load-state the card stays as the guest knew it (no re-announce)\n", argv[0]);
+                        "  --no-remount     after --load-state the card stays as the guest knew it (no re-announce)\n"
+                        "  infrared (UART2, docs/research-irda.md):\n"
+                        "  --irda-trace     log every IrLAP frame in and out\n"
+                        "  --irda-udp L:R   frames over UDP on 127.0.0.1 (port L here, R the other instance)\n"
+                        "  --irda-delay MS  UDP: send each frame MS ms late (network latency tests)\n"
+                        "  --irda-wan URL   InfraWAN relay: ws://host:port/infrawan?room=R&user=U&token=T&name=N\n"
+                        "  --irda-ask       connect only after the helper's popup (\"irda ask\" on start, needs --box)\n"
+                        "  --irda-choose T:ble|wan|cancel  answer the popup at T (as if its button was tapped)\n", argv[0]);
         return 2;
     }
     MachineConfig cfg;
@@ -303,8 +313,10 @@ int main(int argc, char **argv) {
     bool noCoalesce = false;
     int umstat0 = -1;
     // Virtual modem (modem.h): --modem-net T:"svc=1 sig=3 roam=0 num=310260 op=Name" stands in for the
-    // app's network feed, --modem-call T:id:state for its call progress; --modem-stub answers calls itself.
-    std::vector<std::pair<double, std::string>> modemNets, modemCalls;
+    // app's network feed, --modem-call T:id:state for its call progress; --modem-stub answers calls itself;
+    // --modem-ring T:number rings an incoming call ("-": withheld); --modem-sms T:hex delivers an SMS-DELIVER
+    // PDU; with --modem-stub, messages WM sends count as sent.
+    std::vector<std::pair<double, std::string>> modemNets, modemCalls, modemRings, modemSms;
     bool traceModem = false, modemStub = false;
     std::vector<double> modemRefresh;
     const char *saveStatePath = nullptr, *loadStatePath = nullptr;
@@ -317,6 +329,11 @@ int main(int argc, char **argv) {
     double rtcSkew = 0;
     const char *boxDir = nullptr;
     bool quietShare = false, noRemount = false;
+    // Infrared (irda.h): transport for the guest's IrLAP frames.
+    bool irdaTrace = false, irdaAsk = false;
+    std::string irdaUdp, irdaWan;
+    int irdaDelay = 0;
+    std::vector<std::pair<double, std::string>> irdaChoices;
     auto timeArg = [](const std::string &v, std::string &rest) {
         size_t c = v.find(':');
         rest = c == std::string::npos ? "" : v.substr(c + 1);
@@ -390,6 +407,12 @@ int main(int argc, char **argv) {
         else if (a == "--box") boxDir = next();
         else if (a == "--quiet-share") quietShare = true;
         else if (a == "--no-remount") noRemount = true;
+        else if (a == "--irda-trace") irdaTrace = true;
+        else if (a == "--irda-udp") irdaUdp = next();
+        else if (a == "--irda-wan") irdaWan = next();
+        else if (a == "--irda-delay") irdaDelay = atoi(next());
+        else if (a == "--irda-ask") irdaAsk = true;
+        else if (a == "--irda-choose") { std::string rest; double t = timeArg(next(), rest); irdaChoices.push_back({t, rest}); }
         else if (a == "--reset") resets.push_back(atof(next()));  // T: the app's Restart (warm reboot)
         else if (a == "--power") powers.push_back(atof(next()));  // T: press the power button (suspend/wake)
         else if (a == "--burst") {  // T0:T1:DT:prefix  framebuffer every DT s in [T0,T1] (only frames that changed)
@@ -406,10 +429,10 @@ int main(int argc, char **argv) {
         else if (a == "--trace-io") traceIo = true;
         else if (a == "--save-state") saveStatePath = next();
         else if (a == "--load-state") loadStatePath = next();
-        else if (a == "--modem-net" || a == "--modem-call") {
+        else if (a == "--modem-net" || a == "--modem-call" || a == "--modem-ring" || a == "--modem-sms") {
             std::string v = next();
             size_t c = v.find(':');
-            (a == "--modem-net" ? modemNets : modemCalls).push_back({atof(v.substr(0, c).c_str()), v.substr(c + 1)});
+            (a == "--modem-net" ? modemNets : a == "--modem-call" ? modemCalls : a == "--modem-ring" ? modemRings : modemSms).push_back({atof(v.substr(0, c).c_str()), v.substr(c + 1)});
         }
         else if (a == "--trace-modem") traceModem = true;
         else if (a == "--modem-stub") modemStub = true;
@@ -531,7 +554,25 @@ int main(int argc, char **argv) {
     };
     m.uart0.onTx = serial;
     m.uart1.onTx = serial;
-    m.uart2.onTx = serial;
+    // UART2 is the infrared port (irda.h): binary SIR frames, not text.
+    m.irda->trace = irdaTrace;
+    std::unique_ptr<IrdaLink> irdaLink;
+    if (!irdaUdp.empty()) {
+        int lp = 0, rp = 0;
+        sscanf(irdaUdp.c_str(), "%d:%d", &lp, &rp);
+        irdaLink = irdaUdpLink(lp, rp, irdaDelay);
+    } else if (!irdaWan.empty()) {
+        irdaLink = irdaWanLink(irdaWan);
+    }
+    bool irdaStarted = false;
+    auto irdaConnect = [&] {
+        if (!irdaLink || irdaStarted) return;
+        std::string e;
+        if (irdaLink->start(*m.irda, e)) irdaStarted = true;
+        else LOGE("irda: %s", e.c_str());
+    };
+    if (!irdaAsk) irdaConnect();
+    std::set<std::string> irdaSeenMsgs;
 
     std::map<uint32_t, uint32_t> hist;
     auto t0 = std::chrono::steady_clock::now();
@@ -602,6 +643,10 @@ int main(int argc, char **argv) {
             }
         for (double r : modemRefresh)
             if (r == t) m.modem->refresh();
+        for (auto &ms : modemSms)
+            if (ms.first == t) { LOGI("modem: deliver sms"); m.modem->smsDeliver(ms.second); }
+        for (auto &mr : modemRings)
+            if (mr.first == t) { LOGI("modem: ring %s", mr.second.c_str()); m.modem->ring(mr.second); }
         for (auto &mc : modemCalls)
             if (mc.first == t) {
                 size_t c = mc.second.find(':');
@@ -610,6 +655,8 @@ int main(int argc, char **argv) {
         {
             std::string ev = m.modem->takeEvents();
             if (!ev.empty()) LOGI("modem events: %s", ev.c_str());
+            for (size_t p = ev.find("smssend "); modemStub && p != std::string::npos; p = ev.find("smssend ", p + 1))
+                m.modem->smsResult(atoi(ev.c_str() + p + 8), true);
         }
         for (double p : powers)
             if (p == t) { LOGI("power button (lcd %s)", m.lcd->enabled() ? "on" : "off"); m.gpio.powerButton(); }
@@ -662,6 +709,26 @@ int main(int argc, char **argv) {
                     LOGI("box: %d commands queued", b.second);
                 }
             if (s % 4 == 3) boxReport(boxDir, t + 0.25);
+        }
+        {   // Infrared: the app's part (InfraredBridge.kt): popup on "start", transport on the answer.
+            std::string ev = m.irda->takeEvents();
+            if (ev.find("start") != std::string::npos && irdaAsk && boxDir) {
+                LOGI("irda: asking the helper for a transport");
+                boxCommand(boxDir, "irda ask");
+            }
+            for (auto &c : irdaChoices)
+                if (c.first == t && boxDir) boxCommand(boxDir, "irda pick " + c.second);
+            if (irdaAsk && boxDir && s % 2 == 1)
+                for (auto &n : boxList(std::string(boxDir) + "/out", ".msg")) {
+                    if (!irdaSeenMsgs.insert(n).second) continue;
+                    FILE *mf = fopen((std::string(boxDir) + "/out/" + n).c_str(), "r");
+                    char buf[256] = "";
+                    if (mf) { size_t k = fread(buf, 1, sizeof buf - 1, mf); buf[k] = 0; fclose(mf); }
+                    if (strncmp(buf, "irda use ", 9) == 0) {
+                        LOGI("irda: helper chose \"%s\"", buf + 9);
+                        if (strncmp(buf + 9, "cancel", 6) != 0) irdaConnect();
+                    }
+                }
         }
         for (auto &sh : shots)
             if (sh.first == t) {
@@ -735,6 +802,10 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 3; i++)
             if (!line[i].empty()) { printf("[uart%d] %s\n", i, line[i].c_str()); line[i].clear(); }
     }
+    if (irdaLink) irdaLink->stop();
+    LOGI("irda: frames out %llu in %llu, bad %llu, answered from cache %llu, dropped %llu",
+         (unsigned long long)m.irda->framesOut, (unsigned long long)m.irda->framesIn, (unsigned long long)m.irda->badFrames,
+         (unsigned long long)m.irda->spoofed, (unsigned long long)m.irda->dropped);
     double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     LOGI("done: %.2fs wall, %llu insns", el, (unsigned long long)m.cpu.insnCount);
     {   // Whole-run summary: guest busy time (wall minus idle) and the MIPS reached while busy.

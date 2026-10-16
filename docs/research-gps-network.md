@@ -28,7 +28,7 @@ Tags:
 | GPS effort | **About 2–3 days.** |
 | NIC | **NE2000 PC Card behind a Cirrus PD6710 PCMCIA controller.** The 6.5.3 image ships `ne2000.dll`, `pcc_smdk2410.dll` and `pcc_serv.dll`. There is no CS8900 driver, no VMINI, and no DMA-transport NIC. [ROM][DE-SRC][DOC] |
 | Host side | **libslirp** (BSD/MIT). Its glib dependency builds with the NDK; Termux ships both. Two catches: on Android, DNS needs a small patch or interception, and slirp runs on its own thread. [EXT][INFERRED] |
-| Connection Manager | Handles the NE2000 like any network card through `cspnet.dll`. Set "My network card connects to: **The Internet**". The cellular "G/3G" icon will **not** reflect this traffic without extra work (§B3). [ROM][INFERRED] |
+| Connection Manager | Handles the NE2000 like any network card through `cspnet.dll`. Set "My network card connects to: **The Internet**". netui's "This network card connects me to" question is answered by `HKLM\ControlPanel\WiFi\Ethernet` `DestId` (§B3). The cellular "G/3G" icon will **not** reflect this traffic without extra work (§B3). [ROM][INFERRED] |
 | Network effort | **About 1–1.5 weeks** with libslirp. A TLS-upgrading proxy adds 2–5 days. |
 
 ---
@@ -289,6 +289,31 @@ Android-specific notes [INFERRED unless tagged]:
    (`{A1182988-0D73-439e-87AD-2A5B369F808B}`).
 4. Set "My network card connects to: The Internet", either in the UI or with a `CM_NetEntries` provisioning XML from the
    Helper. IE Mobile, GMM and other ConnMgr clients then use it. ConnMgr prefers it over GPRS while it is up.
+
+**The "This network card connects me to" question** [ROM (disasm of 6.5.3 `netui.dll`), verified in the CLI on WM 5
+`wm5gsmvga.bin`, 6.1.4 `wm614wvga.bin` and 6.5.3 `fwvga.bin`]:
+
+- When a wired adapter gets its address, `ethman.dll` calls netui's `AddNetUISystrayIcon`. netui then reads
+  `HKLM\ControlPanel\WiFi\Ethernet` value **`DestId`** (REG_SZ, a destination GUID string). If the value is missing, netui
+  posts a notification: title-bar icon plus a "Notification" left soft key. Opened, it reads "Establishing Connection:
+  This network card connects me to: (•) The Internet (or work via a VPN) / ( ) Work, Settings, [Connect]".
+  The notification is `SHNotificationAdd` with CLSID `{8DDF46E7-56ED-4750-9E58-AFC6CE486D03}`, ID `0x1002`,
+  `SHNP_INFORM`, 60 s duration. netui takes it down itself with `SHNotificationRemove(clsid, 0x1002)`.
+- Answering it with "The Internet" writes `DestId = "{436EF144-B4FB-4863-A041-8F905A62C572}"` there and nothing else
+  visible: the key gets no other values, and the `CM_NetEntries` query answer stays the same. The answer is
+  one value for all wired adapters, not per adapter, so it also covers a removed and re-inserted card.
+- The `CM_NetEntries` provisioning does **not** stop the question. With only that applied, it came back after a soft reset.
+- On a fresh image netui asks about 2 s after the card comes up. That is before the managed helper can run: on the
+  first boot the native bootstrap installs .NET CF first. Times seen from cold boot (CLI, 1 s shots): the question
+  appeared on 6.1.4 at 13–21 s, on 6.5.3 at 26–30 s, and on WM 5 at 18–24 s. The helper took it down at 27–36 s,
+  28–37 s and 35–38 s.
+- The Helper (`Patch.NoNetPrompt`, called as the first thing at helper start and from `EnsureInternet`) writes the
+  `DestId` value, flushes the hive (WM 5 lost the unflushed value across a soft reset), and removes a question that is
+  already waiting. It logs only when it changes something. After patch 7, `ethman.dll` doesn't load (`NoWiredUi`), so
+  nothing asks after the patch reset anyway. The value matters when ethman is loaded (patch off, or before the patch).
+- Remaining gap: on the very first boot of a fresh image, the question shows for the seconds between netui asking and the
+  helper starting (about 2–15 s). The patch reset follows. Writing the value from the native `autorun.exe`
+  before it installs .NET CF would close that gap.
 
 **Cellular path on 6.5.3** [ROM, partly from disassembly]:
 

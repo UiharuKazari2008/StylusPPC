@@ -54,10 +54,13 @@ class Settings(ctx: Context) {
         get() = p.getString("storage.folders", "")!!.split('\n').filter { it.isNotEmpty() }
         set(v) = p.edit().putString("storage.folders", v.joinToString("\n")).apply()
 
-    /** Guest screen: the image's native size, or the phone's aspect ratio (taller than 800 allowed). */
-    var screenMode: String
-        get() = p.getString("screen.mode", SCREEN_NATIVE)!!
-        set(v) = p.edit().putString("screen.mode", v).apply()
+    /**
+     * Guest screen: "auto" (the phone's shape, 480 wide) or "WxH". The board tells Windows Mobile
+     * its screen size at boot, so one image of each release runs at any of these.
+     */
+    var screenRes: String
+        get() = p.getString("screen.res", SCREEN_AUTO)!!
+        set(v) = p.edit().putString("screen.res", v).apply()
 
     /**
      * Windows Mobile's logical DPI (HKLM\Drivers\Display\GPE LogicalPixelsX/Y), 0 = the image's own.
@@ -130,6 +133,19 @@ class Settings(ctx: Context) {
     var shineWidth: Int
         get() = p.getInt("skin.shine.width", 50)
         set(v) = p.edit().putInt("skin.shine.width", v.coerceIn(0, 100)).apply()
+
+    /** Key glass: opacity 0..100 (100 = the stock look), frosted blur 0..25 of the wallpaper behind. */
+    var keyOpacity: Int
+        get() = p.getInt("skin.keys.opacity", 100)
+        set(v) = p.edit().putInt("skin.keys.opacity", v.coerceIn(0, 100)).apply()
+    var keyBlur: Int
+        get() = p.getInt("skin.keys.blur", 0)
+        set(v) = p.edit().putInt("skin.keys.blur", v.coerceIn(0, 25)).apply()
+
+    /** Key colour: "auto" (the skin's glass) or "#RRGGBB"; glyphs turn dark or light to match. */
+    var keyColor: String
+        get() = p.getString("skin.keys.color", "auto")!!
+        set(v) = p.edit().putString("skin.keys.color", v).apply()
 
     var keyShine: Boolean
         get() = p.getBoolean("skin.shine", true)
@@ -368,6 +384,38 @@ class Settings(ctx: Context) {
         get() = p.getInt("bg.minutes", 5)
         set(v) = p.edit().putInt("bg.minutes", v).apply()
 
+    // ---- Launcher (AndroidApps.kt, HomeActivity.kt) ----
+
+    /** Home pressed while PocketStylus is the phone's launcher shows Today ("today") or the Start menu ("start"). */
+    var launcherHome: String
+        get() = p.getString("launcher.home", "today")!!
+        set(v) = p.edit().putString("launcher.home", v).apply()
+
+    /** Start > Programs > Android Apps in Windows Mobile, one program per Android app. */
+    var androidFolder: Boolean
+        get() = p.getBoolean("launcher.folder", true)
+        set(v) = p.edit().putBoolean("launcher.folder", v).apply()
+
+    /** Android apps left out of the Android Apps folder (AndroidApps.App.key). */
+    var hiddenApps: Set<String>
+        get() = p.getStringSet("launcher.hidden", emptySet())!!.toSet()
+        set(v) = p.edit().putStringSet("launcher.hidden", v).apply()
+
+    /** The skin's dock of Android apps: DOCK_OFF, DOCK_TOP or DOCK_BOTTOM of the display. */
+    var dockPos: String
+        get() = p.getString("dock.pos", DOCK_OFF)!!
+        set(v) = p.edit().putString("dock.pos", v).apply()
+
+    /** Dock slots, 4 to 8. */
+    var dockSize: Int
+        get() = p.getInt("dock.size", 5).coerceIn(4, 8)
+        set(v) = p.edit().putInt("dock.size", v.coerceIn(4, 8)).apply()
+
+    /** The dock's apps in order (AndroidApps.App.key); slots beyond the list are empty. */
+    var dockApps: List<String>
+        get() = p.getString("dock.apps", "")!!.split('\n').filter { it.isNotEmpty() }
+        set(v) = p.edit().putString("dock.apps", v.joinToString("\n")).apply()
+
     /** The background mode keeps Windows Mobile running (at least for a while). */
     val runsInBackground: Boolean get() = backgroundMode in RUNNING_MODES
 
@@ -431,8 +479,11 @@ class Settings(ctx: Context) {
             return p
         }
 
-        const val SCREEN_NATIVE = "native"
-        const val SCREEN_PHONE = "phone"
+        const val SCREEN_AUTO = "auto"
+
+        const val DOCK_OFF = "off"
+        const val DOCK_TOP = "top"
+        const val DOCK_BOTTOM = "bottom"
 
         // Background behaviour. Suspend: paused in memory. Hibernate: saved to resume.wms and
         // released. Running: on at a reduced CPU share under a foreground service.

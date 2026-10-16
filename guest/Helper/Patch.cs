@@ -212,6 +212,9 @@ static class Patch
         }
     }
 
+    // Connection Manager's "The Internet" destination.
+    const string InternetDest = "{436EF144-B4FB-4863-A041-8F905A62C572}";
+
     // The emulated NE2000 card is the device's internet: tell Connection Manager it connects to
     // "The Internet" (not "Work"), so IE and other programs use it without asking. Connection
     // Manager can put its own default back when it restarts, so the helper re-applies this at start.
@@ -220,14 +223,41 @@ static class Patch
         string xml =
             "<wap-provisioningdoc><characteristic type=\"CM_NetEntries\">" +
             "<characteristic type=\"NE20001\">" +
-            "<parm name=\"DestId\" value=\"{436EF144-B4FB-4863-A041-8F905A62C572}\"/>" +
+            "<parm name=\"DestId\" value=\"" + InternetDest + "\"/>" +
             "<parm name=\"Adapter\" value=\"NE20001\"/>" +
             "</characteristic></characteristic></wap-provisioningdoc>";
         IntPtr result;
         int hr = DMProcessConfigXML(xml, 1 /* CFGFLAG_PROCESS */, out result);
         if (result != IntPtr.Zero) LocalFree(result);
         if (hr != 0) Helper.Log("network provisioning 0x" + hr.ToString("X8"));
+        NoNetPrompt();
     }
+
+    // When a wired adapter comes up, ethman.dll hands it to netui.dll (AddNetUISystrayIcon), and
+    // netui asks "Establishing Connection: This network card connects me to: The Internet / Work"
+    // (a notification, CLSID {8DDF46E7-56ED-4750-9E58-AFC6CE486D03}, ID 0x1002) unless
+    // HKLM\ControlPanel\WiFi\Ethernet holds the answer: DestId, the destination GUID as a string.
+    // The answer is one value for every wired card, so it also covers a re-inserted card;
+    // CM_NetEntries above does not stop the question. WM 5, 6.1.4 and 6.5.3 all work this way
+    // (docs/research-gps-network.md B3). On a fresh image netui asks a few seconds before the helper
+    // can run, so a question already waiting is taken down as well; "The Internet" is also its
+    // default answer. Runs at every helper start; logs only when it changes something.
+    public static void NoNetPrompt()
+    {
+        using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"ControlPanel\WiFi\Ethernet"))
+        {
+            if (string.Compare(k.GetValue("DestId") as string, InternetDest, true) != 0)
+            {
+                k.SetValue("DestId", InternetDest);
+                RegFlushKey(HKEY_LOCAL_MACHINE);  // WM 5 loses unflushed values on a reset
+                Helper.Log("net: network card connects to The Internet");
+            }
+        }
+        Guid netui = new Guid("8DDF46E7-56ED-4750-9E58-AFC6CE486D03");
+        if (SHNotificationRemove(ref netui, 0x1002) == 0) Helper.Log("net: removed the network card question");
+    }
+
+    [DllImport("aygshell.dll")] static extern int SHNotificationRemove(ref Guid clsid, int id);
 
     // Guest programs that ship with the helper: copied into \Windows with a Start menu entry.
     static void InstallApps()

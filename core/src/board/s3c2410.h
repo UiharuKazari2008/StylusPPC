@@ -108,6 +108,16 @@ public:
     void feed(uint8_t c) { rx.push_back(c); updateRx(); }
     /** The guest has receive interrupts on, i.e. a driver has the port open. */
     bool rxEnabled() const { return rxIntEnabled(); }
+    /** Bytes waiting in the receive queue (the IrDA bridge paces its frames by it, irda.h). */
+    size_t rxQueued() const { return rx.size(); }
+    /**
+     * TX interrupt as the hardware's level type (UCON bit 9): asserted for as long as TX interrupts
+     * are on, since the TX FIFO here is always empty. The serial driver fills the 16-byte FIFO, then
+     * waits for that interrupt; the per-write edge loses it for longer writes, which then crawl at
+     * the driver's IST timeout (~256 ms per 16 bytes). Set for UART2, the infrared port (irda.h).
+     */
+    bool txLevel = false;
+    void updateTx() { if (txLevel) ic.setSubLevel(idx * 3 + 1, ((ucon >> 2) & 3) == 1 && (ucon & 0x200)); }
     std::function<void(int idx, uint8_t c)> onTx;
     /** A device on the other end of the line (UART0: the virtual GSM modem, modem.h). */
     std::function<void(uint8_t c)> peer;

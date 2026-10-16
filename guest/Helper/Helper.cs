@@ -258,6 +258,9 @@ static class Helper
         // The other programs come with every helper update (new icons and fixes reach them too).
         string send = CopyProgram("SendBluetooth.exe");
         CopyProgram("GpsTest.exe", true);
+        // Text messages on WM 6.5.3 (Sms.cs): MAPIdotnet's native half and its stream types.
+        CopyProgram("MAPIlib.dll");
+        CopyProgram("OpenNETCF.dll");
         Shortcut(Bluetooth.StartMenuLink, send != null ? "\"" + send + "\"" : "\"" + ui + "\" send");
         // Settings > System entry (WM shows ControlPanel items that redirect to a program).
         // (Renamed WMDroid -> PocketStylus: the old entry and shortcuts go.)
@@ -399,6 +402,7 @@ static class Helper
         });
         dog.IsBackground = true;
         dog.Start();
+        try { Patch.NoNetPrompt(); } catch (Exception e) { Log("net " + e.Message); }  // answer netui's network card question first (Patch.cs)
         Send(Hello());
         try { Camera.Install(); } catch (Exception e) { Log("camera " + e.Message); }  // camera passthrough (Camera.cs)
         Standby.Disable();  // WM's own auto-off would stop everything, mailbox included (Standby.cs)
@@ -432,8 +436,10 @@ static class Helper
                 // After the first mailbox pass (so an "update" from the app wins): patch the system
                 // once per image, which resets the guest; otherwise report readiness.
                 patchChecked = true;
+                bool irdaPort = Irda.Provision();  // infrared port driver (Irda.cs); the patch restart covers it
                 if (Patch.Check()) return;
                 if (Dpi.Check()) return;  // Screen DPI setting: one restart when it changed (Dpi.cs)
+                if (irdaPort && Irda.Restart()) return;
                 try { Patch.EnsureInternet(); } catch (Exception e) { Log("net " + e.Message); }
                 Send("ready patch=" + Patch.Installed);
             }
@@ -441,6 +447,7 @@ static class Helper
             PhoneState.Apply();
             Step("calls");
             Calls.Poll();  // phone calls from WM's Phone app (Calls.cs)
+            Sms.Poll();  // WM 6.5.3: texts WM sends (Sms.cs)
             Step("audio");
             AudioClass.Poll();
             Step("camera");
@@ -498,11 +505,15 @@ static class Helper
             case "status": return PhoneState.Set(rest);
             case "lock": return PhoneState.Lock();
             case "call": return Calls.Command(rest);  // call state <id> <state> (Calls.cs)
+            case "pim": return Pim.Command(rest);  // contacts and calendar sync: pim dump / pim apply (Pim.cs)
+            case "sms": return Sms.Command(rest);  // text messages (Sms.cs)
             case "number": return OwnNumber.Command(rest);  // the device's own phone number (OwnNumber.cs)
             case "received": return Bluetooth.Received(rest);
+            case "irda": return Irda.Command(rest);  // infrared transport choice (Irda.cs)
             case "clip": case "ime": case "type": return InputSync.Command(verb.ToLower(), rest);  // clipboard sync, phone keyboard (InputSync.cs)
             case "rotate": return Wallpaper.Rotate(Box, rest);
             case "button": case "buttons": return Buttons.Command(verb.ToLower(), rest);  // hardware Buttons 1-4 (Buttons.cs)
+            case "android": case "home": return AndroidApps.Command(verb.ToLower(), rest);  // Android apps in Start, Home key (AndroidApps.cs)
             case "run":
             {
                 string exe = rest, a = "";

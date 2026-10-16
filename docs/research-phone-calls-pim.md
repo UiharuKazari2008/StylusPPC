@@ -13,7 +13,8 @@ Tags: **[ROM]** checked in the 6.5.3 image (extracted modules under the session 
 
 ## TL;DR
 
-0. **Built (2026-10-16): outbound calls, see section E.** The guest side ended up on FakeRIL plus a 7-word patch of
+0. **Built (2026-10-16): outbound calls, see section E; incoming calls through FakeRIL's `RIL_DevSpecific` test channel,
+   see section F.** The guest side ended up on FakeRIL plus a 7-word patch of
    its dial thread, not on a transplanted `rilgsm.dll`; the Android side holds the dialer role when the user allows
    it and hands every call it cannot show to the phone's dialer by ending its in-call process.
    WM 6 / 6.1 / 6.1.4 have no FakeRIL: there the image's own `rilgsm.dll` dials through WMDroid's virtual AT modem on
@@ -572,10 +573,176 @@ Mailbox lines (several may share one message):
 - **DTMF from WM's keypad during a call** is not forwarded: FakeRIL takes `RIL_SendDTMF` without a notification. `CallLink.DTMF`
   exists on the Android side. A gate-style patch of FakeRIL's DTMF handler could feed it.
 - **Android → WM mute and speaker changes** (from a headset, say) are not mirrored back into cprog.
-- **Incoming calls (next):** the same design extends. `WmInCallService` already gets incoming calls with the role, and today
-  hands them off at once. FakeRIL has no incoming-call hook ([B.1]); its special-number sessions (fn 0x7B4DC13C) are where a
-  second gate would go. Otherwise switch the guest to B.2(b1) for a real `RING`. The Android half (role, hand-off,
-  link) stays as it is.
+- **Incoming calls:** built, see section F. (B.1's "no incoming-call hook" was wrong: the hook is `RIL_DevSpecific`.)
+- **Incoming calls on WM 6 / 6.1 / 6.1.4** (rilgsm + virtual modem): built, see F.4.
+
+## F. Incoming calls as built (2026-10-16)
+
+### F.1 FakeRIL's test channel [DISASM]
+
+`RIL_DevSpecific` (proxy IOCTL 0x030001A4, FakeRIL handler fn 0x7B4E4B38) takes `{DWORD cbSize, DWORD type, ...}` with
+`cbSize` equal to the buffer size and `type < 27`, copies it and queues FakeRIL command 93, whose dispatcher
+(fn 0x7B4E800C, a halfword jump table on `type`) is FakeRIL's test automation. Two types matter:
+
+| type | Buffer | What FakeRIL does |
+|---|---|---|
+| 9 | 0x220 bytes: `+8` WCHAR number[260], `+0x210` RILADDRESS type (1 = international), `+0x214` 1 = caller ID shown (0: "Unknown"), `+0x218` seconds until the caller hangs up (0 = never), `+0x21C` line, 1-based | fn 0x7B4DBBF0: sleeps 1 s, checks registration (home/roaming), barring and that no call is dialling/alerting/ringing; adds an incoming call (status 5 INCOMING, or 6 WAITING when a call is active), sends RIL_NOTIFY_RING. cprog shows its incoming-call bubble and plays the ringtone |
+| 22 | 12 bytes: `+8` call id | fn 0x7B4DA570: the remote party hangs up that call (RIL_NOTIFY_DISCONNECT). A ringing call becomes a missed call in WM |
+
+(type 14 hangs up by number; the others are SMS, network and data tests not used here.) `RIL_Answer` (IOCTL 0x03000088,
+fn 0x7B4D9460) already answers an INCOMING call; WM's Ignore removes it. FakeRIL numbers its calls from 1 again
+each time.
+
+### F.2 Guest (`Calls.cs`)
+
+- `call ring <number|->` → `RIL_DevSpecific` type 9; once `RIL_GetCallList` lists an incoming call, `call ringing <id> <number>`.
+  Refused with `call noring off|noril|restart|busy|modem|ril|timeout` (timeout: no call listed within 8 s).
+- The app confirms with `call state <id> ringing` within 10 s, or the helper lets the caller hang up (type 22).
+- Status 5/6 → 1: `call answer <id>` (WM's Answer, or the echo of the helper's own RIL_Answer).
+- Gone from the list: `call end <id>` (WM's Ignore or End).
+- `call state <id> active` on a ringing call → `RIL_Answer`; `call state <id> ended` on an incoming call → type 22.
+
+Verified in the CLI (`c4.wms`, the app stubbed with `--put`): the bubble "Incoming Call 555-1234", "+1 (503) 555-0123"
+for an international number, "Unknown" for `-`; Talk answers (`call answer 1`, Connected with timer); `call state 1 ended`
+gives "Call ended"; an unanswered ring that ends gives a missed call (Start screen "phone ³" and the missed-call icon);
+End on the bubble gives `call end 1`; `call state 1 active` connects WM's call; a ring during a call gives `noring busy`.
+
+### F.3 Android (`CallBridge`, `WmInCallService`)
+
+- **With the dialer role:** `WmInCallService` keeps an incoming call when the emulator says it can show one
+  (`CallLink.SHOWING`: on screen, calls on, helper not reporting `off`/`restart`) and no other call exists, and sends
+  `RINGING` (token, number; "" when withheld) to the main process. The main process sends `call ring`; on `call ringing`
+  it sends `KEEP`, otherwise (`noring`, or 4.5 s) `RELEASE`, and the call process hands the call to the phone's dialer.
+  Without `KEEP` within 6 s the call process hands off by itself. WM's Answer → `Call.answer`, Ignore → `Call.reject`,
+  End → `disconnect`; Telecom's ACTIVE / DISCONNECTED go back to WM.
+- **Without the role:** the phone state is followed while the emulator is on screen with calls on. RINGING (the number
+  from the old `PhoneStateListener`, which needs READ_CALL_LOG) → `call ring`; WM's Answer → `acceptRingingCall()` (the
+  phone's in-call screen comes up; WM is brought back after 1.5 s), Ignore / End → `endCall()`; OFFHOOK → `active`, IDLE →
+  `ended` (missed if it was still ringing).
+- **"Use Phone's Ringer"** (Settings > Phone calls, per OS, default off). On: when WM rings, the phone's ringtone stops
+  (`TelecomManager.silenceRinger()`, allowed for the default dialer) and WM's sound plays as a ringtone (usage
+  NOTIFICATION_RINGTONE). Without the role, `silenceRinger` is not allowed: the ring stream is muted for the call
+  (ADJUST_MUTE; Samsung turns that into vibrate) and WM's ring plays on the media usage instead; the mute is undone when the
+  ringing ends and, if the app died meanwhile, when CallBridge next starts (`wmdroid.calls` prefs). Off: the phone rings as
+  usual and WM's output gain is 0 from `call ring` until the ringing ends.
+- The phone keeps every call WM cannot take: app in the background or locked (the activity is stopped), a second call,
+  guest not answering in 4.5 s. Telecom's own ringtone plays from the start in every case; only WM's ack silences it.
+
+### F.4 WM 6 / 6.1 / 6.1.4: the virtual modem rings (`core/src/board/modem.cpp`)
+
+When `NativeBridge.modemActive` (rilgsm owns COM1), `CallBridge` calls `NativeBridge.modemRing(number)` instead of the
+mailbox; the modem answers with the same event verbs (`ringing <id> <number>`, `noring noradio|noservice|busy`,
+`answer <id>`, `end <id>`). What rilgsm needs [OBSERVED in the CLI on all three images]:
+
+- `*ECAV: <id>,6,1,8,0,"<num>",129` (ccstatus 6 = incoming), then `+CRING: VOICE` (rilgsm sets `+CRC=1`) and
+  `+CLIP: "<num>",129|145` (a withheld caller: `+CLIP: "",128,,,,1`, WM shows "Private"), repeated every 3 s while it
+  rings. rilgsm polls `AT+CLCC` → `+CLCC: <id>,1,4,0,0,"<num>",129,"",0` (direction 1, stat 4).
+- **WM's Answer / Talk is `AT+CHLD=2`, not `ATA`.** WM's Ignore / End on the bubble is `AT+CHLD=0` (UDUB). `ATA`, `*EVA`
+  and `+CHLD=1` answer too.
+- The caller hanging up / the phone ending it: `*ECAV: <id>,0,1,8,16` + `NO CARRIER` → WM shows a missed call.
+- **Answered on the phone:** switching the modem's call to active (`*ECAV …,3,…`), or answering through another RIL client,
+  connects WM's call but its screen says "Unknown": cprog keeps the caller's number only when it answers itself. So the app
+  sends the helper `call answer`, which presses WM's Talk key (`keybd_event(VK_TTALK)`), the same as the bubble's
+  Answer; the modem connects the call itself 3 s later if it still rings.
+- CLI: `--modem-ring T:number` (`-`: withheld); test script `/data/local/tmp/wm/inc/m1.sh <name> <image> <radio state>`.
+
+## G. Contacts and calendar sync as built (2026-10-16)
+
+Simpler than section C's plan, same rule: **Android always wins.** Settings > Contacts & calendar (per OS, off by default;
+asks READ/WRITE_CONTACTS and READ/WRITE_CALENDAR). Runs while the emulator is on screen: 20 s after the helper's hello,
+10 s after an Android change (ContentObserver, our own writes ignored), every 15 min, and on "Sync now".
+
+**Guest (`guest/Helper/Pim.cs`, managed POOM `Microsoft.WindowsMobile.PocketOutlook`, now referenced by
+`tools/build-guest.ps1`).** Dumb on purpose: `pim dump` writes every contact and appointment to `pim-dump.txt`, `pim apply`
+runs the `put` / `delete` / `setkey` operations in `pim-apply.txt` and writes each saved item back, re-read, to
+`pim-result.txt`. Records are `name=value` lines with POOM's field names (backslash escapes for \, newline and CR); the app's key lives in the custom
+property `WMDroidKey`; `HKCU\Software\WMDroid\PimGen` is the sync generation. Found in the CLI: POOM throws on a null
+`WebPage`; unset dates read back as 1601-01-01 or 4501-01-01; a birthday before 1753 makes the save fail ("Native method
+call failed"), so year-less Android birthdays travel as 1804. Verified on 6.5.3 (c4.wms) and 6.1.4 (radio state):
+contacts with escapes, all-day and timed appointments with reminders, update, delete.
+
+**Android (`PimSync`, `PimContacts`, `PimCalendar`).** The map (`files/pim/<profile>.json`) keeps, per key, Android's record
+and WM's record (as WM saved it) after the last sync, and the generation.
+
+| Situation | Result |
+|---|---|
+| Changed on Android, or on both sides | Android's record is put into WM |
+| Changed only in WM (contacts, single events) | the changed fields are written into the Android rows they came from |
+| Changed only in WM (an occurrence of a repeating event) | Android's record is put back |
+| Gone from Android (deleted, hidden, out of the window) | deleted in WM |
+| Gone from WM, Android unchanged | deleted on Android, at most max(3, 10 %) per cycle; more are put back |
+| New in WM (no key) | linked to an Android item WM lacks with the same name or number / subject and start, else created on Android (phone-local contact, main calendar) |
+| WM's generation differs (restored older snapshot, reset) | nothing from WM is trusted: no WM changes or deletions reach Android, Android's records are put back; only new WM items are kept |
+| Android returns nothing but ≥ 5 items were synced | that kind is skipped (provider hiccup, revoked permission) |
+
+Contacts: aggregate contacts that are in a visible group or have a number, key `c:<lookup key>`. Phones fill WM's fixed
+slots by type, then in a fixed order; other rows (extra numbers, groups, photos) stay on Android untouched. Calendar:
+visible synced calendars, 30 days back to a year ahead, from `Instances`; single events `e:<id>` sync both ways,
+occurrences of repeating events `i:<id>:<begin>` one way. Not done: photos, categories/groups, WM-side recurrence, tasks.
+
+### G.1 "Prompt before accepting changes from Device"
+
+With this on (Contacts & calendar settings), every change that would go from WM to Android (changed fields, items new in
+WM, items deleted in WM) waits in `files/pim/<profile>-pending.json` and in a notification listing them with Accept and
+Reject (`PimDecisionReceiver`). Accept applies them at the next sync; Reject puts Android's version back into WM, deletes
+items that are new only in WM, and re-creates deleted ones. An answer covers the changes listed when it was given; newer
+ones wait for the next answer. Android's own changes always go to WM.
+
+## H. Text messages and MMS as built (2026-10-16)
+
+**Queue (Android, `SmsBridge`).** `SmsReceiver` (manifest, SMS_RECEIVED) puts every incoming text into a first-in
+first-out queue per OS (`files/sms/<profile>.json`), even with the app closed. New MMS are read from the phone's
+message store (`content://mms`, inbox, after the phone's messaging app downloaded them; a ContentObserver while the app
+runs, and a look at each start): text parts become the message text, pictures/video/sound are copied out and the text
+says "[n pictures in My Pictures\MMS]". The queue goes to WM oldest first whenever WM can take it.
+"Defer Incoming SMS Messages" (Settings > Phone calls): while WM is not on screen, messages stay queued and show as
+Android notifications (one per sender, MessagingStyle) with a quick reply (RemoteInput -> `SmsReplyReceiver` ->
+SmsManager); WM gets them when it is opened. Without it, a session kept in memory is woken (`wakeForEvent`) to take them.
+
+**WM 6 / 6.1 / 6.1.4: real SMS through the virtual modem** (`core/src/board/modem.cpp`, `SmsPdu.kt`).
+- In: SMS-DELIVER PDUs (GSM 7-bit or UCS-2, concatenated with a UDH when long, alphanumeric senders) as
+  `+CMT: ,<len>` + PDU (rilgsm sets `+CNMI=2,2` and PDU mode). WM files them itself: "New Text Message" bubble, sound,
+  "Text Messages: 1 Unread". [OBSERVED 6.1.4]
+- Out: `AT+CMGS=<len>`, the PDU, Ctrl-Z -> modem event `smssend <mr> <pdu>`; the app decodes the SMS-SUBMIT (UDH parts
+  joined again), sends with `SmsManager.sendMultipartTextMessage`, and answers `modemSmsResult` -> `+CMGS: <mr>` OK (or
+  `+CMS ERROR: 500`). Middle parts of a long message are acknowledged at once. A reply typed in WM's conversation view
+  went out as `0001000781551532F4...` and shows as sent. [OBSERVED 6.1.4]
+- CLI: `--modem-sms T:<hex PDU>`; with `--modem-stub` WM's sends count as sent.
+
+**WM 6.5.3: WM's messaging store** (FakeRIL has no usable SMS path). The helper (`guest/Helper/Sms.cs`) uses MAPIdotnet
+(`third_party/mapidotnet`, "distributed with no license what-so-ever"; compiled into the helper by `tools/build-guest.ps1`,
+with its `OpenNETCF.dll`) and its native half `MAPIlib.dll`, which `tools/make-mapilib.py` builds: NDK clang compiles
+`MAPIlib.cpp` plus `guest/MapiLib` (four more one-line wrappers: CreateMessage, SaveChanges, CreateAttach, ModifyRecipients;
+an import shim) against the WM 6 SDK headers unpacked from the user's SDK MSI (`third_party/wm6sdk`; `third_party/shim`
+holds `oaidl.h` with its member named `bool` renamed for clang), and the script writes a Windows CE ARM PE DLL.
+Found while making the CE loader accept it (each answered ERROR_BAD_EXE_FORMAT, 193, until fixed): the import tables
+must be in a read-only section; each DLL's lookup table must be word-aligned; each DLL's part of the IAT ends with a zero.
+- In: `sms deliver` files `sms-in.txt` into the SMS store's Inbox as `IPM.SMStext`, unread, sender and delivery time
+  set (CEMAPI commits on SetProps; SaveChanges answers E_NOTIMPL). Start screen "text 1". [OBSERVED]
+- Out: the helper watches the SMS store's Outbox and Sent Items every 3 s (what it has seen is in
+  `\Application Data\PocketStylus\sms-seen.txt`; the first look only learns what is there) and reports each new text
+  (`sms sent sms-out-<n>.txt`) for the phone to send. A text sent from Messaging's compose form (tmail.exe) was reported as
+  `to=5551234 text=Reply from WM Messaging`. PocketOutlook's `SmsMessage.Send` bypasses the store entirely. [OBSERVED]
+- MMS pictures (all versions): copied into the mailbox's `mms` folder, then `sms pictures` moves them to
+  `\My Documents\My Pictures\MMS` (Pictures & Videos). [OBSERVED]
+
+**MMS from WM: not possible.** The images' Messaging (tmail.exe) has hooks for an OEM MMS add-on (`IPM.MMS`,
+`MmsAccount`, `System\State\Messages\MMS`) but no MMS client ships in 6.1.4 or 6.5.3 (the registry's `MMS` URL protocols are
+Windows Media streaming).
+
+## I. Incoming events while PocketStylus is in the background (2026-10-16)
+
+- `EmulatorActivity.wakeForEvent(ms)`: a session kept in memory (running in the background, or suspended) is resumed,
+  set to full CPU (`setCpuLimit(100)` + `boost`), the phone kept awake (partial wake lock), WM's display woken (power
+  button from standby, a Shift tap otherwise), and the mailbox and modem polled; afterwards the background setting
+  applies again (a session that was suspended is suspended again). Texts (without Defer) and calls use it; a hibernated
+  session cannot take events (texts are notified, calls go to the phone's dialer).
+- Calls ("Ring Windows Mobile in the background", needs "Display over other apps"): WM's own incoming-call screen is drawn
+  into a floating card over the current app (`CallOverlay`: a SurfaceView in a TYPE_APPLICATION_OVERLAY window given to
+  `NativeBridge.setSurface`; taps go to the guest). Answering (in WM, or on the phone) removes the card and brings the
+  full emulator to the front; Ignore / a missed call removes it. With the phone locked or the screen off the card cannot
+  show, so a full-screen call notification opens the emulator over the lock screen (`setShowWhenLocked`,
+  `setTurnScreenOn`). With the dialer role, `CallLink.SHOWING` stays on in the background while this is possible.
 
 ## Sources
 

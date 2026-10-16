@@ -44,9 +44,24 @@ public:
         std::string number;        // the phone's own number, if known
     };
     void setNetwork(const Network &n);
-    /** The real call's progress: pending, dialing, active, held, ended. */
+    /** The real call's progress: pending, dialing, ringing, active, held, ended. */
     void callState(int id, const std::string &state);
-    /** Events for the app, one per line: "dial <id> <number>", "end <id>", "hold <id> <0|1>", "mute <0|1>". */
+    /**
+     * The phone rings: an incoming call from `number` ("" or "-": withheld) rings in Windows Mobile.
+     * Answered with "ringing <id> <number>" or "noring <reason>" in the events.
+     */
+    void ring(const std::string &number);
+    /**
+     * Text messages (3GPP 27.005 PDU mode): an incoming SMS-DELIVER (hex, with a leading SMSC field,
+     * "00" for none) goes to the guest as +CMT; a message the guest sends (AT+CMGS) comes out as the
+     * event "smssend <mr> <hex SMS-SUBMIT>", and the app answers with smsResult(mr, sent).
+     */
+    void smsDeliver(const std::string &pduHex);
+    void smsResult(int mr, bool sent);
+    /**
+     * Events for the app, one per line: "dial <id> <number>", "ringing <id> <number>", "noring <why>",
+     * "answer <id>", "end <id>", "hold <id> <0|1>", "mute <0|1>", "smssend <mr> <pdu>".
+     */
     std::string takeEvents();
     /** Announce the registration again (after the guest learned a new operator name). */
     void refresh();
@@ -66,10 +81,12 @@ private:
     } st;
     struct Call {
         int id = 0;
-        int stat = 2;              // +CLCC: 0 active, 1 held, 2 dialing, 3 alerting
-        std::string number;
+        int stat = 2;              // +CLCC: 0 active, 1 held, 2 dialing, 3 alerting, 4 incoming, 5 waiting
+        bool incoming = false;     // rung in by the app (mobile terminated)
+        std::string number;        // "" for a withheld caller
         uint64_t since = 0;
         uint64_t deadline = 0;     // end the call if the app has not taken it by then (0: none)
+        uint64_t nextRing = 0;     // incoming: when to repeat RING
     };
     std::vector<Call> calls;
 
@@ -77,6 +94,9 @@ private:
     std::string line;
     bool inPdu = false;           // +CMGS: collecting the PDU up to Ctrl-Z
     int dialing = 0;              // call whose ATD has no result yet (it comes when answered or failed)
+    int smsPending = 0;           // message reference of an AT+CMGS waiting for the app
+    uint64_t smsDeadline = 0;
+    int nextMr = 1;
     std::atomic<bool> claimedFlag{false};
     uint64_t now = 0;
     // What the guest was last told (unsolicited codes go out on change).
@@ -89,6 +109,10 @@ private:
     bool netDirty = false, refreshWanted = false;
     struct HostCall { int id; std::string state; };
     std::vector<HostCall> hostCalls;
+    bool ringWanted = false;
+    std::string ringNumber;
+    std::vector<std::string> smsIn;                 // PDUs to deliver
+    std::vector<std::pair<int, bool>> smsResults;   // app's answers to "smssend"
     std::vector<std::string> events;
 
     std::vector<std::string> *afterFinal = nullptr;  // while a command line runs: codes sent after its result
@@ -98,6 +122,10 @@ private:
     // CARRIER, 4 ERROR, or -n for "+CME ERROR: n", -1000-n for "+CMS ERROR: n".
     int command(const std::string &cmd, std::vector<std::string> &out, bool &stop);
     int dial(const std::string &number, std::vector<std::string> &out);
+    int answer();
+    void startRing(const std::string &number);
+    void sendRing(Call &c);
+    int freeId() const;
     void hangup(int id, bool fromGuest);
     void endCall(size_t i, bool fromGuest);
     void setStat(Call &c, int stat);

@@ -166,6 +166,143 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         }
     }
 
+    // ---- Dock: a row of Android apps at the top or bottom of the display (LauncherBridge) ----
+    // The band is taken from the display's own area and the display shrinks (same shape, centred)
+    // into the rest, so the dock never lies over Windows Mobile's screen: touches there never reach
+    // the guest, and the guest's resolution (and its saved states) stay as they are.
+
+    /** Settings.DOCK_OFF / DOCK_TOP / DOCK_BOTTOM. */
+    var dockPos = Settings.DOCK_OFF
+        set(v) { if (field != v) { field = v; requestLayout(); keysView.invalidate() } }
+    /** Slots in the row (4-8); slots past [dockIcons] are empty. */
+    var dockSlots = 5
+        set(v) { if (field != v) { field = v; requestLayout(); keysView.invalidate() } }
+    /** Each slot's icon, null = empty. */
+    var dockIcons: List<Bitmap?> = emptyList()
+        set(v) { field = v; keysView.invalidate() }
+    /** A slot tapped / held. */
+    var onDockTap: ((Int) -> Unit)? = null
+    var onDockLong: ((Int) -> Unit)? = null
+    private val dockRect = RectF()
+    private var dockIcon = 0f
+    private var dockPressed = -1
+    private var dockDown = false
+    private var dockLongFired = false
+    private val dockHold = Runnable {
+        dockLongFired = true
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        val slot = dockPressed
+        dockPressed = -1
+        keysView.invalidate()
+        onDockLong?.invoke(slot)
+    }
+
+    /** Takes the dock's band from the display's area (after the layout placed the display). */
+    private fun carveDock() {
+        dockRect.setEmpty()
+        if (dockPos == Settings.DOCK_OFF || screenRect.isEmpty) return
+        val r = Rect(screenRect)
+        val d = resources.displayMetrics.density
+        val slot = r.width().toFloat() / dockSlots
+        val icon = minOf(slot * 0.62f, 52 * d, r.height() * 0.09f)
+        val h = icon + 2 * minOf(9 * d, icon * 0.3f)
+        val nh = r.height() - h
+        val nw = nh * r.width() / r.height()
+        val left = r.left + (r.width() - nw) / 2
+        if (dockPos == Settings.DOCK_TOP) {
+            dockRect.set(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.top + h)
+            screenRect.set(left.toInt(), Math.ceil((r.top + h).toDouble()).toInt(), (left + nw).toInt(), r.bottom)
+        } else {
+            dockRect.set(r.left.toFloat(), r.bottom - h, r.right.toFloat(), r.bottom.toFloat())
+            screenRect.set(left.toInt(), r.top, (left + nw).toInt(), (r.bottom - h).toInt())
+        }
+        dockIcon = icon
+    }
+
+    private fun drawDock(c: Canvas) {
+        if (dockRect.isEmpty) return
+        val d = resources.displayMetrics.density
+        val p = paint
+        val r = dockRect
+        val inset = 3 * d
+        val bar = RectF(r.left + inset, r.top + inset, r.right - inset, r.bottom - inset)
+        val rad = minOf(14 * d, bar.height() / 3)
+        // Dark glass, like the keys: see-through with a light rim.
+        p.shader = null
+        p.style = Paint.Style.FILL
+        p.color = if (light) 0x26000000 else 0x66000000
+        c.drawRoundRect(bar, rad, rad, p)
+        p.shader = LinearGradient(0f, bar.top, 0f, bar.bottom, 0x22FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+        c.drawRoundRect(bar, rad, rad, p)
+        p.shader = null
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = maxOf(1f, 0.8f * d)
+        p.color = if (light) 0x40000000 else 0x50FFFFFF
+        c.drawRoundRect(bar, rad, rad, p)
+        val slot = r.width() / dockSlots
+        val s = dockIcon
+        for (i in 0 until dockSlots) {
+            val cx = r.left + slot * (i + 0.5f)
+            val cy = r.centerY()
+            val bmp = dockIcons.getOrNull(i)
+            if (bmp != null) {
+                p.style = Paint.Style.FILL
+                p.color = Color.BLACK
+                p.alpha = if (i == dockPressed) 140 else 255
+                c.drawBitmap(bmp, null, RectF(cx - s / 2, cy - s / 2, cx + s / 2, cy + s / 2), p)
+                p.alpha = 255
+            } else {
+                // An empty slot: a faint ring with a plus (tapping it picks the dock's apps).
+                p.style = Paint.Style.STROKE
+                p.strokeWidth = maxOf(1f, 1.4f * d)
+                p.color = if (light) 0x50000000 else if (i == dockPressed) 0xA0FFFFFF.toInt() else 0x50FFFFFF
+                c.drawCircle(cx, cy, s * 0.34f, p)
+                c.drawLine(cx - s * 0.14f, cy, cx + s * 0.14f, cy, p)
+                c.drawLine(cx, cy - s * 0.14f, cx, cy + s * 0.14f, p)
+            }
+        }
+        p.style = Paint.Style.FILL
+    }
+
+    private fun dockSlotAt(x: Float, y: Float): Int =
+        if (!dockRect.contains(x, y)) -1 else ((x - dockRect.left) / (dockRect.width() / dockSlots)).toInt().coerceIn(0, dockSlots - 1)
+
+    /** Touches that start on the dock are the dock's: a tap launches, a hold opens the picker. */
+    private fun dockTouch(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val slot = dockSlotAt(e.x, e.y)
+                if (slot < 0) return false
+                dockDown = true
+                dockPressed = slot
+                dockLongFired = false
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                postDelayed(dockHold, 550)
+                keysView.invalidate()
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (!dockDown) return false
+                dockDown = false
+                removeCallbacks(dockHold)
+                val slot = dockPressed
+                dockPressed = -1
+                keysView.invalidate()
+                if (!dockLongFired && slot >= 0 && dockSlotAt(e.x, e.y) == slot) onDockTap?.invoke(slot)
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (!dockDown) return false
+                dockDown = false
+                removeCallbacks(dockHold)
+                dockPressed = -1
+                keysView.invalidate()
+                return true
+            }
+            else -> return dockDown
+        }
+    }
+
     /** Show the square D-pad under the keys (its space is kept either way). */
     var dpadOn = false
         set(v) { field = v; requestLayout(); invalidate(); keysView.invalidate() }
@@ -317,6 +454,36 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     var shineWidth = 50
         set(v) { field = v; keysView.invalidate() }
 
+    /** Key glass opacity 0..1 (1 = the stock look). */
+    var keyOpacity = 1f
+        set(v) { field = v; keysView.invalidate() }
+    /** Key colour (0xRRGGBB), or null for the skin's own glass; glyphs pick dark or light to match. */
+    var keyColor: Int? = null
+        set(v) { field = v; keysView.invalidate() }
+    /** Frosted keys: the wallpaper, blurred, laid out like the backdrop (null: no frosting). */
+    var keyFrost: Bitmap? = null
+        set(v) { field = v; frostLayer = null; keysView.invalidate() }
+    /** [keyFrost] rendered once at the view's size (rebuilt on a new picture or size), so each frame
+     *  only copies pixels: no per-frame scaling, which flickered while the keys animate. */
+    private var frostLayer: Bitmap? = null
+
+    private fun frostLayer(): Bitmap? {
+        val src = keyFrost ?: return null
+        val have = frostLayer
+        if (have != null && have.width == width && have.height == height) return have
+        if (width <= 0 || height <= 0) return null
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val k = maxOf(width.toFloat() / src.width, height.toFloat() / src.height)
+        val m = Matrix().apply {
+            setScale(k, k)
+            postTranslate((width - src.width * k) / 2, (height - src.height * k) / 2)
+        }
+        Canvas(out).drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG))
+        frostLayer = out
+        return out
+    }
+    private val keyClipPath = Path()
+
     private val tiltListener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
             SensorManager.getRotationMatrixFromVector(rot, e.values)
@@ -383,6 +550,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     private val keysView = object : View(ctx) {
         override fun onDraw(c: Canvas) {
             drawAlertLight(c)
+            drawDock(c)
             if (specActive) {
                 val moving = stepLights()
                 for (k in specKeys) drawKey(c, k, raised = true)
@@ -576,6 +744,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         computeLayout(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec))
+        // (computeLayout keeps the old rects for an empty size: carve only freshly placed ones)
+        if (MeasureSpec.getSize(widthMeasureSpec) > 0 && MeasureSpec.getSize(heightMeasureSpec) > 0) carveDock()
         // The display's place goes in its layout params, so the frame layout puts it there in one
         // pass (moving a SurfaceView twice per layout costs a compositor transaction each time).
         (screen.layoutParams as? LayoutParams)?.let { lp ->
@@ -817,16 +987,29 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         val p = paint
         val d = resources.displayMetrics.density
         val r = 2.5f * d
+        val custom = keyColor
         val tint = when (key.vk) {
             Keymap.VK_TTALK -> 0x1E9C3A
             Keymap.VK_TEND -> 0xC0281E
-            else -> if (light) 0xFFFFFF else 0x0A0C10
+            else -> custom ?: if (light) 0xFFFFFF else 0x0A0C10
         }
         val tinted = key.vk == Keymap.VK_TTALK || key.vk == Keymap.VK_TEND
         p.style = Paint.Style.FILL
-        // Glass body.
-        val a1 = if (tinted) 0x90 else if (light) 0x60 else 0x58
-        val a2 = if (tinted) 0x60 else if (light) 0x30 else 0x30
+        // Frosted glass: the blurred wallpaper behind the key (Key Blur).
+        val frost = if (key.kind != KIND_LOCK) frostLayer() else null
+        if (frost != null) {
+            c.save()
+            keyClipPath.reset()
+            keyClipPath.addRoundRect(k, r, r, Path.Direction.CW)
+            c.clipPath(keyClipPath)
+            p.alpha = (255 * keyOpacity.coerceAtLeast(0.35f)).toInt()
+            c.drawBitmap(frost, 0f, 0f, p)
+            p.alpha = 255
+            c.restore()
+        }
+        // Glass body; a picked colour is a fuller tint. Key Opacity scales it.
+        val a1 = ((if (tinted) 0x90 else if (custom != null) 0xC0 else if (light) 0x60 else 0x58) * keyOpacity).toInt()
+        val a2 = ((if (tinted) 0x60 else if (custom != null) 0x90 else if (light) 0x30 else 0x30) * keyOpacity).toInt()
         p.shader = LinearGradient(0f, k.top, 0f, k.bottom, (a1 shl 24) or tint, (a2 shl 24) or tint, Shader.TileMode.CLAMP)
         c.drawRoundRect(k, r, r, p)
         // Gloss over the upper half, ending in a crisp line.
@@ -867,6 +1050,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         // Mark (with the key backlight: drawn dimmer, then lit over it; see glyph()).
         val markColor = when {
             tinted -> 0xF0FFFFFF.toInt()
+            // A picked key colour: dark glyphs on light keys, light glyphs on dark ones.
+            custom != null -> if (Color.luminance(0xFF000000.toInt() or custom) > 0.45f) 0xE01A1C20.toInt() else 0xF0F2F3F5.toInt()
             light -> 0xD0303236.toInt()
             else -> 0xE8E6E8EE.toInt()
         }
@@ -1334,6 +1519,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (dockTouch(e)) return true
         val idx = e.actionIndex
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {

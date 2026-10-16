@@ -15,6 +15,7 @@ import android.telecom.CallAudioState
 import android.telecom.DisconnectCause
 import android.telecom.InCallService
 import android.telecom.TelecomManager
+import android.telecom.VideoProfile
 import android.util.Log
 
 /*
@@ -23,7 +24,9 @@ import android.util.Log
  * With WMDroid holding the dialer role, Telecom binds WmInCallService for every call. Calls that
  * Windows Mobile placed (and that the running emulator can show) stay here: Windows Mobile's own
  * call screen is the UI, and its End / Mute / Speaker / Hold reach the real call through this
- * service. Every other call, and any WM call once the emulator cannot show it, is handed to the
+ * service. So do incoming calls while the emulator is on screen: Windows Mobile rings, and its
+ * Answer / Ignore / End act on the real call. Every other call, and any WM call once the emulator
+ * cannot show it, is handed to the
  * phone's own dialer by ending this process: Telecom then connects the system dialer's in-call UI
  * to the ongoing calls (AOSP InCallController: when the default dialer's InCallService dies, its
  * EmergencyInCallServiceConnection switches to the system dialer). The same happens by itself if
@@ -45,10 +48,16 @@ object CallLink {
     const val HANDOFF = 6        // give every call to the phone's dialer
     const val DTMF = 7           // data: token, arg1: the character
     const val PLACING = 8        // data: token, number (sent just before TelecomManager.placeCall)
+    const val ANSWER = 9         // data: token (an incoming call: WM's Answer)
+    const val REJECT = 10        // data: token (an incoming call: WM's Ignore)
+    const val KEEP = 11          // data: token (Windows Mobile rings for this incoming call)
+    const val RELEASE = 12       // data: token (Windows Mobile cannot ring: the phone's dialer takes it)
+    const val SHOWING = 13       // arg1: 1 while the emulator can ring and show incoming calls
     // call -> main
     const val STATE = 101        // data: token, state, cause
     const val AUDIO = 102        // arg1: muted, arg2: CallAudioState route
     const val HANDED_OFF = 103   // the call process is about to end
+    const val RINGING = 104      // data: token, number ("" when withheld): an incoming call to ring in WM
 
     const val KEY_TOKEN = "jp.net.seventhreeseven.wmdroid.WM_CALL"
     const val KEY_STATE = "state"
@@ -76,11 +85,15 @@ class WmInCallService : InCallService() {
 
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
+        if (call.details.callDirection == Call.Details.DIRECTION_INCOMING) {
+            incoming(call)
+            return
+        }
         val token = tokenOf(call)
         val link = CallLinkService.peer
         Log.i(TAG, "call added: token=$token linked=${link != null} state=${call.details.state}")
         if (token == null || link == null || call.details.callDirection != Call.Details.DIRECTION_OUTGOING) {
-            // Not Windows Mobile's (another app, an incoming call) or no emulator to show it.
+            // Not Windows Mobile's (another app) or no emulator to show it.
             handOff("not a Windows Mobile call")
             return
         }
@@ -89,8 +102,44 @@ class WmInCallService : InCallService() {
         report(call)
     }
 
+    /** The token of the incoming call waiting for Windows Mobile to ring (KEEP). */
+    private var keepToken: String? = null
+    private val keepTimeout = Runnable { handOff("Windows Mobile did not ring in time") }
+
+    /**
+     * An incoming call rings in Windows Mobile when it comes in alone while the emulator shows
+     * Windows Mobile; otherwise (or if WM does not ring within a few seconds) the phone's dialer
+     * takes it. Telecom plays the phone's ringtone meanwhile (this service has no
+     * IN_CALL_SERVICE_RINGING), and the main process silences it when Windows Mobile rings instead.
+     */
+    private fun incoming(call: Call) {
+        val linked = CallLinkService.peer != null
+        Log.i(TAG, "incoming call: linked=$linked showing=${CallLinkService.showing} calls=${calls.size} state=${call.details.state}")
+        if (!linked || !CallLinkService.showing || owned.isNotEmpty() || calls.size > 1) {
+            handOff("incoming call Windows Mobile cannot show")
+            return
+        }
+        val token = "in-${System.currentTimeMillis()}"
+        owned[token] = call
+        call.registerCallback(callback)
+        val number = if (call.details.handlePresentation == TelecomManager.PRESENTATION_ALLOWED)
+            call.details.handle?.schemeSpecificPart.orEmpty() else ""
+        keepToken = token
+        main.postDelayed(keepTimeout, 6000)
+        CallLinkService.send(Message.obtain(null, CallLink.RINGING).apply {
+            data = Bundle().apply {
+                putString(CallLink.KEY_TOKEN, token)
+                putString(CallLink.KEY_NUMBER, number)
+            }
+        })
+    }
+
     override fun onCallRemoved(call: Call) {
         call.unregisterCallback(callback)
+        if (keepToken != null && owned[keepToken] == call) {
+            main.removeCallbacks(keepTimeout)
+            keepToken = null
+        }
         owned.entries.removeAll { it.value == call }
         super.onCallRemoved(call)
     }
@@ -107,6 +156,7 @@ class WmInCallService : InCallService() {
         val token = owned.entries.firstOrNull { it.value == call }?.key ?: return
         val state = when (call.details.state) {
             Call.STATE_NEW, Call.STATE_CONNECTING, Call.STATE_DIALING, Call.STATE_PULLING_CALL -> "dialing"
+            Call.STATE_RINGING -> "ringing"
             Call.STATE_ACTIVE -> "active"
             Call.STATE_HOLDING -> "held"
             Call.STATE_DISCONNECTING -> return
@@ -137,6 +187,13 @@ class WmInCallService : InCallService() {
             CallLink.HOLD -> CallLink.token(m)?.let { owned[it] }?.let { if (m.arg1 != 0) it.hold() else it.unhold() }
             CallLink.DTMF -> CallLink.token(m)?.let { owned[it] }?.let { it.playDtmfTone(m.arg1.toChar()); it.stopDtmfTone() }
             CallLink.HANDOFF -> handOff("asked by the emulator")
+            CallLink.ANSWER -> CallLink.token(m)?.let { owned[it] }?.answer(VideoProfile.STATE_AUDIO_ONLY)
+            CallLink.REJECT -> CallLink.token(m)?.let { owned[it] }?.reject(false, null)
+            CallLink.KEEP -> if (CallLink.token(m) == keepToken) {
+                main.removeCallbacks(keepTimeout)
+                keepToken = null
+            }
+            CallLink.RELEASE -> if (CallLink.token(m)?.let { owned.containsKey(it) } == true) handOff("Windows Mobile cannot ring")
         }
     }
 
@@ -191,6 +248,7 @@ class CallLinkService : Service() {
         override fun handleMessage(m: Message) {
             when (m.what) {
                 CallLink.HELLO -> { hello(m.replyTo); return }
+                CallLink.SHOWING -> { showing = m.arg1 != 0; return }
                 CallLink.PLACING -> {
                     val token = CallLink.token(m) ?: return
                     pending = Triple(token, m.data?.getString(CallLink.KEY_NUMBER) ?: "", System.currentTimeMillis())
@@ -214,6 +272,7 @@ class CallLinkService : Service() {
     private val death = IBinder.DeathRecipient {
         Handler(Looper.getMainLooper()).post {
             peer = null
+            showing = false
             WmInCallService.instance?.peerGone()
         }
     }
@@ -221,12 +280,15 @@ class CallLinkService : Service() {
     override fun onUnbind(intent: Intent?): Boolean {
         // The emulator closed normally; it hands its calls off itself before that.
         peer = null
+        showing = false
         return false
     }
 
     companion object {
         private const val TAG = "WMDroidCall"
         @Volatile var peer: Messenger? = null
+        /** The emulator is on screen with Windows Mobile's phone ready: incoming calls may ring there. */
+        @Volatile var showing = false
         /** Token, number and time of the call the emulator is placing, for when Telecom drops our extras. */
         @Volatile private var pending: Triple<String, String, Long>? = null
 

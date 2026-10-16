@@ -12,7 +12,9 @@ class LauncherActivity : Activity() {
         val p = s.profile
         val v = s.variant
         val ready = p != null && v != null && ImageStore.find(this, p, v) != null
-        startActivity(Intent(this, if (ready) EmulatorActivity::class.java else SetupActivity::class.java))
+        // A running emulator (e.g. the phone's home screen, HomeActivity) is brought forward, not doubled.
+        startActivity(Intent(this, if (ready) EmulatorActivity::class.java else SetupActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         finish()
     }
 }

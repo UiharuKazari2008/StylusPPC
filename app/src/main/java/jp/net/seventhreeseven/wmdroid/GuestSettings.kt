@@ -13,7 +13,7 @@ import java.io.File
  *   options (value=label;...) for a choice, min:max for a slider; an action's value is its command
  */
 object GuestSettings {
-    enum class Kind(val id: String) { BOOL("bool"), CHOICE("choice"), SLIDER("slider"), ACTION("action") }
+    enum class Kind(val id: String) { BOOL("bool"), CHOICE("choice"), SLIDER("slider"), ACTION("action"), COLOR("color") }
 
     class Entry(
         val page: String, val key: String, val kind: Kind, val label: String,
@@ -32,6 +32,18 @@ object GuestSettings {
     private fun slider(page: String, key: String, label: String, min: Int, max: Int, get: (Settings) -> Int, set: (Settings, Int) -> Unit) =
         Entry(page, key, Kind.SLIDER, label, { get(it).toString() }, { s, v -> v.toIntOrNull()?.let { set(s, it.coerceIn(min, max)) } },
             min = min, max = max)
+
+    /**
+     * A colour ("#RRGGBB", or "auto"). Android shows a colour picker; Windows Mobile's settings app
+     * gets it as a choice of the preset colours (plus the current one when it is custom).
+     */
+    private fun color(page: String, key: String, label: String, get: (Settings) -> String, set: (Settings, String) -> Unit) =
+        Entry(page, key, Kind.COLOR, label, get, { s, v -> if (v == "auto" || Regex("#[0-9A-Fa-f]{6}").matches(v)) set(s, v.uppercase().replace("AUTO", "auto")) },
+            options = COLOR_PRESETS)
+
+    val COLOR_PRESETS = listOf("auto" to "Glass (skin default)", "#101215" to "Black", "#F2F3F5" to "White",
+        "#4A4F57" to "Graphite", "#B3262E" to "Red", "#1F5FC0" to "Blue", "#1E8E4A" to "Green",
+        "#6B3FB8" to "Purple", "#E07A1F" to "Orange", "#D9468F" to "Pink")
 
     /** A button: the guest sends [command] (handled by the app like any mailbox message). */
     private fun action(page: String, key: String, label: String, command: String) =
@@ -100,6 +112,9 @@ object GuestSettings {
         slider("Design", "opacity", "Skin Opacity", 0, 100, { it.backdropOpacity }, { s, v -> s.backdropOpacity = v }),
         bool("Design", "theme", "Sync Android's Color Theme", { it.syncTheme }, { s, v -> s.syncTheme = v }),
         bool("Design", "homewall", "Sync Android's Wallpaper", { it.syncWallpaper }, { s, v -> s.syncWallpaper = v }),
+        slider("Design", "keyopacity", "Key Opacity", 0, 100, { it.keyOpacity }, { s, v -> s.keyOpacity = v }),
+        slider("Design", "keyblur", "Key Blur", 0, 25, { it.keyBlur }, { s, v -> s.keyBlur = v }),
+        color("Design", "keycolor", "Key Color", { it.keyColor }, { s, v -> s.keyColor = v }),
         bool("Design", "shine", "Enable Gyro Key Shine", { it.keyShine }, { s, v -> s.keyShine = v }),
         slider("Design", "shinebright", "Brightness", 0, 100, { it.shineBrightness }, { s, v -> s.shineBrightness = v }),
         slider("Design", "shinewidth", "Width", 0, 100, { it.shineWidth }, { s, v -> s.shineWidth = v }),
@@ -153,9 +168,23 @@ object GuestSettings {
         choice("Power", "bgtimer", "After timer",
             listOf("0" to "Immediately") + Settings.BACKGROUND_MINUTES.map { it.toString() to (if (it == 1) "1 minute" else "$it minutes") },
             { bgTimer(it).toString() }, { s, v -> setBg(s, bgKind(s), v.toInt()) }),
+        // ---- Launcher (AndroidApps.kt): PocketStylus as the phone's home app, Android apps in WM, the dock ----
+        // The actions' commands come back from WM as mailbox lines ("launcher role", ...) and open
+        // Android's screens; DeviceSettingsActivity runs the same commands.
+        action("Launcher", "launcherrole", "Use as Phone Launcher…", AndroidApps.CMD_ROLE),
+        choice("Launcher", "homegoes", "Home Goes To", listOf("today" to "Today", "start" to "Start Menu"),
+            { it.launcherHome }, { s, v -> s.launcherHome = v }),
+        bool("Launcher", "androidfolder", "Show Android Apps Folder", { it.androidFolder }, { s, v -> s.androidFolder = v }),
+        action("Launcher", "hiddenapps", "Hidden Apps…", AndroidApps.CMD_HIDDEN),
+        action("Launcher", "pinnedapps", "Pinned Shortcuts…", AndroidApps.CMD_PINS),
+        choice("Launcher", "dockpos", "Android App Dock", listOf(Settings.DOCK_OFF to "Off", Settings.DOCK_TOP to "Top of Screen",
+            Settings.DOCK_BOTTOM to "Bottom of Screen"), { it.dockPos }, { s, v -> s.dockPos = v }),
+        slider("Launcher", "docksize", "Dock Size (apps)", 4, 8, { it.dockSize }, { s, v -> s.dockSize = v }),
+        action("Launcher", "dockapps", "Dock Apps…", AndroidApps.CMD_DOCK),
         // ---- Device (applies on restart) ----
-        bool("Device", "shape", "Use the phone's screen shape", { it.screenMode == Settings.SCREEN_PHONE },
-            { s, v -> s.screenMode = if (v) Settings.SCREEN_PHONE else Settings.SCREEN_NATIVE }, restart = true),
+        choice("Device", "res", "Screen resolution", listOf(Settings.SCREEN_AUTO to "Phone shape (auto)",
+            "480x854" to "480×854 (FWVGA)", "480x800" to "480×800 (WVGA)", "480x640" to "480×640 (VGA)",
+            "480x480" to "480×480 (square)"), { it.screenRes }, { s, v -> s.screenRes = v }, restart = true),
         choice("Device", "ram", "Memory", listOf("0" to "Default", "64" to "64 MB", "128" to "128 MB", "192" to "192 MB", "256" to "256 MB"),
             { it.memMB.toString() }, { s, v -> s.memMB = v.toInt() }, restart = true),
         // Windows Mobile's logical DPI; the helper writes it and restarts WM once (guest/Helper/Dpi.cs).
@@ -171,12 +200,17 @@ object GuestSettings {
     fun write(file: File, settings: Settings) {
         val text = buildString {
             for (e in entries) {
+                val value = e.get(settings)
                 val extra = when (e.kind) {
                     Kind.CHOICE -> e.options.joinToString(";") { "${it.first}=${it.second}" }
+                    Kind.COLOR -> (e.options + if (e.options.none { it.first.equals(value, true) }) listOf(value to "Custom $value") else emptyList())
+                        .joinToString(";") { "${it.first}=${it.second}" }
                     Kind.SLIDER -> "${e.min}:${e.max}"
                     Kind.BOOL, Kind.ACTION -> ""
                 }
-                append(listOf(e.page, e.key, e.kind.id, e.label, e.get(settings), if (e.restart) "1" else "0", extra)
+                // The guest app knows bool/choice/slider/action: a colour goes as a choice.
+                val kind = if (e.kind == Kind.COLOR) Kind.CHOICE.id else e.kind.id
+                append(listOf(e.page, e.key, kind, e.label, value, if (e.restart) "1" else "0", extra)
                     .joinToString("\t")).append("\r\n")
             }
         }

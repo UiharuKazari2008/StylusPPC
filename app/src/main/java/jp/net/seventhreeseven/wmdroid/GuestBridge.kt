@@ -35,6 +35,12 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestRadioRefresh() {}
         /** Phone calls: a "call ..." line from the helper, without the prefix (CallBridge). */
         fun onGuestCall(line: String) {}
+        /** Contacts and calendar sync: a "pim ..." line from the helper, without the prefix (PimSync). */
+        fun onGuestPim(line: String) {}
+        /** Infrared: an "irda ..." line from the helper, without the prefix (InfraredBridge). */
+        fun onGuestIrda(line: String) {}
+        /** Text messages: a "sms ..." line from the helper, without the prefix (SmsBridge). */
+        fun onGuestSms(line: String) {}
         /** "clip": Windows Mobile's clipboard text is in clip_out.txt (ClipboardBridge). */
         fun onGuestClip() {}
         /** "ime open" / "ime hide", without the prefix (ImeBridge). */
@@ -43,6 +49,10 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestRemount() {}
         /** The helper reported WM's Buttons assignments (now in Settings.hwButtonMap). */
         fun onGuestButtons() {}
+        /** "android ..." from a launcher in WM's Android Apps folder, without the prefix (LauncherBridge). */
+        fun onGuestAndroid(line: String) {}
+        /** A Launcher page button in WM's settings app: AndroidApps.CMD_* ("launcher role", ...). */
+        fun onGuestLauncher(command: String) {}
     }
 
     private val root = File(ctx.filesDir, "overlay")
@@ -75,7 +85,8 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         // arguments. Plus the other guest programs the helper installs (GPS Test, Send via Bluetooth).
         for ((asset, name) in listOf("Autorun.exe" to "autorun.exe", "WMDroid.exe" to "helper.exe",
                 "GpsTest.exe" to "GpsTest.exe", "SendBluetooth.exe" to "SendBluetooth.exe",
-                "NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab")) {
+                "NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab",
+                "MAPIlib.dll" to "MAPIlib.dll", "OpenNETCF.dll" to "OpenNETCF.dll")) {  // texts on WM 6.5.3 (Sms.cs)
             val exe = File(autorunDir, name)
             ctx.assets.open("guest/$asset").use { input ->
                 val bytes = input.readBytes()
@@ -106,6 +117,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         add(".wmdroid" to box.path)
         if (deviceWallpaper.exists()) add("device_wallpaper.bmp" to deviceWallpaper.path)
         add("Bluetooth" to BluetoothBridge.receiveDir(ctx).path)  // files received over Bluetooth
+        add(AndroidApps.GUEST_DIR to AndroidApps.hostDir(ctx).apply { mkdirs() }.path)  // Android apps' launchers (AndroidApps)
         addAll(StorageBridge.folderOverlays(ctx, settings))
     }
 
@@ -113,7 +125,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
     fun writeState() {
         val text = buildString {
             appendLine("storage.mode=${settings.storageMode}")
-            appendLine("screen.mode=${settings.screenMode}")
+            appendLine("screen.res=${settings.screenRes}")
             appendLine("resume=${settings.resumeSession}")
             appendLine("stats=${settings.showStats}")
             appendLine("dpi=${settings.guestDpi}")  // Screen DPI (guest/Helper/Dpi.cs)
@@ -197,9 +209,14 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             line.startsWith("share ") -> listener.onGuestShare(line.removePrefix("share ").trim())
             line == "radio refresh" -> listener.onGuestRadioRefresh()  // virtual modem (core/src/board/modem.h)
             line.startsWith("call ") -> listener.onGuestCall(line.removePrefix("call ").trim())  // CallBridge
+            line.startsWith("pim ") -> listener.onGuestPim(line.removePrefix("pim ").trim())  // PimSync
+            line.startsWith("irda ") -> listener.onGuestIrda(line.removePrefix("irda ").trim())  // InfraredBridge
+            line.startsWith("sms ") -> listener.onGuestSms(line.removePrefix("sms ").trim())  // SmsBridge
             line == "clip" -> listener.onGuestClip()  // ClipboardBridge
             line == "remount" -> listener.onGuestRemount()
             line.startsWith("ime ") -> listener.onGuestIme(line.removePrefix("ime ").trim())  // ImeBridge
+            line.startsWith("android ") -> listener.onGuestAndroid(line.removePrefix("android ").trim())  // LauncherBridge
+            line.startsWith("launcher ") -> listener.onGuestLauncher(line)  // Launcher page buttons (AndroidApps.CMD_*)
             line.startsWith("buttons ") -> {  // Keymap.HwButtons routes the buttons by it, helper or not
                 settings.hwButtonMap = line.removePrefix("buttons ").trim()
                 listener.onGuestButtons()
@@ -222,7 +239,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         var restart = false
         when (key) {
             "storage.mode" -> if (settings.storageMode != value) { settings.storageMode = value; restart = true }
-            "screen.mode" -> if (settings.screenMode != value) { settings.screenMode = value; restart = true }
+            "screen.res" -> if (settings.screenRes != value) { settings.screenRes = value; restart = true }
             "resume" -> settings.resumeSession = value == "true"
             "stats" -> settings.showStats = value == "true"
             else -> return

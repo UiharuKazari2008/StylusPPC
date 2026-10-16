@@ -2,6 +2,7 @@
 #include "pcmcia.h"
 #include "camera.h"  // WMDroid camera bridge
 #include "modem.h"
+#include "irda.h"
 #include "codepatch.h"  // host fixes to driver code in guest RAM
 #include "audio.h"
 #include "de_devices.h"
@@ -135,6 +136,9 @@ Machine::Machine(const MachineConfig &c)
     modem.reset(new Modem());
     modem->toGuest = [this](const std::string &s) { for (char c : s) uart0.feed((uint8_t)c); };
     uart0.peer = [this](uint8_t c) { modem->fromGuest(c); };
+    irda.reset(new Irda(uart2));  // IR port: UART2 as COM2: for irsir.dll (docs/research-irda.md)
+    uart2.peer = [this](uint8_t c) { irda->fromGuest(c); };
+    uart2.txLevel = true;  // the IR driver writes whole frames: level TX interrupt (s3c2410.h)
     codePatch.reset(new CodePatcher(cpu, bus));
     cpu.codeScanCtx = codePatch.get();
     cpu.codeScan = [](void *ctx, uint32_t pa) { static_cast<CodePatcher *>(ctx)->scanPage(pa); };
@@ -268,6 +272,7 @@ void Machine::writeBootArgs(bool soft) {
 
 void Machine::hardReset() {
     modem->reset();
+    irda->reset();
     codePatch->onGuestReset();
     cpu.reset();
     gpio.gstatus2 = 0;
@@ -287,6 +292,7 @@ void Machine::softReset() {
     folderShare->onGuestReset();
     dePage->nled.reset(dePage->leds);  // notification LED / vibrator off (nled.h)
     modem->reset();
+    irda->reset();
     codePatch->onGuestReset();
     clk.clkcon &= ~8u;     // not asleep
     sleepNoticed = false;
@@ -326,6 +332,7 @@ bool Machine::runFor(uint64_t ns) {
         pwm.advance(now);
         rtc.advance(now);
         dma->advance(now);
+        irda->service(now);  // frames from other devices into UART2's receiver
         if (resetRequested) softReset();
         if (cpu.mmuDisabled) {
             // The OAL's reboot turns the MMU off and jumps to the boot code: a warm restart that
@@ -335,6 +342,7 @@ bool Machine::runFor(uint64_t ns) {
             folderShare->onGuestReset();
             dePage->nled.reset(dePage->leds);  // notification LED / vibrator off (nled.h)
             modem->reset();
+            irda->reset();
             bootComplete = false;
             idleSeconds = 0;
         }

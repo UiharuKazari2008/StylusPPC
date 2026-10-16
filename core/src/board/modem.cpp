@@ -69,10 +69,16 @@ void Modem::fromGuest(uint8_t c) {
         // AT+CMGS: hex PDU, ended by Ctrl-Z (send) or Esc (cancel).
         if (c == 0x1A) {
             inPdu = false;
-            log("<-", "<sms pdu " + std::to_string(line.size()) + " chars>");
+            log("<-", "<sms pdu " + line + ">");
+            // The app sends the message from the phone; the command's result waits for its answer.
+            std::string hex;
+            for (char h : line) if (isxdigit((unsigned char)h)) hex += (char)toupper((unsigned char)h);
             line.clear();
-            // Sending SMS from Windows Mobile is not bridged (yet): report a failure, never a fake success.
-            final(-1000 - 500, {});
+            smsPending = nextMr;
+            nextMr = nextMr % 255 + 1;
+            smsDeadline = now + 40 * kSecond;
+            LOGI("modem: Windows Mobile sends a text message (mr %d)", smsPending);
+            event("smssend " + std::to_string(smsPending) + " " + hex);
         } else if (c == 0x1B) {
             inPdu = false;
             line.clear();
@@ -177,7 +183,7 @@ int Modem::command(const std::string &cmd, std::vector<std::string> &out, bool &
             case 'Q': st.quiet = n != 0; return 0;
             case 'Z': st = Settings(); return 0;
             case 'H': hangup(0, true); return 0;
-            case 'A': return 3;  // nothing is ringing (incoming calls are not bridged)
+            case 'A': return answer();
             case 'O': return 3;
             case 'I': out.push_back("PocketStylus virtual GSM modem"); return 0;
             default: return 0;  // X, S, &C, &D, &F, &W, L, M, ...: accepted
@@ -293,8 +299,8 @@ int Modem::command(const std::string &cmd, std::vector<std::string> &out, bool &
             bool intl = !c.number.empty() && c.number[0] == '+';
             // rilgsm drops an entry whose number is not followed by ",<alpha>,<priority>"; the call list
             // then looks empty and WM's phone stack ends the call as unreachable.
-            out.push_back("+CLCC: " + std::to_string(c.id) + ",0," + std::to_string(c.stat) + ",0,0,\"" + c.number +
-                          "\"," + (intl ? "145" : "129") + ",\"\",0");
+            out.push_back("+CLCC: " + std::to_string(c.id) + "," + (c.incoming ? "1," : "0,") + std::to_string(c.stat) +
+                          ",0,0,\"" + c.number + "\"," + (c.number.empty() ? "128" : intl ? "145" : "129") + ",\"\",0");
         }
         return 0;
     }
@@ -305,14 +311,28 @@ int Modem::command(const std::string &cmd, std::vector<std::string> &out, bool &
         return dial(num + ";", out);
     }
     if (name == "+CHUP" || name == "*EVH") { hangup(0, true); return 0; }
-    if (name == "*EVA") return 3;
+    if (name == "*EVA") return answer();
     if (name == "+CHLD") {
         if (test) { out.push_back("+CHLD: (0,1,1x,2,2x,3,4)"); return 0; }
         if (!set || a.empty() || a[0].empty()) return st.cmee ? -3 : 4;
         int n = a[0][0] - '0';
         int x = a[0].size() > 1 ? atoi(a[0].c_str() + 1) : 0;
+        bool ringing = false;
+        for (const Call &c : calls) if (c.stat >= 4) ringing = true;
+        if ((n == 1 || n == 2) && !x && ringing) {
+            // Accept the ringing / waiting call (rilgsm's RIL_Answer is AT+CHLD=2): the active call
+            // is released (1) or held (2) first.
+            for (size_t i = calls.size(); i-- > 0;) {
+                Call &c = calls[i];
+                if (c.stat != 0) continue;
+                if (n == 1) endCall(i, true);
+                else { setStat(c, 1); event("hold " + std::to_string(c.id) + " 1"); }
+            }
+            return answer() == 0 ? 0 : (st.cmee ? -3 : 4);
+        }
         if (n == 0) {
-            for (size_t i = calls.size(); i-- > 0;) if (calls[i].stat == 1) endCall(i, true);
+            // Release the held calls, or reject ("user busy") a ringing / waiting one.
+            for (size_t i = calls.size(); i-- > 0;) if (calls[i].stat == 1 || calls[i].stat >= 4) endCall(i, true);
         } else if (n == 1) {
             if (x) hangup(x, true);
             else {
@@ -473,11 +493,7 @@ int Modem::dial(const std::string &arg, std::vector<std::string> &out) {
     if (number.empty()) return st.cmee ? -21 : 4;
     int reg = regStat();
     if (st.fun != 1 || (reg != 1 && reg != 5)) return st.cmee ? -30 : 3;  // no network service
-    int id = 1;
-    for (bool used = true; used && id < 8;) {
-        used = false;
-        for (const Call &c : calls) if (c.id == id) { used = true; id++; break; }
-    }
+    int id = freeId();
     if (id >= 8) return st.cmee ? -3 : 4;
     Call c;
     c.id = id;
@@ -493,11 +509,66 @@ int Modem::dial(const std::string &arg, std::vector<std::string> &out) {
     return kPending;
 }
 
+int Modem::freeId() const {
+    int id = 1;
+    for (bool used = true; used && id < 8;) {
+        used = false;
+        for (const Call &c : calls) if (c.id == id) { used = true; id++; break; }
+    }
+    return id;
+}
+
+// An incoming call (the app's ring()): RING / +CRING with +CLIP, repeated every 3 s while it rings,
+// and *ECAV ccstatus 6 (alerting, mobile terminated). rilgsm reads the call from +CLCC (direction 1,
+// stat 4) and WM's phone shows its incoming-call screen; ATA answers, ATH / +CHUP rejects.
+void Modem::startRing(const std::string &number) {
+    Call c;
+    c.id = freeId();
+    c.stat = 4;
+    c.incoming = true;
+    c.number = number;
+    c.since = now;
+    c.deadline = now + kDialTimeout;  // the app confirms with callState(id, "ringing")
+    calls.push_back(c);
+    LOGI("modem: incoming call %d from %s", c.id, number.empty() ? "a withheld number" : number.c_str());
+    event("ringing " + std::to_string(c.id) + " " + (number.empty() ? "-" : number));
+    if (st.ecam) unsolicited(ecavLine(c, 6, 0));
+    sendRing(calls.back());
+}
+
+void Modem::sendRing(Call &c) {
+    c.nextRing = now + 3 * kSecond;
+    unsolicited(st.crc ? "+CRING: VOICE" : st.verbose ? "RING" : "2");
+    if (st.clip) {
+        bool intl = !c.number.empty() && c.number[0] == '+';
+        // A withheld number: empty, type 128, CLI validity 1 ("withheld by the caller").
+        unsolicited(c.number.empty() ? "+CLIP: \"\",128,,,,1" : "+CLIP: \"" + c.number + "\"," + (intl ? "145" : "129"));
+    }
+}
+
+// ATA / AT*EVA: answers the ringing call (WM's Answer). The app answers the real call.
+int Modem::answer() {
+    for (Call &c : calls) {
+        if (c.stat != 4 && c.stat != 5) continue;
+        LOGI("modem: Windows Mobile answers call %d", c.id);
+        c.deadline = 0;
+        setStat(c, 0);
+        event("answer " + std::to_string(c.id));
+        return 0;
+    }
+    return 3;  // nothing rings
+}
+
 // *ECAV: <ccid>,<ccstatus>,<calltype>[,<processid>,<exitcause>]. rilgsm turns ccstatus 1/2 into
 // "new outgoing", 3 into "connected" and 0 into "disconnected" (exit cause 17 = busy, else normal).
 std::string Modem::ecavLine(const Call &c, int ccstatus, int exitCause) const {
     std::string u = "*ECAV: " + std::to_string(c.id) + "," + std::to_string(ccstatus) + ",1";
     if (ccstatus == 0) u += ",8," + std::to_string(exitCause);
+    // An incoming call's number goes with every state: rilgsm takes the call's details from *ECAV, and
+    // without it WM's call screen says "Unknown" once the call is answered on the phone.
+    else if (c.incoming && !c.number.empty()) u += ",8,0";
+    if (c.incoming && !c.number.empty())
+        u += ",\"" + c.number + "\"," + (c.number[0] == '+' ? "145" : "129");
     return u;
 }
 
@@ -527,11 +598,12 @@ void Modem::endCall(size_t i, bool fromGuest) {
 void Modem::setStat(Call &c, int stat) {
     if (c.stat == stat) return;
     c.stat = stat;
-    // +CLCC stat -> *ECAV ccstatus: active 3, held 4, dialing 1 (calling), alerting 2 (connecting).
-    static const int cc[] = {3, 4, 1, 2};
+    // +CLCC stat -> *ECAV ccstatus: active 3, held 4, dialing 1 (calling), alerting 2 (connecting),
+    // incoming 6 (alerting), waiting 5.
+    static const int cc[] = {3, 4, 1, 2, 6, 5};
     bool answer = stat == 0 && dialing == c.id;
     if (st.ecam) {
-        std::string u = ecavLine(c, cc[stat & 3], 0);
+        std::string u = ecavLine(c, cc[stat % 6], 0);
         if (afterFinal) afterFinal->push_back(u);
         else unsolicited(u);
     }
@@ -616,6 +688,25 @@ void Modem::refresh() {
     refreshWanted = true;
 }
 
+void Modem::smsDeliver(const std::string &pduHex) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (smsIn.size() < 64) smsIn.push_back(pduHex);
+}
+
+void Modem::smsResult(int mr, bool sent) {
+    std::lock_guard<std::mutex> lk(mu);
+    smsResults.push_back({mr, sent});
+}
+
+void Modem::ring(const std::string &number) {
+    std::string n;
+    for (char c : number)
+        if (isdigit((unsigned char)c) || c == '+' || c == '*' || c == '#') n += c;
+    std::lock_guard<std::mutex> lk(mu);
+    ringWanted = true;
+    ringNumber = n;
+}
+
 std::string Modem::takeEvents() {
     std::lock_guard<std::mutex> lk(mu);
     std::string s;
@@ -627,11 +718,51 @@ std::string Modem::takeEvents() {
 void Modem::service(uint64_t nowNs) {
     now = nowNs;
     std::vector<HostCall> todo;
+    bool ringNow = false;
+    std::string ringFrom;
+    std::vector<std::pair<int, bool>> results;
+    std::vector<std::string> deliver;
     {
         std::lock_guard<std::mutex> lk(mu);
         if (netDirty) { applied = net; netDirty = false; }
         if (refreshWanted) { sentReg = -1; refreshWanted = false; }
         todo.swap(hostCalls);
+        results.swap(smsResults);
+        // Incoming messages wait for a quiet moment: no command line, no open AT+CMGS or dial.
+        if (claimedFlag && !inPdu && line.empty() && !smsPending && !dialing) deliver.swap(smsIn);
+        // A ring waits for the end of a command line the guest is sending (the codes would mix in).
+        if (ringWanted && (!claimedFlag || !(inPdu || !line.empty() || dialing))) {
+            ringNow = true;
+            ringFrom = ringNumber;
+            ringWanted = false;
+        }
+    }
+    for (auto &r : results) {
+        if (r.first != smsPending) continue;
+        smsPending = 0;
+        LOGI("modem: text message %d %s", r.first, r.second ? "sent" : "failed");
+        if (r.second) final(0, {"+CMGS: " + std::to_string(r.first)});
+        else final(-1000 - 500, {});
+    }
+    if (smsPending && now > smsDeadline) {
+        LOGI("modem: the app did not send text message %d", smsPending);
+        smsPending = 0;
+        final(-1000 - 500, {});
+    }
+    for (const std::string &pdu : deliver) {
+        // +CMT: ,<length of the TPDU in octets (without the SMSC field)>, then the PDU line.
+        size_t octets = pdu.size() / 2;
+        size_t smsc = pdu.size() >= 2 ? strtoul(pdu.substr(0, 2).c_str(), nullptr, 16) : 0;
+        LOGI("modem: incoming text message (%zu octets)", octets);
+        unsolicited("+CMT: ," + std::to_string(octets - 1 - smsc));
+        unsolicited(pdu);
+    }
+    if (ringNow) {
+        int reg = regStat();
+        if (!claimedFlag) event("noring noradio");
+        else if (reg != 1 && reg != 5) event("noring noservice");
+        else if (!calls.empty()) event("noring busy");
+        else startRing(ringFrom);
     }
     for (const HostCall &h : todo) {
         size_t i = 0;
@@ -640,7 +771,7 @@ void Modem::service(uint64_t nowNs) {
         Call &c = calls[i];
         if (trace) LOGI("modem: app says call %d %s", h.id, h.state.c_str());
         if (h.state == "pending") c.deadline = now + kPendingTimeout;
-        else if (h.state == "dialing") c.deadline = 0;
+        else if (h.state == "dialing" || h.state == "ringing") c.deadline = 0;
         else if (h.state == "active") { c.deadline = 0; setStat(c, 0); }
         else if (h.state == "held") { c.deadline = 0; setStat(c, 1); }
         else if (h.state == "ended") endCall(i, false);
@@ -658,6 +789,8 @@ void Modem::service(uint64_t nowNs) {
         }
     }
     if (!claimedFlag || inPdu || !line.empty()) return;  // not between commands: report later
+    for (Call &c : calls)
+        if (c.stat == 4 && now >= c.nextRing) sendRing(c);  // the phone keeps ringing
     int sig = signalValue();
     if (sig != sentSignal) {
         sentSignal = sig;
@@ -680,6 +813,11 @@ void Modem::service(uint64_t nowNs) {
 void Modem::reset() {
     for (const Call &c : calls) event("end " + std::to_string(c.id));
     calls.clear();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        ringWanted = false;
+    }
+    smsPending = 0;
     dialing = 0;
     st = Settings();
     line.clear();
@@ -704,6 +842,7 @@ void Modem::serialize(StateIO &s) {
         // The current network state is reported again.
         calls.clear();
         dialing = 0;
+        smsPending = 0;
         line.clear();
         inPdu = false;
         sentSignal = sentReg = sentGprs = -1;

@@ -321,6 +321,7 @@ bool Machine::loadState(const std::string &path, std::string &err) {
         return false;
     }
     cpu.flushTlb();
+    uart2.updateTx();  // the IR port's level TX interrupt (states saved before it existed)
     LOGI("snapshot restored: %s", path.c_str());
     return true;
 }

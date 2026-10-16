@@ -115,9 +115,13 @@ class SettingsActivity : SettingsPage() {
         section("Phone")
         group("Phone calls")
         button("Phone calls…") { startActivity(Intent(this, CallSettingsActivity::class.java)) }
+        group("Contacts & calendar")
+        button("Contacts & calendar…") { startActivity(Intent(this, PimSettingsActivity::class.java)) }
         group("Bluetooth")
         note("To send from Windows Mobile, use Start > Send via Bluetooth. Receiving is switched in Device Settings > " +
             "Hardware and needs All files access (Bluetooth saves received files in Download).")
+        group("Infrared")  // IrDA beams over Bluetooth LE or an InfraWAN relay (InfraredSettings.kt)
+        button("Infrared…") { startActivity(Intent(this, InfraredSettingsActivity::class.java)) }
         group("Phone hardware")
         note("Your phone's hardware bridged into Windows Mobile. Each switches on here once it is implemented.")
         for ((key, label) in bridges) switch(label, settings.bridgeEnabled(key) || key in available).isEnabled = false

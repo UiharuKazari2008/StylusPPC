@@ -29,7 +29,7 @@ SECTIONS {
 }
 ''' % (IMAGEBASE + 0x1000)
 # PE section characteristics
-FLAGS = {'.text': 0x60000020, '.rdata': 0x40000040, '.data': 0xC0000040, '.idata': 0xC0000040}
+FLAGS = {'.text': 0x60000020, '.rdata': 0x40000040, '.data': 0xC0000040, '.idata': 0xC0000040, '.rsrc': 0x40000040}
 
 
 def tools():
@@ -83,7 +83,8 @@ def align(v, a):
     return (v + a - 1) // a * a
 
 
-def build_pe(entry, sections, symbols):
+def build_pe(entry, sections, symbols, rsrc=None):
+    """rsrc: optional function(rva) -> bytes of a resource section placed at that RVA (make-applink.py)."""
     iat_start, iat_end = symbols['iat_start'], symbols['iat_end']
     imports = sorted((a, n) for n, a in symbols.items() if iat_start <= a < iat_end and n not in ('iat_start', 'iat_end'))
     assert imports and len(imports) * 4 == iat_end - iat_start, 'every .iat slot must be one named variable'
@@ -123,6 +124,13 @@ def build_pe(entry, sections, symbols):
         struct.pack_into('<I', data[3], addr - IMAGEBASE - data[1], r)
     parts.append(['.idata', idata_rva, len(idata), idata])
     image_size = align(idata_rva + len(idata), SECT_ALIGN)
+    rsrc_rva = rsrc_len = 0
+    if rsrc:
+        rsrc_rva = image_size
+        res = bytearray(rsrc(rsrc_rva))
+        rsrc_len = len(res)
+        parts.append(['.rsrc', rsrc_rva, rsrc_len, res])
+        image_size = align(rsrc_rva + rsrc_len, SECT_ALIGN)
 
     shdrs, body, ptr = b'', b'', HEADERS
     for name, rva, vsize, raw_data in parts:
@@ -138,6 +146,8 @@ def build_pe(entry, sections, symbols):
     coff = struct.pack('<HHIIIHH', 0x01C0, len(parts), 0, 0, 0, 0xE0, 0x0001 | 0x0002 | 0x000C | 0x0100)
     dirs = [(0, 0)] * 16
     dirs[1] = (idata_rva, 40)
+    if rsrc:
+        dirs[2] = (rsrc_rva, rsrc_len)
     dirs[12] = (iat_start - IMAGEBASE, iat_end - iat_start)
     code_size = align(parts[0][2], FILE_ALIGN)
     data_size = sum(align(p[2], FILE_ALIGN) for p in parts[1:])

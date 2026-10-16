@@ -45,8 +45,16 @@ import java.util.concurrent.Executor
  *    call from the phone state (off-hook counts as connected; there is no finer state without the
  *    role). End uses TelecomManager.endCall; mute and speaker are best effort.
  *
+ * Incoming calls ring in Windows Mobile while the emulator is on screen ("call ring <number>"; the
+ * helper makes FakeRIL raise the call, and cprog shows its own incoming-call screen). WM's Answer /
+ * Ignore / End answer, reject or end the real call; answering or ending it on the phone answers or
+ * ends WM's. With the dialer role the call stays in WmInCallService (no Android screen); without it
+ * the phone's dialer shows the call too and WM follows the phone state. "Use Phone's Ringer" picks
+ * which ringtone sounds: Windows Mobile's (the phone's ringer is silenced for that call) or the
+ * phone's (Windows Mobile's sound is muted while it rings).
+ *
  * Call audio never passes through the emulator: it stays on the phone's earpiece, speaker or headset.
- * docs/research-phone-calls-pim.md, section E.
+ * docs/research-phone-calls-pim.md, sections E and F.
  */
 class CallBridge(private val activity: Activity, private val guest: GuestBridge, private val handle: () -> Long = { 0L }) {
     private val ctx: Context = activity
@@ -55,16 +63,53 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     private val telephony = ctx.getSystemService(TelephonyManager::class.java)
     private val audio = ctx.getSystemService(AudioManager::class.java)
 
-    private class WmCall(val id: Int, val number: String, val token: String, var owned: Boolean) {
-        var state = "dialing"
+    private class WmCall(val id: Int, val number: String, val token: String, var owned: Boolean, val incoming: Boolean = false) {
+        var state = if (incoming) "ringing" else "dialing"
         val placedAt = SystemClock.uptimeMillis()
         /** The phone went off-hook since this call was placed (an idle state before that is stale). */
         var offHook = false
-        fun stale() = !offHook && SystemClock.uptimeMillis() - placedAt > 30_000
+        fun stale() = !incoming && !offHook && SystemClock.uptimeMillis() - placedAt > 30_000
     }
 
     /** Windows Mobile's calls by its call id. */
     private val calls = HashMap<Int, WmCall>()
+
+    /**
+     * The phone rings and WM was asked to ring too ("call ring"), until the helper reports WM's call
+     * ("call ringing <id>"). token: the call in WmInCallService (dialer role), or null.
+     */
+    private class Ring(val number: String, val token: String?) {
+        /** The real call was answered or ended before WM rang: WM's call ends as soon as it appears. */
+        var gone = false
+    }
+    private var ring: Ring? = null
+    /**
+     * The helper's RIL client is up on a FakeRIL image that WM's phone knows ("call ready" without
+     * restart); null: not heard since the app started (a restored session's helper does not repeat it).
+     */
+    private var callsReady: Boolean? = null
+    /** WM's sound is muted while it rings ("Use Phone's Ringer" off). */
+    private var hushed = false
+    /** The phone's ring stream was muted for WM's ringtone (no dialer role, "Use Phone's Ringer" on). */
+    private var ringMuted = false
+    private var lastShowing: Boolean? = null
+    /** The modem event "smssend <mr> <pdu>" (SmsBridge). */
+    var onModemSms: ((Int, String) -> Unit)? = null
+    /** Wakes a session kept in memory for an incoming call (EmulatorActivity.wakeForEvent). */
+    var wake: ((Long) -> Boolean)? = null
+    /** Windows Mobile over other apps while a call rings in the background (CallOverlay). */
+    var overlay: CallOverlay? = null
+    /** The guest's size and whether the frame is turned (fold mode), for the overlay. */
+    var guestFrame: (() -> Triple<Int, Int, Boolean>)? = null
+    /** Brings the emulator to the front (an incoming call answered from the overlay). */
+    var bringFront: (() -> Unit)? = null
+    /** Gives the guest's picture back to the activity's own surface (after the overlay had it). */
+    var reattach: (() -> Unit)? = null
+
+    init {
+        // The app ended while WM rang with the phone's ringer muted: give the ringer back.
+        if (ringState(ctx).getBoolean(RING_MUTED, false)) { ringMuted = true; muteRingStream(false) }
+    }
     /**
      * Calls dialled through the virtual modem (WM 6 / 6.1 / 6.1.4, core/src/board/modem.h) rather than
      * reported by the helper: their progress goes back to the modem.
@@ -81,10 +126,30 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         private const val TAG = "WMDroidCall"
         const val REQ_CALL = 30
         private const val PREF = "calls.enabled"
+        private const val PREF_RINGER = "calls.wmRinger"
+        /** How long WM may take to ring (the helper's poll, FakeRIL's 1 s, the mailbox) before the phone keeps the call. */
+        private const val RING_BUDGET = 4500L
+        private const val CALL_CHANNEL = "wm.call"
+        private const val CALL_NOTE = 0x7C41
+        /** EmulatorActivity opened from the full-screen call notification: show over the lock screen. */
+        const val EXTRA_CALL = "jp.net.seventhreeseven.wmdroid.INCOMING_CALL"
 
         fun enabled(ctx: Context) = Settings.prefs(ctx).getBoolean(PREF, false)
         fun setEnabled(ctx: Context, on: Boolean) =
             Settings.prefs(ctx).edit().putBoolean(PREF, on).apply()
+
+        /**
+         * "Use Phone's Ringer": on, Windows Mobile's Phone rings with its own ringtone (on the ringer
+         * volume) and this phone's ringtone is silenced for that call; off, this phone rings as usual
+         * and Windows Mobile stays quiet while it rings.
+         */
+        fun wmRinger(ctx: Context) = Settings.prefs(ctx).getBoolean(PREF_RINGER, false)
+        fun setWmRinger(ctx: Context, on: Boolean) =
+            Settings.prefs(ctx).edit().putBoolean(PREF_RINGER, on).apply()
+
+        /** Not per OS: the phone's ring stream muted for a call, to unmute if the app died during it. */
+        private fun ringState(ctx: Context) = ctx.getSharedPreferences("wmdroid.calls", Context.MODE_PRIVATE)
+        private const val RING_MUTED = "ringStreamMuted"
 
         /** WMDroid is the default phone app, so WM's call screen can be the only one. */
         fun holdsRole(ctx: Context): Boolean =
@@ -93,32 +158,41 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         fun roleRequest(ctx: Context): Intent? = ctx.getSystemService(RoleManager::class.java)
             ?.takeIf { it.isRoleAvailable(RoleManager.ROLE_DIALER) }?.createRequestRoleIntent(RoleManager.ROLE_DIALER)
 
-        /** Permissions placing and ending calls need (the dialer role grants them too). */
+        /**
+         * Permissions placing, answering and ending calls need (the dialer role grants them too);
+         * READ_CALL_LOG gives the incoming caller's number without the role.
+         */
         fun permissions(): Array<String> = arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS,
-            Manifest.permission.READ_PHONE_STATE, PhoneNumber.PERMISSION)
+            Manifest.permission.READ_PHONE_STATE, PhoneNumber.PERMISSION, Manifest.permission.READ_CALL_LOG)
 
         fun hasCallPermission(ctx: Context) =
             ctx.checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
 
         /** Lines for the helper's state.ini (GuestBridge.writeState). */
         fun stateLines(ctx: Context): String =
-            if (enabled(ctx)) "calls=1\npatch.fakeril=on\n" else "calls=0\n"
+            (if (enabled(ctx)) "calls=1\npatch.fakeril=on\n" else "calls=0\n") +
+                (if (SmsBridge.enabled(ctx)) "sms=1\n" else "sms=0\n")  // texts on WM 6.5.3 (Sms.cs)
     }
 
     // ---- Lifecycle (EmulatorActivity) ----
 
     fun resume() {
         foreground = true
+        if (overlay?.showing == true) { overlay?.hide(); reattach?.invoke() }  // opened while WM rang over other apps
         val on = enabled(ctx)
         if (lastEnabled != null && lastEnabled != on) guest.writeState()  // the helper re-reads it every 5 s
         lastEnabled = on
         if (on && holdsRole(ctx)) bindLink()
         resync()
+        updateShowing()
+        updateListening()
         updateFastPoll()
     }
 
     fun pause() {
         foreground = false
+        updateShowing()
+        updateListening()
         updateFastPoll()
         updateWakeLock()
     }
@@ -128,7 +202,9 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
      * the dialer role go to the phone's dialer (without the role they are there already).
      */
     fun leave() {
-        if (calls.values.any { it.owned }) {
+        foreground = false
+        updateShowing()
+        if (calls.values.any { it.owned } || ring?.token != null) {
             Log.i(TAG, "leaving the screen during a call: handing it to the phone's dialer")
             sendLink(Message.obtain(null, CallLink.HANDOFF))
             handedOff()
@@ -141,6 +217,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         stopListening()
         updateWakeLock()
         ui.removeCallbacks(fastPoll)
+        ui.removeCallbacks(ringTimeout)
+        endRingerOverrides()
     }
 
     // ---- From the guest ----
@@ -155,7 +233,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
             if (line.isBlank()) continue
             Log.i(TAG, "modem: $line")
             val p = line.split(' ')
-            if (p[0] == "dial") p.getOrNull(1)?.toIntOrNull()?.let { modemIds.add(it) }
+            if (p[0] == "smssend") { onModemSms?.invoke(p.getOrNull(1)?.toIntOrNull() ?: continue, p.getOrNull(2) ?: continue); continue }
+            if (p[0] == "dial" || p[0] == "ringing") p.getOrNull(1)?.toIntOrNull()?.let { modemIds.add(it) }
             onGuest(line)
             if (p[0] == "end") p.getOrNull(1)?.toIntOrNull()?.let { modemIds.remove(it) }
         }
@@ -166,13 +245,22 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         val p = line.split(' ')
         when (p[0]) {
             "dial" -> if (p.size >= 3) dial(p[1].toIntOrNull() ?: return, p[2])
+            "ringing" -> ringing(p.getOrNull(1)?.toIntOrNull() ?: return)
+            "noring" -> ringFailed(p.getOrNull(1) ?: "")
+            "answer" -> calls[p.getOrNull(1)?.toIntOrNull() ?: return]?.let { wmAnswered(it) }
             "end" -> calls[p.getOrNull(1)?.toIntOrNull() ?: return]?.let { wmEnded(it) }
             "hold" -> calls[p.getOrNull(1)?.toIntOrNull() ?: return]?.let { c ->
                 if (c.owned) sendLink(Message.obtain(null, CallLink.HOLD, if (p.getOrNull(2) == "1") 1 else 0, 0).withToken(c.token))
             }
             "mute" -> mute(p.getOrNull(1) == "1")
             "speaker" -> speaker(p.getOrNull(1) == "1")
-            "ready" -> if (line.contains("restart")) askRestart()
+            "ready" -> {
+                // "ready modem": rilgsm images, whose calls go through the virtual modem (it rings too).
+                callsReady = !line.contains("restart")
+                updateShowing()
+                if (line.contains("restart")) askRestart()
+            }
+            "off" -> { callsReady = false; updateShowing() }
             else -> Log.i(TAG, "guest: call $line")
         }
     }
@@ -241,6 +329,208 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         updateFastPoll()
     }
 
+    /** Without the role the phone's in-call screen comes up over us: bring Windows Mobile back once it has. */
+    private fun bringBack(id: Int) {
+        ui.postDelayed({
+            if (!activity.isFinishing && calls.containsKey(id)) runCatching {
+                activity.startActivity(Intent(activity, activity.javaClass)
+                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+            }
+        }, 1500)
+    }
+
+    // ---- Incoming calls ----
+
+    /** Windows Mobile can ring for an incoming call now: on screen, calls on, its phone up. */
+    private fun canRing() = (foreground || CallOverlay.enabled(ctx)) && enabled(ctx) && callsReady != false && handle() != 0L
+
+    /** Tells the call process (dialer role) whether to keep incoming calls for Windows Mobile. */
+    private fun updateShowing() {
+        val on = canRing()
+        if (on == lastShowing || link == null) return
+        lastShowing = on
+        sendLink(Message.obtain(null, CallLink.SHOWING, if (on) 1 else 0, 0))
+    }
+
+    /** The phone rings: ring Windows Mobile too. token: the call held by WmInCallService (dialer role). */
+    private fun startRing(number: String, token: String?) {
+        if (ring != null || calls.isNotEmpty() || !canRing()) {
+            Log.i(TAG, "incoming call: Windows Mobile cannot ring now")
+            token?.let { sendLink(Message.obtain(null, CallLink.RELEASE).withToken(it)) }
+            return
+        }
+        if (!foreground && !showInBackground()) {
+            Log.i(TAG, "incoming call: Windows Mobile is not in memory; the phone keeps the call")
+            token?.let { sendLink(Message.obtain(null, CallLink.RELEASE).withToken(it)) }
+            return
+        }
+        val n = number.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }.ifEmpty { "-" }
+        Log.i(TAG, "incoming call: ringing Windows Mobile (${if (token != null) "dialer role" else "phone state"})")
+        ring = Ring(n, token)
+        // The phone's ringer keeps the call: WM's ring stays quiet from its first note.
+        if (!wmRinger(ctx)) hushGuest(true)
+        // WM 6 / 6.1 / 6.1.4: the virtual modem rings (RING, +CLIP); WM 6.5.3: the helper has FakeRIL ring.
+        val h = handle()
+        if (NativeBridge.modemActive(h)) NativeBridge.modemRing(h, n) else guest.send("call ring $n")
+        ui.removeCallbacks(ringTimeout)
+        ui.postDelayed(ringTimeout, RING_BUDGET)
+        updateListening()
+        updateFastPoll()
+    }
+
+    /**
+     * In the background: the session wakes at full speed (EmulatorActivity.wakeForEvent) and Windows
+     * Mobile's screen comes up over other apps, or, with the phone locked, through a full-screen call
+     * notification that opens the emulator over the lock screen. False if no session is in memory.
+     */
+    private fun showInBackground(): Boolean {
+        if (wake?.invoke(120_000) != true) return false
+        val pm = ctx.getSystemService(PowerManager::class.java)
+        val km = ctx.getSystemService(android.app.KeyguardManager::class.java)
+        val locked = pm?.isInteractive == false || km?.isKeyguardLocked == true
+        if (!locked) {
+            val f = guestFrame?.invoke() ?: return false
+            if (overlay?.show(handle(), f.first, f.second, f.third) == true) return true
+        }
+        return fullScreenCall()
+    }
+
+    private fun fullScreenCall(): Boolean {
+        if (Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false
+        val nm = ctx.getSystemService(android.app.NotificationManager::class.java) ?: return false
+        if (nm.getNotificationChannel(CALL_CHANNEL) == null)
+            nm.createNotificationChannel(android.app.NotificationChannel(CALL_CHANNEL, "Incoming calls in Windows Mobile",
+                android.app.NotificationManager.IMPORTANCE_HIGH).apply { setSound(null, null) })
+        val open = android.app.PendingIntent.getActivity(ctx, 3, Intent(ctx, activity.javaClass).putExtra(EXTRA_CALL, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        nm.notify(CALL_NOTE, android.app.Notification.Builder(ctx, CALL_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_running)
+            .setContentTitle("Incoming call")
+            .setContentText("Windows Mobile is ringing")
+            .setCategory(android.app.Notification.CATEGORY_CALL)
+            .setFullScreenIntent(open, true)
+            .setContentIntent(open)
+            .setOngoing(true)
+            .build())
+        return true
+    }
+
+    /** The ringing is over: the overlay or the call notification goes; answered means the full emulator. */
+    private fun endRingUi(answered: Boolean) {
+        val wasShown = overlay?.showing == true
+        overlay?.hide()
+        ctx.getSystemService(android.app.NotificationManager::class.java)?.cancel(CALL_NOTE)
+        if (answered && !foreground && wasShown) bringFront?.invoke()
+    }
+
+    /** WM did not ring in time (helper busy or gone): the phone handles the call as usual. */
+    private val ringTimeout = Runnable { ringFailed("timeout") }
+
+    private fun ringFailed(why: String) {
+        val r = ring ?: return
+        Log.i(TAG, "incoming call: Windows Mobile cannot ring ($why)")
+        ring = null
+        ui.removeCallbacks(ringTimeout)
+        r.token?.let { sendLink(Message.obtain(null, CallLink.RELEASE).withToken(it)) }
+        endRingerOverrides()
+        endRingUi(false)
+        finishCalls()
+    }
+
+    /** WM rings for the call ("call ringing <id>"): it is WM's call now. */
+    private fun ringing(id: Int) {
+        val r = ring
+        ring = null
+        ui.removeCallbacks(ringTimeout)
+        if (r == null || r.gone) {
+            // The real call was answered elsewhere or ended meanwhile (or WM was too late).
+            guest.send("call state $id ended missed")
+            endRingerOverrides()
+            finishCalls()
+            return
+        }
+        val c = WmCall(id, r.number, r.token ?: "", r.token != null, incoming = true)
+        calls[id] = c
+        state(id, "ringing")
+        r.token?.let { sendLink(Message.obtain(null, CallLink.KEEP).withToken(it)) }
+        if (wmRinger(ctx)) silencePhoneRinger(c)
+        updateListening()
+        updateFastPoll()
+    }
+
+    /** WM's Answer: answer the real call. */
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun wmAnswered(c: WmCall) {
+        if (!c.incoming || c.state != "ringing") return  // our own answer coming back
+        Log.i(TAG, "answered in Windows Mobile")
+        // WM's call is active already (its RIL answered): only our side changes.
+        c.state = "active"
+        endRingerOverrides()
+        endRingUi(true)
+        updateWakeLock()
+        if (c.owned) sendLink(Message.obtain(null, CallLink.ANSWER).withToken(c.token))
+        else {
+            runCatching { telecom.acceptRingingCall() }.onFailure { Log.w(TAG, "acceptRingingCall failed", it) }
+            bringBack(c.id)
+        }
+    }
+
+    /** "Use Phone's Ringer" on: the phone's own ringtone stops for this call; WM's plays as a ringtone. */
+    private fun silencePhoneRinger(c: WmCall) {
+        val h = handle()
+        if (c.owned || holdsRole(ctx)) {
+            // The default dialer may silence Telecom's ringer.
+            runCatching { telecom.silenceRinger() }.onFailure { Log.w(TAG, "silenceRinger failed", it) }
+            if (h != 0L) NativeBridge.setAudioUsage(h, 6)
+        } else {
+            // Without the role only the ring volume can do it; WM's ring then plays on the media volume.
+            muteRingStream(true)
+            if (h != 0L) NativeBridge.setAudioUsage(h, if (ringMuted) 1 else 6)
+        }
+    }
+
+    private fun muteRingStream(on: Boolean) {
+        if (on) {
+            if (ringMuted || audio.isStreamMute(AudioManager.STREAM_RING)) return
+            try {
+                audio.adjustStreamVolume(AudioManager.STREAM_RING, AudioManager.ADJUST_MUTE, 0)
+                ringMuted = true
+                ringState(ctx).edit().putBoolean(RING_MUTED, true).apply()
+            } catch (e: SecurityException) {
+                Log.w(TAG, "cannot mute the phone's ringer", e)
+            }
+        } else if (ringMuted) {
+            ringMuted = false
+            runCatching { audio.adjustStreamVolume(AudioManager.STREAM_RING, AudioManager.ADJUST_UNMUTE, 0) }
+                .onFailure { Log.w(TAG, "cannot unmute the phone's ringer", it) }
+            ringState(ctx).edit().remove(RING_MUTED).apply()
+        }
+    }
+
+    /** "Use Phone's Ringer" off: WM's sound is muted while it rings (the phone's ringer sounds). */
+    private fun hushGuest(on: Boolean) {
+        if (on == hushed) return
+        hushed = on
+        val h = handle()
+        if (h == 0L) return
+        NativeBridge.setAudioGain(h, if (on) 0f else Math.pow(10.0, Settings(ctx).audioBoostDb / 20.0).toFloat())
+    }
+
+    /** The ringing is over (answered, ended, never rang): the phone's and WM's sound as they were. */
+    private fun endRingerOverrides() {
+        hushGuest(false)
+        muteRingStream(false)
+    }
+
+    /** The usage for the guest's sound ("audio ring|media|alert" from the helper). */
+    fun audioUsage(kind: String): Int = when (kind) {
+        "ring" -> if (ringMuted) 1 else 6  // the ring stream is muted for this call: media volume
+        "alert" -> 5
+        else -> 1
+    }
+
     @SuppressLint("MissingPermission")
     private fun defaultAccount() = runCatching {
         telecom.getDefaultOutgoingPhoneAccount("tel") ?: telecom.callCapablePhoneAccounts.singleOrNull()
@@ -250,13 +540,15 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     @SuppressLint("MissingPermission")
     private fun wmEnded(c: WmCall) {
         calls.remove(c.id)
+        if (c.incoming) endRingUi(false)
         if (c.state == "ended") return finishCalls()
-        if (c.owned) sendLink(Message.obtain(null, CallLink.DISCONNECT).withToken(c.token))
+        // A ringing call ended in WM is WM's Ignore: the real call is rejected.
+        if (c.owned) sendLink(Message.obtain(null, if (c.state == "ringing") CallLink.REJECT else CallLink.DISCONNECT).withToken(c.token))
         else endCallWithoutRole()
         finishCalls()
     }
 
-    /** Without the role: the deprecated, still documented TelecomManager.endCall (ANSWER_PHONE_CALLS). */
+    /** Without the role: the deprecated, still documented TelecomManager.endCall (ANSWER_PHONE_CALLS; rejects a ringing call). */
     @Suppress("DEPRECATION")
     @SuppressLint("MissingPermission")
     private fun endCallWithoutRole() {
@@ -278,19 +570,27 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     /** Tells WM the real call's progress. */
     private fun state(id: Int, s: String, cause: String = "") {
+        val was = calls[id]?.state
         calls[id]?.state = s
         if (id in modemIds) {
-            NativeBridge.modemCallState(handle(), id, s)
+            if (s == "active" && was == "ringing" && calls[id]?.incoming == true) {
+                // Answered on the phone: the helper answers through WM's RIL, as WM's Answer does (the
+                // call screen then keeps the caller's number); the modem connects it itself if not.
+                guest.send("call answer")
+                ui.postDelayed({ if (id in modemIds) NativeBridge.modemCallState(handle(), id, "active") }, 3000)
+            } else NativeBridge.modemCallState(handle(), id, s)
             if (s == "ended") modemIds.remove(id)
         } else {
             guest.send("call state $id $s${if (cause.isNotEmpty()) " $cause" else ""}")
         }
+        if (s != "ringing" && calls[id]?.incoming == true) { endRingerOverrides(); endRingUi(s == "active") }
         if (s == "ended") { calls.remove(id); finishCalls() } else updateWakeLock()
     }
 
     private fun finishCalls() {
-        if (calls.isNotEmpty()) return
-        stopListening()
+        if (calls.isNotEmpty() || ring != null) return
+        endRingerOverrides()
+        updateListening()
         updateWakeLock()
         updateFastPoll()
     }
@@ -304,10 +604,19 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
             when (m.what) {
                 CallLink.STATE -> {
                     val token = CallLink.token(m) ?: return
-                    val c = calls.values.firstOrNull { it.token == token } ?: return
                     val s = m.data.getString(CallLink.KEY_STATE) ?: return
+                    val r = ring
+                    if (r != null && r.token == token) {
+                        // Answered (a headset) or gone before WM rang: WM's call ends as it appears.
+                        if (s == "active" || s == "ended") r.gone = true
+                        if (s == "active") sendLink(Message.obtain(null, CallLink.RELEASE).withToken(token))
+                        return
+                    }
+                    val c = calls.values.firstOrNull { it.token == token } ?: return
+                    if (c.incoming && (s == "dialing" || s == "ringing")) return
                     if (s != c.state) state(c.id, s, m.data.getString(CallLink.KEY_CAUSE) ?: "")
                 }
+                CallLink.RINGING -> startRing(m.data?.getString(CallLink.KEY_NUMBER) ?: "", CallLink.token(m) ?: return)
                 CallLink.HANDED_OFF -> handedOff()
             }
         }
@@ -317,6 +626,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             link = Messenger(binder)
             sendLink(Message.obtain(null, CallLink.HELLO).apply { replyTo = replies })
+            lastShowing = null
+            updateShowing()
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -347,6 +658,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     /** The phone's dialer has the calls now: WM's calls end there (the real call goes on). */
     private fun handedOff() {
+        ring?.takeIf { it.token != null }?.gone = true
         for (c in calls.values.filter { it.owned }.toList()) state(c.id, "ended", "handoff")
     }
 
@@ -354,13 +666,24 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     private var listener: Any? = null
 
+    /**
+     * The phone state is followed during WM's calls, and while the emulator is on screen with calls
+     * on and no dialer role (incoming calls; with the role WmInCallService reports them).
+     */
+    private fun updateListening() {
+        if (calls.isNotEmpty() || ring != null || ((foreground || CallOverlay.enabled(ctx)) && enabled(ctx) && !holdsRole(ctx))) startListening()
+        else stopListening()
+    }
+
     @SuppressLint("MissingPermission")
     private fun startListening() {
         if (listener != null || ctx.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return
-        if (Build.VERSION.SDK_INT >= 31) {
+        // Only the old listener tells the incoming caller's number (with READ_CALL_LOG).
+        val withNumber = ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= 31 && !withNumber) {
             val cb = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
                 override fun onCallStateChanged(state: Int) {
-                    ui.post { phoneState(state) }
+                    ui.post { phoneState(state, "") }
                 }
             }
             runCatching { telephony.registerTelephonyCallback(Executor { it.run() }, cb); listener = cb }
@@ -368,7 +691,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
             @Suppress("DEPRECATION")
             val l = object : PhoneStateListener() {
                 @Deprecated("Deprecated in Java")
-                override fun onCallStateChanged(state: Int, phoneNumber: String?) = phoneState(state)
+                override fun onCallStateChanged(state: Int, phoneNumber: String?) = phoneState(state, phoneNumber.orEmpty())
             }
             @Suppress("DEPRECATION")
             runCatching { telephony.listen(l, PhoneStateListener.LISTEN_CALL_STATE); listener = l }
@@ -383,18 +706,27 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         if (l is PhoneStateListener) runCatching { telephony.listen(l, PhoneStateListener.LISTEN_NONE) }
     }
 
-    private fun phoneState(state: Int) {
+    private fun phoneState(state: Int, number: String) {
         when (state) {
-            TelephonyManager.CALL_STATE_OFFHOOK -> for (c in calls.values.toList()) {
-                c.offHook = true
-                // No finer state without the role: off-hook counts as connected (WM's timer starts).
-                if (!c.owned && c.state == "dialing") state(c.id, "active")
+            // Without the role: an incoming call rings in WM too (with the role WmInCallService reports it).
+            TelephonyManager.CALL_STATE_RINGING ->
+                if (!holdsRole(ctx) && ring == null && calls.isEmpty()) startRing(number, null)
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                ring?.takeIf { it.token == null }?.gone = true  // answered before WM rang
+                for (c in calls.values.toList()) {
+                    c.offHook = true
+                    // No finer state without the role: off-hook counts as connected (WM's timer starts).
+                    if (!c.owned && (c.state == "dialing" || c.state == "ringing")) state(c.id, "active")
+                }
             }
-            TelephonyManager.CALL_STATE_IDLE -> for (c in calls.values.toList()) {
-                // Registering reports the current state, which can still be idle just after placeCall.
-                if (!c.offHook && !c.stale()) continue
-                // Owned calls end through the call process; this is the backstop if that went missing.
-                if (!c.owned || link == null) state(c.id, "ended", "idle")
+            TelephonyManager.CALL_STATE_IDLE -> {
+                ring?.takeIf { it.token == null }?.gone = true  // the caller gave up before WM rang
+                for (c in calls.values.toList()) {
+                    // Registering reports the current state, which can still be idle just after placeCall.
+                    if (!c.incoming && !c.offHook && !c.stale()) continue
+                    // Owned calls end through the call process; this is the backstop if that went missing.
+                    if (!c.owned || link == null) state(c.id, "ended", if (c.state == "ringing") "missed" else "idle")
+                }
             }
         }
     }
@@ -422,14 +754,15 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     private fun updateFastPoll() {
         ui.removeCallbacks(fastPoll)
-        if (foreground && calls.isNotEmpty()) ui.postDelayed(fastPoll, 250)
+        // Also in the background while WM rings or shows a call (the activity's own tick has stopped).
+        if (calls.isNotEmpty() || ring != null) ui.postDelayed(fastPoll, 250)
     }
 
     private var proximity: PowerManager.WakeLock? = null
 
     /** With WM as the call screen, WMDroid turns the screen off at the ear, as a phone app does. */
     private fun updateWakeLock() {
-        val want = foreground && calls.values.any { it.owned && it.state != "ended" }
+        val want = foreground && calls.values.any { it.owned && it.state != "ended" && it.state != "ringing" }
         val pm = ctx.getSystemService(PowerManager::class.java) ?: return
         if (want && proximity == null && pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
             proximity = pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "WMDroid:call").apply {

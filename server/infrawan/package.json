@@ -1,0 +1,15 @@
+{
+  "name": "infrawan",
+  "version": "1.0.0",
+  "description": "InfraWAN: a WebSocket relay that carries PocketStylus's Windows Mobile infrared beams between phones",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

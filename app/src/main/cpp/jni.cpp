@@ -599,6 +599,30 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemCal
     env->ReleaseStringUTFChars(state, c);
 }
 
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemRing(JNIEnv *env, jobject, jlong h,
+                                                                                  jstring number) {
+    Session *s = S(h);
+    if (!s || !s->m) return;
+    const char *c = number ? env->GetStringUTFChars(number, nullptr) : nullptr;
+    s->m->modem->ring(c ? c : "");
+    if (c) env->ReleaseStringUTFChars(number, c);
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemSms(JNIEnv *env, jobject, jlong h, jstring pdu) {
+    Session *s = S(h);
+    if (!s || !s->m || !pdu) return;
+    const char *c = env->GetStringUTFChars(pdu, nullptr);
+    if (!c) return;
+    s->m->modem->smsDeliver(c);
+    env->ReleaseStringUTFChars(pdu, c);
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemSmsResult(JNIEnv *, jobject, jlong h, jint mr,
+                                                                                       jboolean sent) {
+    Session *s = S(h);
+    if (s && s->m) s->m->modem->smsResult(mr, sent);
+}
+
 JNIEXPORT jstring JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemEvents(JNIEnv *env, jobject, jlong h) {
     Session *s = S(h);
     std::string e = s && s->m ? s->m->modem->takeEvents() : std::string();

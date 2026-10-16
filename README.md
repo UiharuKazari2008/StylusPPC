@@ -15,6 +15,23 @@ It was built and tuned on a Galaxy Z Fold7. On a foldable, opening the phone tur
 
 These links always point to the newest release. Android 10 or newer, ARM64.
 
+### Screenshots
+
+<p align="center">
+  <img src="docs/images/app-cover.png" width="240" alt="WM 6.1.4 on the cover screen with the glass skin">
+  <img src="docs/images/app-power.png" width="240" alt="Power menu: Savepoint, Suspend, Pause, Reset, Cold boot">
+</p>
+<p align="center">
+  <img src="docs/images/app-fold.png" width="600" alt="Opened Fold7: Windows Mobile in landscape above the slide-out keyboard">
+</p>
+
+| WM 6.5.3 | | | WM 6.1.4 | | WM 5.0 | |
+|---|---|---|---|---|---|---|
+| <img src="docs/images/wm-653-home.png" width="120"> | <img src="docs/images/wm-653-start.png" width="120"> | <img src="docs/images/wm-653-settings.png" width="120"> | <img src="docs/images/wm-614-home.png" width="120"> | <img src="docs/images/wm-614-start.png" width="120"> | <img src="docs/images/wm-5-home.png" width="120"> | <img src="docs/images/wm-5-start.png" width="120"> |
+| Titanium home | Start menu | PocketStylus settings | Today | Start menu | Today | Start menu |
+
+All three releases above use the phone's Material You colour as their Windows Mobile theme and show the phone's carrier and data type. The phone wallpaper is synced into Windows Mobile too.
+
 ---
 
 ## Why this is an accomplishment
@@ -40,13 +57,13 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 
 ## Supported Windows Mobile releases
 
-| Release | Images | Notes |
+| Release | Image needed | Notes |
 |---|---|---|
-| **Windows Mobile 6.5.3 Professional** | FWVGA 480×854 (recommended), WVGA, VGA, WQVGA, QVGA, square | Main target. Titanium home screen, FakeRIL radio, everything below works. |
-| **Windows Mobile 6.1.4 Professional** | WVGA 480×800, VGA, WQVGA, QVGA, square | .NET CF 3.5 is installed automatically on first boot. Its radio is PocketStylus's virtual GSM modem. |
-| **Windows Mobile 5.0 Pocket PC Phone** | VGA 480×640, QVGA (with and without phone) | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM (the default). |
+| **Windows Mobile 6.5.3 Professional** | `PPC_USA_GSM_FWVGA_VR.BIN` | Main target. Titanium home screen, FakeRIL radio, everything below works. |
+| **Windows Mobile 6.1.4 Professional** | `PPC_USA_GSM_480x800.BIN` | .NET CF 3.5 is installed automatically on first boot. Its radio is PocketStylus's virtual GSM modem. |
+| **Windows Mobile 5.0 Pocket PC Phone** | `PPC_USA_GSM_VGA_VR.BIN` | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM (the default). |
 
-Each release keeps its own saved sessions and its own device settings, so you can switch between them without losing anything.
+Each release needs just one image: the board tells Windows Mobile its screen size at boot, so Device Settings → **Screen resolution** runs it at your phone's shape (default), 480×854, 480×800, 480×640 or 480×480. Each release keeps its own saved sessions and device settings, so you can switch between them without losing anything.
 
 **Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by keypad, so it isn't offered: PocketStylus is built around touch. Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family.
 
@@ -191,7 +208,21 @@ Each section below expands to show how the feature works.
 - Turning calls on lets WM 6.5's FakeRIL load. The helper becomes a second RIL client, sees each call the Phone app dials, and the app places the real call through Android Telecom.
 - A small in-memory patch holds FakeRIL's dial thread, so Windows Mobile's call screen goes Dialing → Connected exactly when the real call does. Ending, holding or muting on either side is mirrored to the other.
 - With **Use Windows Mobile's call screen** (the default-phone-app role), calls stay entirely inside Windows Mobile. Without it, Android's call screen opens and PocketStylus comes back to the front.
+- **Incoming calls** ring on Windows Mobile's own Phone screen: Answer, Ignore and End there act on the real call, and answering or ending on Android stops the ring. **Use Phone's Ringer** (Settings → Phone calls) chooses whether Windows Mobile plays its ringtone (through Android's ringtone volume) or stays quiet while Android rings as usual.
 - Emergency numbers always go to the phone's own dialer.
+</details>
+
+<details>
+<summary><b>Text messages (SMS/MMS), contacts and calendar</b></summary>
+
+- **SMS both ways:** texts the phone receives land in Windows Mobile's own inbox, with its sound and notification, and texts sent from Windows Mobile go out through the phone.
+  - WM 6.1.4 and earlier 6.x: through the virtual modem, as real `+CMT` SMS.
+  - WM 6.5.3: through the helper and WM's messaging API.
+  - Long messages are split and joined correctly.
+  - **Defer Incoming SMS Messages** holds texts while Windows Mobile isn't in front.
+- **MMS:** pictures arrive in `My Pictures\MMS`.
+- **Contacts and calendar sync** between Android and Windows Mobile, both ways, with Android winning on conflicts. It asks for your approval before its first sync.
+- **Calls in the background:** an overlay lets you answer or decline while PocketStylus isn't in front.
 </details>
 
 <details>
@@ -201,6 +232,28 @@ Each section below expands to show how the feature works.
 - **Clipboard sync** works both ways.
 - **Use Android IME over Device IME:** tapping a Windows Mobile text field opens the phone's keyboard, and what you type is sent as Windows Mobile key events.
 - **Hardware buttons:** the skin's Start, App Launch 1 and 2, and OK keys are Windows Mobile's Buttons 1–4, each assignable in Device Settings.
+</details>
+
+<details>
+<summary><b>Launcher mode, Android apps in Windows Mobile and the app dock</b></summary>
+
+Device Settings → **Launcher** (also a tab in Windows Mobile's own PocketStylus settings):
+- **Use as Phone Launcher** makes PocketStylus Android's home app (Android's default-home choice). Home then brings the running Windows Mobile to the front and shows **Today** or the **Start menu** (*Home Goes To*). A small no-UI home activity (`HomeActivity`) forwards Home to the one emulator, so a session is never started twice and survives Recents, other apps and theme changes.
+- **Show Android Apps Folder** adds Start → Programs → **Android Apps** with every Android launcher app, named and with its own icon; tapping one opens the Android app. It follows installs, removals and updates; only changed icons are redrawn. **Hidden Apps** leaves apps out.
+- **Pinned shortcuts:** while PocketStylus is the launcher, an app's "Add to home screen" asks, then adds the shortcut as a program in Start → Programs (*Pinned Shortcuts* lists and removes them).
+- **Android App Dock:** a row of 4–8 Android apps at the top or bottom of the Windows Mobile screen. Tap to open, hold (or tap an empty slot) to pick its apps. The dock takes its band from the display's own area and the display shrinks into the rest (same shape, centred), so it never lies over Windows Mobile's touch area and the guest's resolution and saved sessions don't change.
+
+How it works: each Android app is a tiny native ARM program on the storage card (`guest/AppLink`, `tools/make-applink.py`) with the app's icon written into its icon resource; the helper keeps the shortcuts in step (`guest/Helper/AndroidApps.cs`), and the program writes `android launch <id>` to the helper's mailbox (`AndroidApps.kt`).
+</details>
+
+<details>
+<summary><b>Infrared beaming over Bluetooth LE or the Internet (InfraWAN)</b></summary>
+
+- Windows Mobile's own IrDA stack runs unmodified. The helper points the image's dead IR port key at the stock serial driver on UART2. The emulator core is the infrared transceiver: it decodes the SIR frames and carries them off the phone.
+- When a program starts beaming, Windows Mobile asks which way to go: **Nearby phones (Bluetooth LE)** or **InfraWAN (Internet)**, with "Remember my choice".
+- Beam a contact, a picture or a file from Windows Mobile's own menus, or use IrDA programs and IrCOMM.
+- **InfraWAN** is a small relay with no dependencies (`server/infrawan`). It has authenticated users, rooms and rate limits, and everyone in a room hears each other's beams.
+- See `docs/research-irda.md`.
 </details>
 
 <details>
@@ -282,11 +335,13 @@ core/cli/         headless runner
 app/              Android app (Kotlin UI + JNI: GL presenter, AAudio, sensors, bridges)
 guest/Helper/     the in-guest helper (C#, .NET CF 3.5)
 guest/Autorun/    native .NET CF bootstrap (C, Windows CE ARM)
+guest/AppLink/    native launcher for Android apps in Windows Mobile's Start menu (C, Windows CE ARM)
 guest/*/          small guest programs (Send via Bluetooth, GPS test)
+server/infrawan/  InfraWAN relay for infrared beams (Node.js, no dependencies)
 tools/            build scripts, skin designer, ROM scanner, image pusher
 docs/             research notes: hardware, status bar, themes, calls, camera, GPS, Bluetooth, …
 ```
 
 ## Legal
 
-Windows Mobile, Windows CE and the Device Emulator images are Microsoft's. PocketStylus includes no ROM images: you supply your own. The APK bundles Microsoft's freely redistributable .NET Compact Framework 3.5 CAB (`NETCFv35.wm.armv4i.cab`), which is installed into releases that lack it, under Microsoft's redistribution terms. PocketStylus was written without using Device Emulator source code.
+Windows Mobile, Windows CE and the Device Emulator images are Microsoft's. PocketStylus includes no ROM images: you supply your own. The text-message bridge on WM 6.5.3 uses the MAPIdotnet (`MAPIlib.dll`) and OpenNETCF Smart Device Framework (`OpenNETCF.dll`) libraries, under their own licences. The APK bundles Microsoft's freely redistributable .NET Compact Framework 3.5 CAB (`NETCFv35.wm.armv4i.cab`), which is installed into releases that lack it, under Microsoft's redistribution terms. PocketStylus was written without using Device Emulator source code.

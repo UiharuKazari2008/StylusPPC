@@ -289,7 +289,7 @@ void Uart::write(uint32_t pa, uint32_t v, int) {
     if (traceConfig && (pa & 0xFF) != 0x20) LOGI("uart%d: reg %02x <- %08x", idx, pa & 0xFF, v);
     switch (pa & 0xFF) {
         case 0x00: ulcon = v; break;
-        case 0x04: ucon = v; updateRx(); break;
+        case 0x04: ucon = v; updateRx(); updateTx(); break;
         case 0x08: ufcon = v; break;
         case 0x0C: umcon = v; break;
         case 0x20: {

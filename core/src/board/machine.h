@@ -23,6 +23,7 @@ class FolderShare;
 class Pcmcia;
 class Camera;  // camera.h
 class Modem;   // modem.h
+class Irda;    // irda.h
 class CodePatcher;  // codepatch.h
 class StateIO;
 uint32_t snapshotCrc(const uint8_t *p, size_t n);
@@ -88,6 +89,7 @@ public:
     std::unique_ptr<Pcmcia> pcmcia;  // network card slot
     std::unique_ptr<Camera> camera;  // WMDroid camera bridge (camera.h), at Camera::BASE
     std::unique_ptr<Modem> modem;    // virtual GSM modem on UART0 for rilgsm images (modem.h)
+    std::unique_ptr<Irda> irda;      // infrared (SIR) transceiver on UART2, tunnelled to other devices (irda.h)
     std::unique_ptr<CodePatcher> codePatch;  // host fixes to driver code in guest RAM (codepatch.h)
     std::vector<uint8_t> ram;
     std::atomic<bool> stopRequested{false};

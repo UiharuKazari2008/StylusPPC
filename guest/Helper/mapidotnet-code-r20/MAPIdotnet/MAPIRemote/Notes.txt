@@ -1,0 +1,2 @@
+﻿Useful site on Compact WCF: http://msdn.microsoft.com/en-us/magazine/cc164240.aspx
+ - Wrap XmlSerializer in class inheritted from System.Runtime.Serialization.XmlObjectSerializer

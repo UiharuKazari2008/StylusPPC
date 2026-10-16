@@ -42,3 +42,7 @@ dist/
 
 ### Generated icon candidates
 icon-candidates/
+
+### Third-party SDKs and sources used only to build guest libraries (not redistributed)
+third_party/wm6sdk/
+third_party/mapidotnet/

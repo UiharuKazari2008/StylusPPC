@@ -20,6 +20,15 @@ using Microsoft.Win32;
 //    app hears it ("call end", "call hold", "call mute", "call speaker").
 // If the app does not take a dialled call in time (not running, calls off), WM's call is hung up.
 //
+// Incoming calls: FakeRIL has a test channel in RIL_DevSpecific (command type 9: "a call comes in
+// from <number>", type 22: "the remote party hangs up call <id>"; docs/research-phone-calls-pim.md,
+// section F). When the phone rings, the app sends "call ring <number>"; FakeRIL then raises a real
+// RIL incoming call, so cprog shows its own incoming-call screen with the ringtone, caller ID from
+// Contacts, the call log and the missed-call notice. WM's Answer turns the call active (the app
+// answers the real call), Ignore / End remove it (the app rejects or ends the real one); when the
+// call is answered or ends on the phone, the helper answers it in WM (RIL_Answer) or lets the
+// "remote party" hang up.
+//
 // All RIL calls and all state live on one worker thread, so a RIL call that never returns cannot stop
 // the helper's mailbox loop. The RIL callbacks (a ril.dll thread) only copy their data into a queue:
 // calling back into the RIL, or waiting for a lock held by a thread that is inside the RIL, deadlocks
@@ -31,11 +40,18 @@ using Microsoft.Win32;
 //                                                  once, e.g. with the "patch" command)
 //                 call off <reason>                calls unavailable in the guest
 //                 call dial <id> <number>          WM placed an outgoing voice call
-//                 call end <id>                    WM's call ended (any side)
+//                 call ringing <id> <number|->     WM rings for the incoming call the app asked for
+//                 call noring <reason>             WM cannot ring (off, busy, noradio, timeout, ...)
+//                 call answer <id>                 WM's call was answered in WM (its Answer button)
+//                 call end <id>                    WM's call ended (any side; for a ringing call:
+//                                                  WM's Ignore)
 //                 call hold <id> <0|1>             WM held / retrieved the call
 //                 call mute <0|1>                  WM's microphone mute
 //                 call speaker <0|1>               WM's speakerphone
-//   app -> guest  call state <id> <pending|dialing|active|held|ended> [cause]
+//   app -> guest  call state <id> <pending|dialing|ringing|active|held|ended> [cause]
+//                 call ring <number|->             the phone rings: ring WM ("-": number withheld)
+//                 call answer                      rilgsm images: answer the call ringing through the
+//                                                  virtual modem (it was answered on the phone)
 //                 call info                        (diagnostics) answered by a "call info ..." line
 static class Calls
 {
@@ -53,8 +69,8 @@ static class Calls
     const uint RIL_NCLASS_CALLCTRL = 0x00010000, RIL_NCLASS_NETWORK = 0x00040000, RIL_NCLASS_RADIOSTATE = 0x00800000;
     const uint RIL_NOTIFY_REGSTATUSCHANGED = 0x00040001;
     const uint RIL_RESULT_OK = 1;
-    const int RIL_CALLDIR_OUTGOING = 2;
-    const int RIL_CALLSTAT_ACTIVE = 1, RIL_CALLSTAT_ONHOLD = 2;
+    const int RIL_CALLDIR_INCOMING = 1, RIL_CALLDIR_OUTGOING = 2;
+    const int RIL_CALLSTAT_ACTIVE = 1, RIL_CALLSTAT_ONHOLD = 2, RIL_CALLSTAT_INCOMING = 5, RIL_CALLSTAT_WAITING = 6;
     const int RIL_CALLTYPE_VOICE = 1;
     const uint RIL_OPSELMODE_AUTOMATIC = 1;
     const int CallInfoSize = 1072, AddressOffset = 0x2C;
@@ -77,9 +93,15 @@ static class Calls
         public int Id, Status;
         public string Number;
         public bool Acked, Ending;
+        public bool Incoming;      // rung in by the app ("call ring"), not dialled in WM
         public int Since;          // TickCount when seen / last acked
         public int Timeout;        // ms to wait for the app before hanging up
     }
+
+    // The incoming call asked for with "call ring", until FakeRIL lists it (it waits 1 s first).
+    static bool ringWait;
+    static int ringAsked;
+    static string ringNumber;
 
     static readonly List<RilEvent> events = new List<RilEvent>();  // filled by the RIL thread
     static IntPtr ril = IntPtr.Zero;
@@ -194,20 +216,27 @@ static class Calls
         Drain();
         // The call list after each call-control notification, and every second during a call (FakeRIL
         // does not notify every change); WM's mute (no notification at all) likewise.
-        if ((refresh || calls.Count > 0) && CanIssue("calls"))
+        if ((refresh || calls.Count > 0 || ringWait) && CanIssue("calls"))
         {
             refresh = false;
             Issue(RIL_GetCallList(ril), "calls");
         }
         if (calls.Count > 0 && CanIssue("mute")) Issue(RIL_GetAudioMuting(ril), "mute");
+        if (ringWait && Environment.TickCount - ringAsked > 8000)
+        {
+            ringWait = false;
+            Helper.Log("calls: FakeRIL did not ring");
+            Queue("call noring timeout");
+        }
         // A call the app has not taken in time (or with calls off) is hung up, so WM never waits
-        // forever on a call nothing places.
+        // forever on a call nothing places (or rings for a call nothing answers).
         foreach (WmCall c in calls.Values)
         {
             if (c.Ending || (enabled && Environment.TickCount - c.Since < c.Timeout)) continue;
             Helper.Log("calls: phone did not take call " + c.Id + "; hanging up");
             c.Ending = true;
-            Hangup();
+            if (c.Incoming) RemoteEnd(c.Id);
+            else Hangup();
         }
         if (calls.Count > 0 || speaker) PollSpeaker();
     }
@@ -433,6 +462,12 @@ static class Calls
             if (what == "calls") { if (ok) OnCallList(e.Data); }  // errors: keep what we know
             else if (what == "mute") { if (ok && e.Data != null && e.Data.Length >= 4) OnMute(BitConverter.ToInt32(e.Data, 0) != 0); }
             else if (what == "reg") { if (ok && e.Data != null && e.Data.Length >= 4) CheckRegistration(BitConverter.ToInt32(e.Data, 0)); }
+            else if (what == "ring" && !ok && ringWait)
+            {
+                ringWait = false;
+                Helper.Log("calls: ring -> 0x" + e.Code.ToString("X"));
+                Queue("call noring ril");
+            }
             else Helper.Log("calls: " + what + " -> " + (ok ? "ok" : "0x" + e.Code.ToString("X")));
         }
     }
@@ -476,7 +511,17 @@ static class Calls
             WmCall c;
             if (!calls.TryGetValue(id, out c))
             {
-                if (dir != RIL_CALLDIR_OUTGOING) { Helper.Log("calls: ignoring incoming call " + id); continue; }
+                if (dir != RIL_CALLDIR_OUTGOING)
+                {
+                    if (!ringWait) { Helper.Log("calls: ignoring incoming call " + id); continue; }
+                    // The call the app rang in: the app has 10 s to confirm it ("call state <id> ringing").
+                    ringWait = false;
+                    c = new WmCall { Id = id, Status = status, Number = number, Incoming = true, Since = Environment.TickCount, Timeout = 10000 };
+                    calls[id] = c;
+                    Helper.Log("calls: WM rings for " + ringNumber + " (call " + id + ", status " + status + ")");
+                    Queue("call ringing " + id + " " + ringNumber);
+                    continue;
+                }
                 c = new WmCall { Id = id, Status = status, Number = number, Since = Environment.TickCount, Timeout = 10000 };
                 calls[id] = c;
                 Helper.Log("calls: WM dials " + number + " (call " + id + ", status " + status + ")");
@@ -486,6 +531,9 @@ static class Calls
             if (status != c.Status)
             {
                 Helper.Log("calls: call " + id + " status " + c.Status + " -> " + status);
+                // Answered: WM's Answer, or ours for a call answered on the phone (the app ignores that echo).
+                if (c.Incoming && (c.Status == RIL_CALLSTAT_INCOMING || c.Status == RIL_CALLSTAT_WAITING) && status == RIL_CALLSTAT_ACTIVE)
+                    Queue("call answer " + id);
                 if (status == RIL_CALLSTAT_ONHOLD) Queue("call hold " + id + " 1");
                 else if (c.Status == RIL_CALLSTAT_ONHOLD && status == RIL_CALLSTAT_ACTIVE) Queue("call hold " + id + " 0");
                 c.Status = status;
@@ -519,7 +567,7 @@ static class Calls
     public static string Command(string args)
     {
         string[] p = args.Split(' ');
-        if (p.Length >= 3 && p[0] == "state" || p[0] == "info")
+        if (p.Length >= 3 && p[0] == "state" || p.Length >= 2 && p[0] == "ring" || p[0] == "info" || p[0] == "answer")
         {
             lock (commands) commands.Add(p);
             return "ok";
@@ -530,8 +578,72 @@ static class Calls
     static string Do(string[] p)
     {
         if (p[0] == "state") return State(p);
+        if (p[0] == "ring") return Ring(p[1]);
+        if (p[0] == "answer") return AnswerModemCall();
         Queue("call info " + Info());
         return "ok";
+    }
+
+    // rilgsm images: the call ringing through the virtual modem was answered on the phone. cprog keeps
+    // the caller's number only when it answers itself (the modem switching the call to active, or
+    // another RIL client's RIL_Answer, leave the call screen saying "Unknown"), so this presses WM's
+    // Talk key, as the incoming-call bubble's Answer does (AT+CHLD=2 to the modem).
+    static string AnswerModemCall()
+    {
+        if (!Patch.ModemRil) return "not a modem image";
+        const byte VK_TTALK = 0x72;
+        keybd_event(VK_TTALK, 0, 0, 0);
+        keybd_event(VK_TTALK, 0, 2 /* KEYEVENTF_KEYUP */, 0);
+        return "ok";
+    }
+
+    [DllImport("coredll.dll")] static extern void keybd_event(byte vk, byte scan, int flags, int extra);
+
+    // The phone rings: FakeRIL's test channel makes the call come in (it waits 1 s, then raises
+    // RIL_NOTIFY_RING and lists the call; cprog shows its incoming-call screen). "-": no caller ID.
+    static string Ring(string number)
+    {
+        string why = null;
+        if (Patch.ModemRil) why = "modem";
+        else if (!enabled) why = "off";
+        else if (ril == IntPtr.Zero) why = "noril";
+        else if (loadedLate) why = "restart";   // cprog does not know FakeRIL until WM restarts
+        else if (calls.Count > 0 || ringWait) why = "busy";
+        if (why != null) { Queue("call noring " + why); return "no: " + why; }
+        bool hidden = number == "-" || number.Length == 0;
+        string digits = hidden ? "" : number.TrimStart('+');
+        // FakeRIL's command 9 (fn 0x7B4DBBF0): cbSize, type, WCHAR number[260], address type,
+        // presentation allowed, auto-hang-up seconds (0: never), line (1-based).
+        byte[] b = new byte[0x220];
+        BitConverter.GetBytes(b.Length).CopyTo(b, 0);
+        BitConverter.GetBytes(9).CopyTo(b, 4);
+        for (int i = 0; i < digits.Length && i < 255; i++) BitConverter.GetBytes(digits[i]).CopyTo(b, 8 + 2 * i);
+        BitConverter.GetBytes(number.StartsWith("+") ? 1 : 0).CopyTo(b, 0x210);  // RIL_ADDRTYPE_INTERNATIONAL
+        BitConverter.GetBytes(hidden ? 0 : 1).CopyTo(b, 0x214);
+        BitConverter.GetBytes(1).CopyTo(b, 0x21C);
+        int hr = RIL_DevSpecific(ril, b, b.Length);
+        if (hr <= 0) { Queue("call noring ril"); return "DevSpecific 0x" + hr.ToString("X8"); }
+        pending[hr] = "ring";
+        ringWait = true;
+        ringAsked = Environment.TickCount;
+        ringNumber = hidden ? "-" : number;
+        refresh = true;
+        return "ok";
+    }
+
+    // FakeRIL's command 22: the remote party hangs up call <id> (WM shows a missed call when it
+    // was still ringing, else "Call ended").
+    static bool RemoteEnd(int id)
+    {
+        if (ril == IntPtr.Zero) return false;
+        byte[] b = new byte[12];
+        BitConverter.GetBytes(b.Length).CopyTo(b, 0);
+        BitConverter.GetBytes(22).CopyTo(b, 4);
+        BitConverter.GetBytes(id).CopyTo(b, 8);
+        int hr = RIL_DevSpecific(ril, b, b.Length);
+        Issue(hr, "remote end");
+        refresh = true;
+        return hr > 0;
     }
 
     static string State(string[] p)
@@ -547,17 +659,26 @@ static class Calls
                 c.Acked = true; c.Since = Environment.TickCount; c.Timeout = 60000;
                 return "ok";
             case "dialing":   // the real call is being placed; it may ring for a long time
+            case "ringing":   // the phone rings for WM's incoming call until it is answered or ends
             case "held":
                 c.Acked = true; c.Since = Environment.TickCount; c.Timeout = int.MaxValue;
                 return "ok";
             case "active":
                 c.Acked = true; c.Timeout = int.MaxValue;
                 if (c.Status == RIL_CALLSTAT_ACTIVE || c.Status == RIL_CALLSTAT_ONHOLD) return "ok already";
+                if (c.Incoming)
+                {
+                    // Answered on the phone (or a headset): WM's ringing call connects too.
+                    Issue(RIL_Answer(ril), "answer");
+                    refresh = true;
+                    return "ok";
+                }
                 return OpenGate() ? "ok" : "ok no gate";  // without the gate FakeRIL connects by itself after 2.5 s
             case "ended":
                 if (c.Ending) return "ok already";
                 c.Ending = true;
                 Helper.Log("calls: phone call " + id + " ended" + (p.Length > 3 ? " (" + p[3] + ")" : ""));
+                if (c.Incoming) return RemoteEnd(id) ? "ok" : "remote end failed";
                 return Hangup() ? "ok" : "hangup failed";
         }
         return "bad state";
@@ -569,7 +690,7 @@ static class Calls
         var sb = new StringBuilder("gate=" + (gateOk ? 1 : 0) + (r == IntPtr.Zero ? " nopatchdev" :
             " status=" + Marshal.ReadInt32(r, RegStatus).ToString("X") + " counter=" + Marshal.ReadInt32(r, RegGate)) + " ril=" + (ril != IntPtr.Zero));
         foreach (WmCall c in calls.Values)
-            sb.Append(" [" + c.Id + " " + c.Number + " status=" + c.Status + (c.Acked ? " acked" : "") + (c.Ending ? " ending" : "") + "]");
+            sb.Append(" [" + c.Id + " " + c.Number + " status=" + c.Status + (c.Incoming ? " in" : "") + (c.Acked ? " acked" : "") + (c.Ending ? " ending" : "") + "]");
         return sb.ToString();
     }
 
@@ -659,6 +780,8 @@ static class Calls
     [DllImport("ril.dll")] static extern int RIL_GetCallList(IntPtr h);
     [DllImport("ril.dll")] static extern int RIL_GetSubscriberNumbers(IntPtr h);
     [DllImport("ril.dll")] static extern int RIL_Hangup(IntPtr h);
+    [DllImport("ril.dll")] static extern int RIL_Answer(IntPtr h);
+    [DllImport("ril.dll")] static extern int RIL_DevSpecific(IntPtr h, byte[] parms, int size);
     [DllImport("ril.dll")] static extern int RIL_GetAudioMuting(IntPtr h);
     [DllImport("ril.dll")] static extern int RIL_GetRegistrationStatus(IntPtr h);
     [DllImport("ril.dll")] static extern int RIL_RegisterOnNetwork(IntPtr h, uint mode, IntPtr operatorNames);
