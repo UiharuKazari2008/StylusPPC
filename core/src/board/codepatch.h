@@ -9,6 +9,12 @@
 //   - fakeril.dll (WM 6.5.3): the dial thread "answers" every call after 2 s. The gate patch keeps
 //     the call dialling until the helper says the real (Android) call is active
 //     (docs/research-phone-calls-pim.md, section E). Only while the helper arms it.
+//   - fakeril.dll (WM 6.5.3, WM 5): its default SIM holds the fake own number 14250010001 /
+//     14250010002 ("This is a Fake Number"), which WM shows in Phone > Options. celltsp reads it once
+//     when the phone stack starts, so the number has to be in FakeRIL's default table (.data) before
+//     FakeRIL copies it into its SIM store: setOwnNumber() rewrites every copy of the default MSISDN
+//     records found in RAM (both records = the phone's number), searching a while after
+//     each guest restart (docs/research-cellular.md 6.1).
 //
 // The host sees all of physical memory, so each fix is found by a byte signature of the code around
 // it (any load address, any copy) rather than at a fixed VA, and the guest needs no privileges.
@@ -32,7 +38,10 @@
 // the helper runs again.
 #pragma once
 #include "bus.h"
+#include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <string>
 #include <vector>
 
 namespace wm {
@@ -57,6 +66,10 @@ public:
     void scanPage(uint32_t pa);
 
     void onGuestReset();   // the guest restarts: the helper arms the gate again once it runs
+    // The phone's own number for FakeRIL's SIM ("+digits" or digits; "" = keep FakeRIL's default).
+    // Any thread; takes effect when FakeRIL next loads (a guest restart), see above.
+    void setOwnNumber(const std::string &number);
+    void setRam(uint8_t *host, uint32_t size) { ram = host; ramSize = size; }
     void setGateArmed(bool on);
     bool openGate();       // the dialling call connects; false if the gate is not in place
     uint32_t status();     // ST_* bits
@@ -77,12 +90,25 @@ private:
     Site *site(int patch, uint32_t pa, bool &seen);   // finds or adds
     bool verified(const Site &s, Match want) const;
     void invalidate(uint32_t pa);
+    void ownNumberStep();       // emulation thread, once per page scan
+    void searchOwnNumber();
 
     Cpu &cpu;
     Bus &bus;
     std::vector<Site> sites;   // places where a signature was seen (pruned when they stop matching)
     bool gateArmed = false;
     uint32_t gateCounter = 0;  // last value written to the gate word
+
+    uint8_t *ram = nullptr;    // guest RAM (PA 0x30000000), searched for the SIM records
+    uint32_t ramSize = 0;
+    std::mutex numberMu;
+    std::string numberIn;               // from setOwnNumber (numberMu)
+    std::atomic<uint32_t> numberGen{0};
+    uint32_t numberTaken = 0;
+    std::string number;                 // in use (emulation thread)
+    uint8_t record[2][35];              // the MSISDN records written: the number, then empty
+    std::vector<uint32_t> numberSites;  // RAM offset << 1 | record index, written since the last restart
+    uint32_t numberScans = 0;           // page scans left in the search window
 };
 
 }  // namespace wm

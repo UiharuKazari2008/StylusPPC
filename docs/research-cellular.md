@@ -321,6 +321,17 @@ simultaneous AT and data, and works on fresh images.
   hold it before FakeRIL's init copies it. That is a host-side job (find the 48-byte signature above in guest RAM when the page
   holding it is in place, before FakeRIL's SIM init runs, and rewrite the two BCD numbers), or a decoded `SimFile` image on
   host-provided storage. A guest helper starts too late for either.
+- **Done in the core (2026-10-16):** `CodePatcher::setOwnNumber` (core/src/board/codepatch.cpp), fed from
+  `NativeBridge.modemNetwork(..., number)` (PhoneNumber.own) and the CLI `--own-number`. After every guest restart, every
+  512th code-page scan for the next 24 000 scans searches guest RAM for FakeRIL's 35-byte default MSISDN record
+  ("This is a Fake Number" + `07 91 41 52 00 01 00 F1|F2 FF..`) and rewrites each copy: alpha "My number", BCD of the
+  phone's number, TON 0x91 with a leading `+` (else 0x81). Both records get the number: with record 2 unused (all FF),
+  FakeRIL's `RIL_GetSubscriberNumbers` fails (result 3). In a 6.5.3 warm reboot the `.data` table is in RAM from about
+  scan 800 and FakeRIL's heap copies appear at about scan 4000, so the search catches the table first.
+  Verified in the CLI: 6.5.3 (`calls/c4.wms`, then a reboot) Phone > Menu > Options "Number: +1 (503) 555-0123" (baseline
+  "+1 (425) 001-0001"); WM 5 (`wm5gsmvga.bin`, from a state then a reboot) Options "Phone - 1 (503) 555-0123". On both the
+  helper's `number probe` gives `[15035550123 / My number]` twice. WM 5's FakeRIL uses the same record bytes, and its SIM store
+  keeps the rewritten number across a warm reboot. A number change takes effect at the next guest restart (celltsp caches it).
 
 ## 7. Debugging aids inside the guest
 

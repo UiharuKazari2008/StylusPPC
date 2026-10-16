@@ -289,6 +289,7 @@ int main(int argc, char **argv) {
     std::vector<double> resets;                         // --reset
     std::vector<std::pair<double, std::string>> puts;   // --put T:path:text  (e.g. a helper mailbox command)
     std::vector<std::pair<double, std::string>> batteries;  // --battery T:ac,percent  (the DE battery device)
+    const char *ownNumber = nullptr;
     double burstT0 = 0, burstT1 = -1, burstDt = 0;      // --burst
     std::string burstPrefix;
     double profileFrom = -1;
@@ -363,6 +364,7 @@ int main(int argc, char **argv) {
             size_t c = v.find(':');
             shots.push_back({atof(v.substr(0, c).c_str()), v.substr(c + 1)});
         }
+        else if (a == "--own-number") ownNumber = next();  // FakeRIL's SIM number (codepatch.h)
         else if (a == "--battery") {
             std::string v = next();
             size_t c = v.find(':');
@@ -449,6 +451,7 @@ int main(int argc, char **argv) {
     Machine m(cfg);
     std::string err;
     if (!m.load(err)) { LOGE("load failed: %s", err.c_str()); return 1; }
+    if (ownNumber) m.codePatch->setOwnNumber(ownNumber);
     if (m.cpu.jit) jitProfileInterp(m.cpu.jit, true);
     if (umstat0 >= 0) m.uart0.umstat = (uint32_t)umstat0;
     if (loadStatePath) {

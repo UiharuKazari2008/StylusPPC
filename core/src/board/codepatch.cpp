@@ -3,7 +3,9 @@
 #include "../arm/cpu.h"
 #include "../arm/jit.h"
 #include "../util/log.h"
+#include <algorithm>
 #include <cstring>
+#include <functional>
 
 namespace wm {
 
@@ -168,6 +170,15 @@ const PatchDef kPatches[] = {
 constexpr int kNumPatches = (int)(sizeof kPatches / sizeof kPatches[0]);
 constexpr size_t kMaxSites = 32;
 
+// FakeRIL's default EF MSISDN (6F40) records, 35 bytes each (GSM 11.11 10.5.5): 21-byte alpha, BCD
+// length, TON/NPI, 10 BCD bytes, CCP, EXT. Record 1 is 14250010001, record 2 14250010002. The same
+// bytes are in the 6.5.3 and WM 5 FakeRIL builds (their tables around them differ).
+const uint8_t kFakeMsisdn[28] = {
+    'T', 'h', 'i', 's', ' ', 'i', 's', ' ', 'a', ' ', 'F', 'a', 'k', 'e', ' ', 'N', 'u', 'm', 'b', 'e', 'r',
+    0x07, 0x91, 0x41, 0x52, 0x00, 0x01, 0x00};  // then F1 (record 1) or F2 (record 2), then 6 x FF
+constexpr uint32_t kNumberWindow = 24000;   // page scans after a restart (a boot takes 6000-14000)
+constexpr uint32_t kNumberEvery = 512;      // a RAM search every this many scans (~10-30 ms each)
+
 uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 void wr32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 
@@ -259,6 +270,7 @@ void CodePatcher::unapply(Site &s) {
 
 void CodePatcher::scanPage(uint32_t pa) {
     pa &= ~0xFFFu;
+    ownNumberStep();
     uint8_t *page = pageOf(pa);
     if (!page) return;
     pagesScanned++;
@@ -286,6 +298,80 @@ void CodePatcher::scanPage(uint32_t pa) {
 void CodePatcher::onGuestReset() {
     gateArmed = false;
     sites.clear();
+    numberSites.clear();
+    numberScans = kNumberWindow;   // FakeRIL loads again with its default SIM
+}
+
+void CodePatcher::setOwnNumber(const std::string &n) {
+    std::lock_guard<std::mutex> lock(numberMu);
+    if (n == numberIn) return;
+    numberIn = n;
+    numberGen++;
+}
+
+void CodePatcher::ownNumberStep() {
+    if (numberGen.load(std::memory_order_relaxed) != numberTaken) {
+        std::string n;
+        {
+            std::lock_guard<std::mutex> lock(numberMu);
+            n = numberIn;
+            numberTaken = numberGen;
+        }
+        bool plus = !n.empty() && n[0] == '+';
+        std::string digits;
+        for (char c : n)
+            if (c >= '0' && c <= '9' && digits.size() < 20) digits += c;
+        uint8_t old[2][35];
+        memcpy(old, record, sizeof old);
+        bool had = !number.empty();
+        number = digits.empty() ? "" : (plus ? "+" : "") + digits;
+        if (!number.empty()) {
+            memset(record, 0xFF, sizeof record);
+            static const char kAlpha[] = "My number";
+            memcpy(record[0], kAlpha, sizeof kAlpha - 1);
+            record[0][21] = (uint8_t)(1 + (digits.size() + 1) / 2);
+            record[0][22] = plus ? 0x91 : 0x81;   // international / unknown, ISDN numbering plan
+            for (size_t i = 0; i < digits.size(); i++) {
+                uint8_t d = (uint8_t)(digits[i] - '0');
+                uint8_t &b = record[0][23 + i / 2];
+                b = (i & 1) ? (uint8_t)((b & 0x0F) | (d << 4)) : (uint8_t)(0xF0 | d);
+            }
+            // Record 2 the same: FakeRIL's RIL_GetSubscriberNumbers fails on an unused (all FF) record.
+            memcpy(record[1], record[0], 35);
+        }
+        // Records written for the previous number follow the new one (FakeRIL's default is not
+        // restored for ""; that needs a restart anyway).
+        if (had && !number.empty() && ram) {
+            for (uint32_t s : numberSites) {
+                uint32_t off = s >> 1, rec = s & 1;
+                if (off + 35 <= ramSize && memcmp(ram + off, old[rec], 35) == 0) memcpy(ram + off, record[rec], 35);
+            }
+        }
+        LOGI("codepatch: FakeRIL own number %s", number.empty() ? "(FakeRIL's default)" : number.c_str());
+        numberScans = kNumberWindow;
+    }
+    if (!numberScans) return;
+    numberScans--;
+    if (!number.empty() && numberScans % kNumberEvery == 0) searchOwnNumber();
+}
+
+void CodePatcher::searchOwnNumber() {
+    if (!ram || ramSize < 35) return;
+    std::boyer_moore_horspool_searcher<const uint8_t *> find(kFakeMsisdn, kFakeMsisdn + sizeof kFakeMsisdn);
+    const uint8_t *end = ram + ramSize - 35, *p = ram;
+    while ((p = std::search(p, end, find)) != end) {
+        uint32_t off = (uint32_t)(p - ram);
+        uint8_t last = p[28];
+        bool tail = std::all_of(p + 29, p + 35, [](uint8_t b) { return b == 0xFF; });
+        if (tail && (last == 0xF1 || last == 0xF2)) {
+            int rec = last == 0xF1 ? 0 : 1;
+            memcpy(ram + off, record[rec], 35);
+            numberSites.push_back(off << 1 | (uint32_t)rec);
+            LOGI("codepatch: FakeRIL own number %s: MSISDN record %d at pa %08x", number.c_str(), rec + 1,
+                 0x30000000u + off);
+        }
+        p += 1;
+    }
 }
 
 void CodePatcher::setGateArmed(bool on) {

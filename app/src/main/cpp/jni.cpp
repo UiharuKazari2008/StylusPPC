@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <android/native_window_jni.h>
 #include "board/pcmcia.h"
+#include "board/codepatch.h"  // FakeRIL own number
 #include "net/usernet.h"
 #include <jni.h>
 #include <atomic>
@@ -585,6 +586,7 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemNet
     // A quote would end the AT string early.
     for (std::string *t : {&n.op, &n.numeric, &n.number}) t->erase(std::remove(t->begin(), t->end(), '"'), t->end());
     s->m->modem->setNetwork(n);
+    s->m->codePatch->setOwnNumber(n.number);  // FakeRIL images (WM 6.5.3, WM 5): the SIM's own number
 }
 
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemCallState(JNIEnv *env, jobject, jlong h,

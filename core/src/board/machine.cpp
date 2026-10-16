@@ -157,6 +157,7 @@ bool Machine::load(std::string &err) {
     if (cfg.memMB > 256) cfg.memMB = 256;
     ram.assign((size_t)cfg.memMB << 20, 0);
     bus.mapMemory(0x30000000, (uint32_t)ram.size(), ram.data(), true);
+    codePatch->setRam(ram.data(), (uint32_t)ram.size());
 
     // NOR flash bank 0: 128 MB on DE 2.0/3.0, erased beyond the image.
     std::vector<uint8_t> nor(128u << 20, 0xFF);

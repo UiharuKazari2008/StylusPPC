@@ -45,7 +45,7 @@ Each release keeps its own saved sessions and its own device settings, so you ca
 
 ## Getting started
 
-1. Install `PocketStylus-1.0.apk` from the release page (Android 10 or newer, ARM64).
+1. Install the latest `PocketStylus-<version>.apk` from the release page (Android 10 or newer, ARM64).
 2. **Get the ROM images.** They are Microsoft's and are not included in PocketStylus. Download the [Windows Mobile Emulation Images Archive](https://archive.org/details/windows-mobile-emulation-images-archive.-7z) from the Internet Archive and extract it with 7-Zip. The images PocketStylus uses are in each release's `Emulation Images` folder under `ARM-based/`:
    - `Windows Mobile 6.5.3 Professional/Emulation Images`
    - `Windows Mobile 6.1.4 Professional/Emulation Images`
@@ -135,6 +135,7 @@ Each section below expands to show how the feature works.
 <details>
 <summary><b>Status bar: battery, signal, carrier, data type, Wi-Fi</b></summary>
 
+- **Your phone number:** on WM 5.0 and 6.5.3 the emulator core rewrites FakeRIL's built-in fake SIM number with yours before the radio starts; on 6.1.4 the virtual modem reports it. It shows in Phone → Menu → Options. It comes from the SIM, or from **My phone number** in the Phone calls settings, and a change shows after the next Windows Mobile restart.
 - **Battery:** DE's battery device reports the phone's real charge, charging state and temperature. In-memory patches fix the thresholds in Microsoft's `battdrvr.dll`, which otherwise warned "Main battery low" at 65%.
 - **Signal, carrier, roaming and data type:** written to `HKLM\System\State\Phone` from Android's telephony state.
 - **Network Indicator Type:** shows GSM letters (G / E / 3G / H) or CDMA letters (1X / Ev). A wired-network override that hid the letters is cleared by the helper.
