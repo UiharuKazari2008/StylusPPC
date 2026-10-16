@@ -19,8 +19,8 @@ android {
         applicationId = "jp.net.seventhreeseven.wmdroid"
         minSdk = 29
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.0.1"
+        versionCode = 12
+        versionName = "1.0.2"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }

@@ -39,3 +39,6 @@ __pycache__/
 
 ### Release output
 dist/
+
+### Generated icon candidates
+icon-candidates/
