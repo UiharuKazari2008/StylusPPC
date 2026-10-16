@@ -3,9 +3,7 @@
 #include "../arm/cpu.h"
 #include "../arm/jit.h"
 #include "../util/log.h"
-#include <cstdlib>
 #include <cstring>
-#include <string>
 
 namespace wm {
 
@@ -264,27 +262,6 @@ void CodePatcher::scanPage(uint32_t pa) {
     uint8_t *page = pageOf(pa);
     if (!page) return;
     pagesScanned++;
-    if (getenv("WM_SIMTRACE")) {  // TEMP experiment
-        static std::vector<uint32_t> last;
-        static uint64_t n = 0;
-        if (n++ % 4 == 0) {
-            std::vector<uint32_t> hits;
-            bool w;
-            for (uint32_t b = 0x30000000; b < 0x3C000000; b += 0x1000) {
-                uint8_t *h = bus.hostPage(b, w);
-                if (!h) continue;
-                for (int o = 0; o + 21 <= 0x1000; o++)
-                    if (h[o] == 'T' && memcmp(h + o, "This is a Fake Number", 21) == 0) hits.push_back(b + o);
-            }
-            if (hits != last) {
-                std::string l;
-                char t[16];
-                for (uint32_t x : hits) { snprintf(t, sizeof t, " %08x", x); l += t; }
-                LOGI("simtrace: scan %llu pa %08x pc %08x pid %08x hits%s", (unsigned long long)n, pa, cpu.pc(), cpu.cp15_pid, l.c_str());
-                last = hits;
-            }
-        }
-    }
     for (int off = 0; off < 0x1000; off += 4) {
         uint32_t v = rd32(page + off);
         for (int k = 0; k < kNumPatches; k++) {
