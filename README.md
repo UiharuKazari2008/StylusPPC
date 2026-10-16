@@ -46,7 +46,12 @@ Each release keeps its own saved sessions and its own device settings, so you ca
 ## Getting started
 
 1. Install `PocketStylus-1.0.apk` from the release page (Android 10 or newer, ARM64).
-2. **Get the ROM images.** They are Microsoft's and are not included. They come with the *Windows Mobile 6.5.3 Developer Tool Kit*, the *Windows Mobile 6 SDK* emulator image packages (6.1.4), and the *Windows Mobile 5.0 SDK* emulator images. In each package, the files you need are in its `Emulation Images` folder.
+2. **Get the ROM images.** They are Microsoft's and are not included in PocketStylus. Download the [Windows Mobile Emulation Images Archive](https://archive.org/details/windows-mobile-emulation-images-archive.-7z) from the Internet Archive and extract it with 7-Zip. The images PocketStylus uses are in each release's `Emulation Images` folder under `ARM-based/`:
+   - `Windows Mobile 6.5.3 Professional/Emulation Images`
+   - `Windows Mobile 6.1.4 Professional/Emulation Images`
+   - `Windows Mobile 5.0 (Pocket PC)/Emulation Images`
+
+   (They originally shipped with the *Windows Mobile 6.5.3 Developer Tool Kit*, the *Windows Mobile 6 SDK* image packages and the *Windows Mobile 5.0 SDK*.)
 3. Open PocketStylus. In the OS list:
    - tap **Select ROM folder…** on a release and pick its `Emulation Images` folder, which imports every image that release knows; or
    - open the release and tap **Select ROM image…** next to one missing image.
