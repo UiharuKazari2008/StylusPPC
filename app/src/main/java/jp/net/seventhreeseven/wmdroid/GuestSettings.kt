@@ -1,0 +1,195 @@
+package jp.net.seventhreeseven.wmdroid
+
+import java.io.File
+
+/**
+ * The settings Windows Mobile's own WMDroid settings app shows (guest/Helper/SettingsApp.cs).
+ * The app writes this catalogue with current values to the mailbox as settings.ini; the guest
+ * builds its pages from it and sends "set key=value" back. Live settings apply at once; the few
+ * marked restart apply when the guest app is closed with Done (Windows Mobile restarts).
+ *
+ * settings.ini: one entry per line, tab-separated:
+ *   page, key, kind (bool|choice|slider|action), label, value, restart (0|1),
+ *   options (value=label;...) for a choice, min:max for a slider; an action's value is its command
+ */
+object GuestSettings {
+    enum class Kind(val id: String) { BOOL("bool"), CHOICE("choice"), SLIDER("slider"), ACTION("action") }
+
+    class Entry(
+        val page: String, val key: String, val kind: Kind, val label: String,
+        val get: (Settings) -> String, val set: (Settings, String) -> Unit,
+        val options: List<Pair<String, String>> = emptyList(), val min: Int = 0, val max: Int = 100,
+        val restart: Boolean = false,
+    )
+
+    private fun bool(page: String, key: String, label: String, get: (Settings) -> Boolean, set: (Settings, Boolean) -> Unit, restart: Boolean = false) =
+        Entry(page, key, Kind.BOOL, label, { if (get(it)) "1" else "0" }, { s, v -> set(s, v == "1") }, restart = restart)
+
+    private fun choice(page: String, key: String, label: String, options: List<Pair<String, String>>,
+                       get: (Settings) -> String, set: (Settings, String) -> Unit, restart: Boolean = false) =
+        Entry(page, key, Kind.CHOICE, label, get, { s, v -> if (options.any { it.first == v }) set(s, v) }, options, restart = restart)
+
+    private fun slider(page: String, key: String, label: String, min: Int, max: Int, get: (Settings) -> Int, set: (Settings, Int) -> Unit) =
+        Entry(page, key, Kind.SLIDER, label, { get(it).toString() }, { s, v -> v.toIntOrNull()?.let { set(s, it.coerceIn(min, max)) } },
+            min = min, max = max)
+
+    /** A button: the guest sends [command] (handled by the app like any mailbox message). */
+    private fun action(page: String, key: String, label: String, command: String) =
+        Entry(page, key, Kind.ACTION, label, { command }, { _, _ -> })
+
+    private val keyActions = Keymap.KeyAction.entries.map { it.id to it.label }
+
+    // Windows Mobile's hardware Buttons 1-4 (Settings > Personal > Buttons): the special actions,
+    // ids as guest/Helper/Buttons.cs takes them, or BUTTON_WM to leave WM's own assignment alone.
+    const val BUTTON_WM = "wm"
+    private val buttonActions = listOf(
+        BUTTON_WM to "Windows Mobile's own setting", "start" to "Start Menu", "home" to "Home",
+        "okclose" to "OK/Close", "contextmenu" to "Context Menu", "inputpanel" to "Input Panel",
+        "leftsoft" to "Left Softkey", "rightsoft" to "Right Softkey", "rotate" to "Rotate Screen",
+        "scrollup" to "Scroll Up", "scrolldown" to "Scroll Down", "scrollleft" to "Scroll Left",
+        "scrollright" to "Scroll Right", "none" to "None")
+    private fun hwButton(n: Int, key: String, label: String) =
+        choice("Hardware", key, label, buttonActions, { it.hwButton(n) }, { s, v -> s.setHwButton(n, v) })
+
+    /**
+     * The helper command for the Buttons choices. The buttons are sent as stock keys (Keymap.HwButtons),
+     * so only the choices no stock key reaches are listed, for WM to store; the helper answers with
+     * WM's assignments ("buttons ..." -> Settings.hwButtonMap) either way. It stores a choice only
+     * when it differs from the one it stored last, so it is safe to send on every hello and settings
+     * change, and changes made in WM's own Buttons page stay otherwise (Buttons.cs).
+     */
+    fun buttonsCommand(s: Settings) = ("buttons sync " + (1..4).filter {
+        Keymap.HwButtons.needsStore(it, s.hwButton(it), s.hwButtonMap)
+    }.joinToString(" ") { "$it=${s.hwButton(it)}" }).trim()
+
+    // Background: kind (unrestricted / suspend / hibernate) and the timer before it acts.
+    private fun bgKind(s: Settings) = when (s.backgroundMode) {
+        Settings.BG_RUN -> "run"
+        Settings.BG_HIBERNATE, Settings.BG_HIBERNATE_AFTER -> "hibernate"
+        else -> "suspend"
+    }
+    private fun bgTimer(s: Settings) =
+        if (s.backgroundMode == Settings.BG_SUSPEND_AFTER || s.backgroundMode == Settings.BG_HIBERNATE_AFTER) s.backgroundMinutes else 0
+    private fun setBg(s: Settings, kind: String, minutes: Int) {
+        s.backgroundMode = when {
+            kind == "run" -> Settings.BG_RUN
+            kind == "hibernate" -> if (minutes > 0) Settings.BG_HIBERNATE_AFTER else Settings.BG_HIBERNATE
+            else -> if (minutes > 0) Settings.BG_SUSPEND_AFTER else Settings.BG_SUSPEND
+        }
+        if (minutes > 0) s.backgroundMinutes = minutes
+    }
+
+    val entries: List<Entry> = listOf(
+        // ---- Display ----
+        bool("Display", "stats", "Performance overlay", { it.showStats }, { s, v -> s.showStats = v }),
+        choice("Display", "filter", "Screen scaling", listOf("0" to "Smooth", "1" to "Sharp pixels", "2" to "Enhanced"),
+            { it.screenFilter.toString() }, { s, v -> s.screenFilter = v.toInt() }),
+        bool("Display", "rotate", "Auto-Rotate", { it.rotateGuest }, { s, v -> s.rotateGuest = v }),
+        slider("Display", "rotdelay", "Rotation Delay (ms)", 200, 3000, { it.rotationDelayMs }, { s, v -> s.rotationDelayMs = v }),
+        slider("Display", "rotsens", "Rotation Sensitivity", 0, 100, { it.rotationSensitivity }, { s, v -> s.rotationSensitivity = v }),
+        bool("Display", "brightness", "Backlight follows Android", { it.syncBrightness }, { s, v -> s.syncBrightness = v }),
+        // ---- Design ----
+        choice("Design", "hwkeys", "Hardware Keys", listOf("slim" to "Slim 4 Button Row", "full" to "Full 6 Button + D-Pad", "none" to "None"),
+            { if (!it.keysOn) "none" else if (it.dpadOn) "full" else "slim" },
+            { s, v -> s.keysOn = v != "none"; if (v != "none") s.dpadOn = v == "full" }),
+        choice("Design", "backdrop", "Shell Skin", listOf(SkinLayout.BACKDROP_BLACK to "AMOLED Black", SkinLayout.BACKDROP_GRAY to "Dark Gray",
+            SkinLayout.BACKDROP_SILVER to "Sleek Silver", SkinLayout.BACKDROP_WHITE to "Glossy White"),
+            { it.backdrop }, { s, v -> s.backdrop = v }),
+        bool("Design", "wallpaper", "Android Wallpaper under Skin", { it.showWallpaper }, { s, v -> s.showWallpaper = v }),
+        slider("Design", "blur", "Android Wallpaper Blur", 0, 25, { it.wallpaperBlur }, { s, v -> s.wallpaperBlur = v }),
+        slider("Design", "opacity", "Skin Opacity", 0, 100, { it.backdropOpacity }, { s, v -> s.backdropOpacity = v }),
+        bool("Design", "theme", "Sync Android's Color Theme", { it.syncTheme }, { s, v -> s.syncTheme = v }),
+        bool("Design", "homewall", "Sync Android's Wallpaper", { it.syncWallpaper }, { s, v -> s.syncWallpaper = v }),
+        bool("Design", "shine", "Enable Gyro Key Shine", { it.keyShine }, { s, v -> s.keyShine = v }),
+        slider("Design", "shinebright", "Brightness", 0, 100, { it.shineBrightness }, { s, v -> s.shineBrightness = v }),
+        slider("Design", "shinewidth", "Width", 0, 100, { it.shineWidth }, { s, v -> s.shineWidth = v }),
+        bool("Design", "backlight", "Enable Key Backlights", { it.backlightOn }, { s, v -> s.backlightOn = v }),
+        slider("Design", "blintensity", "Intensity", 0, 100, { it.backlightIntensity }, { s, v -> s.backlightIntensity = v }),
+        choice("Design", "bltimeout", "Timeout", listOf("5" to "5 seconds", "10" to "10 seconds", "30" to "30 seconds",
+            "60" to "1 minute", "0" to "Always on"), { it.backlightTimeout.toString() }, { s, v -> s.backlightTimeout = v.toInt() }),
+        choice("Design", "blcolor", "Color", listOf("white" to "White", "blue" to "Blue", "green" to "Green", "amber" to "Amber",
+            "red" to "Red", "theme" to "Match Theme"), { it.backlightColor }, { s, v -> s.backlightColor = v }),
+        slider("Design", "bldirt", "Dirtiness", 0, 100, { it.backlightDirt }, { s, v -> s.backlightDirt = v }),
+        bool("Design", "fold", "Slide Out Keyboard (Foldables)", { it.foldMode }, { s, v -> s.foldMode = v }),
+        choice("Design", "foldkb", "Keyboard Layout", listOf("skin" to "Skin Layout", "imefn" to "Android IME + Function Row", "ime" to "Android IME"),
+            { if (it.foldKeyboard != "ime") "skin" else if (it.foldHotkeys) "imefn" else "ime" },
+            { s, v -> s.foldKeyboard = if (v == "skin") "skin" else "ime"; if (v != "skin") s.foldHotkeys = v == "imefn" }),
+        choice("Design", "netind", "Network Indicator Type", listOf("auto" to "Automatic (phone's network)",
+            "gsm" to "GSM (G / E / 3G / H)", "cdma" to "CDMA (1X / EV)"), { it.netIndicator }, { s, v -> s.netIndicator = v }),
+        bool("Design", "hinge", "Show Mid-Display Hinge", { it.hingeOn }, { s, v -> s.hingeOn = v }),
+        choice("Design", "hingestyle", "Style", listOf(SkinLayout.HINGE_SHADOW to "Drop Shadow",
+            SkinLayout.HINGE_CLASSIC to "Classic (Rounded Plastic Hinge)", SkinLayout.HINGE_CREASE to "Crease (Modern)",
+            SkinLayout.HINGE_VOID to "Void (Black Line)"), { it.hingeStyle }, { s, v -> s.hingeStyle = v }),
+        slider("Design", "hingethick", "Thickness", 0, 100, { it.hingeThickness }, { s, v -> s.hingeThickness = v }),
+        slider("Design", "hingeloc", "Location", -50, 50, { it.hingeLocation }, { s, v -> s.hingeLocation = v }),
+        slider("Design", "hingealpha", "Opacity", 0, 100, { it.hingeOpacity }, { s, v -> s.hingeOpacity = v }),
+        bool("Design", "androidime", "Use Android IME over Device IME", { it.androidIme }, { s, v -> s.androidIme = v }),  // ImeBridge
+        // ---- Hardware ----
+        choice("Hardware", "camera", "Camera", listOf("off" to "Disabled", "rear" to "Rear", "front" to "Front"),
+            { it.cameraMode }, { s, v -> s.cameraMode = v }),
+        bool("Hardware", "camfilter", "Apply 2009 Filter to Camera", { it.cameraEraOn }, { s, v -> s.cameraEraOn = v }),
+        slider("Hardware", "camlevel", "Filter Intensity", 1, 100, { it.cameraEraLevel }, { s, v -> s.cameraEraLevel = v }),
+        bool("Hardware", "gps", "GPS", { it.gpsOn }, { s, v -> s.gpsOn = v }),
+        bool("Hardware", "btreceive", "Receive Bluetooth Files", { it.bluetoothReceive }, { s, v -> s.bluetoothReceive = v }),
+        bool("Hardware", "clipboard", "Sync Clipboard", { it.syncClipboard }, { s, v -> s.syncClipboard = v }),  // ClipboardBridge
+        choice("Hardware", "boost", "Volume Boost", listOf("0" to "Off", "6" to "+6 dB", "12" to "+12 dB", "18" to "+18 dB"),
+            { it.audioBoostDb.toString() }, { s, v -> s.audioBoostDb = v.toInt() }),
+        choice("Hardware", "volup", "Phone Volume Up Key", keyActions, { it.volumeUp.id },
+            { s, v -> s.volumeUp = Keymap.KeyAction.of(v, s.volumeUp) }),
+        choice("Hardware", "voldown", "Phone Volume Down Key", keyActions, { it.volumeDown.id },
+            { s, v -> s.volumeDown = Keymap.KeyAction.of(v, s.volumeDown) }),
+        // Windows Mobile's Buttons 1-4 (the skin's keys send them; applied by buttonsCommand)
+        hwButton(1, "button1", "Button 1 (Start key)"),
+        hwButton(2, "button2", "Button 2 (App Launch 1)"),
+        hwButton(3, "button3", "Button 3 (App Launch 2)"),
+        hwButton(4, "button4", "Button 4 (OK key)"),
+        // ---- Power ----
+        bool("Power", "displayoff", "Lock Android on Screen Off", { it.mirrorDisplayOff }, { s, v -> s.mirrorDisplayOff = v }),
+        bool("Power", "lockoff", "Lock Device when Android Screen's Off", { it.lockOnScreenOff }, { s, v -> s.lockOnScreenOff = v }),
+        bool("Power", "lockleave", "Lock when Device closes", { it.lockOnLeave }, { s, v -> s.lockOnLeave = v }),
+        bool("Power", "resume", "Enable Hibernation", { it.resumeSession }, { s, v -> s.resumeSession = v }),
+        choice("Power", "bgkind", "Run in Background", listOf("run" to "Unrestricted", "suspend" to "Suspend", "hibernate" to "Hibernate"),
+            { bgKind(it) }, { s, v -> setBg(s, v, bgTimer(s)) }),
+        choice("Power", "bgtimer", "After timer",
+            listOf("0" to "Immediately") + Settings.BACKGROUND_MINUTES.map { it.toString() to (if (it == 1) "1 minute" else "$it minutes") },
+            { bgTimer(it).toString() }, { s, v -> setBg(s, bgKind(s), v.toInt()) }),
+        // ---- Device (applies on restart) ----
+        bool("Device", "shape", "Use the phone's screen shape", { it.screenMode == Settings.SCREEN_PHONE },
+            { s, v -> s.screenMode = if (v) Settings.SCREEN_PHONE else Settings.SCREEN_NATIVE }, restart = true),
+        choice("Device", "ram", "Memory", listOf("0" to "Default", "64" to "64 MB", "128" to "128 MB", "192" to "192 MB", "256" to "256 MB"),
+            { it.memMB.toString() }, { s, v -> s.memMB = v.toInt() }, restart = true),
+        // Windows Mobile's logical DPI; the helper writes it and restarts WM once (guest/Helper/Dpi.cs).
+        choice("Device", "dpi", "Screen DPI", listOf("0" to "Image default", "192" to "High DPI (192, large)",
+            // Below 192 WM 6.5's home screen breaks; 6.1.4 and 5.0 work but lose some title-bar icons.
+            "128" to "Medium (128; not for 6.5)", "96" to "Classic (96, more space; not for 6.5)"),
+            { it.guestDpi.toString() }, { s, v -> s.guestDpi = v.toInt() }, restart = true),
+        // Opens the Storage Card page in Windows Mobile (mode, root, folders; applied there).
+        action("Device", "editfolders", "Storage Card…", "local:storage"),
+    )
+
+    /** Writes the catalogue with current values for the guest. */
+    fun write(file: File, settings: Settings) {
+        val text = buildString {
+            for (e in entries) {
+                val extra = when (e.kind) {
+                    Kind.CHOICE -> e.options.joinToString(";") { "${it.first}=${it.second}" }
+                    Kind.SLIDER -> "${e.min}:${e.max}"
+                    Kind.BOOL, Kind.ACTION -> ""
+                }
+                append(listOf(e.page, e.key, e.kind.id, e.label, e.get(settings), if (e.restart) "1" else "0", extra)
+                    .joinToString("\t")).append("\r\n")
+            }
+        }
+        val tmp = File(file.path + ".tmp")
+        tmp.writeText(text)
+        tmp.renameTo(file)
+    }
+
+    /** Applies "set key=value" from the guest: null if unknown or unchanged, else whether it needs a restart. */
+    fun apply(settings: Settings, key: String, value: String): Boolean? {
+        val e = entries.firstOrNull { it.key == key && it.kind != Kind.ACTION } ?: return null
+        if (e.get(settings) == value) return null
+        e.set(settings, value)
+        return e.restart
+    }
+}

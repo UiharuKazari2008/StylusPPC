@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider roots: the helper's send folder (\Storage Card\.wmdroid\send, see BluetoothBridge). -->
+<paths>
+    <files-path name="send" path="overlay/.wmdroid/send/" />
+</paths>

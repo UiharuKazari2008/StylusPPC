@@ -1,0 +1,41 @@
+### IntelliJ / Android Studio
+*.iml
+.idea/
+!.idea/.gitignore
+
+### Gradle
+.gradle/
+build/
+**/build/
+
+### Local SDK / machine-specific
+local.properties
+
+### Release signing (passwords / private keys)
+*.jks
+*.keystore
+key.properties
+
+### Android Studio generated
+captures/
+.externalNativeBuild/
+.cxx/
+
+### Native / CMake
+**/.cxx/
+**/.externalNativeBuild/
+
+### Logs / OS noise
+*.log
+.DS_Store
+Thumbs.db
+
+### Headless runner build
+build-cli/
+
+### Python caches
+__pycache__/
+*.pyc
+
+### Release output
+dist/
