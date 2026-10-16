@@ -117,7 +117,12 @@ static class Helper
                 if (error != null) MessageBox.Show(error, "Send via Bluetooth");
                 return;
             }
-            if (mode == "storage") { Application.Run(new StorageForm()); return; }  // the Storage Card page alone
+            if (mode == "storage")  // the Storage Card page alone (Standard: the phone's, no buttons there)
+            {
+                if (Edition.Smartphone) Send("open storage");
+                else Application.Run(new StorageForm());
+                return;
+            }
             if (mode == "update")
             {
                 // Started from the card by the old helper, which is exiting: replace it. Whatever
@@ -508,6 +513,8 @@ static class Helper
             case "pim": return Pim.Command(rest);  // contacts and calendar sync: pim dump / pim apply (Pim.cs)
             case "sms": return Sms.Command(rest);  // text messages (Sms.cs)
             case "number": return OwnNumber.Command(rest);  // the device's own phone number (OwnNumber.cs)
+            case "tlsca": return TlsCa.Command(rest);  // secure web proxy root certificate (TlsCa.cs)
+            case "tlsask": return TlsAsk.Command(rest);  // the proxy's certificate warning dialog (TlsAsk.cs)
             case "received": return Bluetooth.Received(rest);
             case "irda": return Irda.Command(rest);  // infrared transport choice (Irda.cs)
             case "clip": case "ime": case "type": return InputSync.Command(verb.ToLower(), rest);  // clipboard sync, phone keyboard (InputSync.cs)

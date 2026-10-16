@@ -118,6 +118,30 @@ object Keymap {
 
     fun vk(keyCode: Int): Int? = map[keyCode]
 
+    // Windows Mobile Standard (Smartphone) keys (winuserm.h): Home is the Windows key, Back is
+    // Escape, Action is Enter, * and # are F8 / F9 (the board types those as Fn + 8 / 9).
+    const val VK_THOME = 0x5B
+    const val VK_TBACK = 0x1B
+    const val VK_TSTAR = 0x77
+    const val VK_TPOUND = 0x78
+
+    /**
+     * A phone key for Windows Mobile Standard: a flip phone's keypad goes straight to the WM keypad
+     * (digits, * #, D-pad + centre, Call / End, soft keys, Back), the rest as on Professional.
+     * KEYCODE_MENU is handled by the activity (a tap is the right soft key, a hold the app's settings).
+     */
+    fun standardVk(keyCode: Int): Int? = when (keyCode) {
+        KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_CLEAR -> VK_TBACK
+        KeyEvent.KEYCODE_STAR, KeyEvent.KEYCODE_NUMPAD_MULTIPLY -> VK_TSTAR
+        KeyEvent.KEYCODE_POUND -> VK_TPOUND
+        KeyEvent.KEYCODE_SOFT_LEFT -> VK_TSOFT1
+        KeyEvent.KEYCODE_SOFT_RIGHT -> VK_TSOFT2
+        KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_MOVE_HOME -> VK_THOME
+        KeyEvent.KEYCODE_NUMPAD_ENTER -> VK_RETURN
+        in KeyEvent.KEYCODE_NUMPAD_0..KeyEvent.KEYCODE_NUMPAD_9 -> '0'.code + (keyCode - KeyEvent.KEYCODE_NUMPAD_0)
+        else -> map[keyCode]
+    }
+
     /**
      * Buttons 1-4 as keys a stock image already understands, so they work with no guest helper:
      *  - the action's own key: Start = Win, the soft keys = F1/F2, scrolling = the arrows;

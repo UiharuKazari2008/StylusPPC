@@ -194,13 +194,15 @@ class ImeBridge(
     private var observer: FileObserver? = null
     private val pollNow = Runnable { if (observer != null) guest.poll() }
 
+    @Suppress("DEPRECATION")
     private fun watchMailbox(on: Boolean) {
         if (on == (observer != null)) return
         observer?.stopWatching()
         observer = null
         if (!on) return
         val dir = guest.boxFile("out").apply { mkdirs() }
-        observer = object : FileObserver(dir, FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) {
+        // The path constructor (deprecated): FileObserver(File, Int) is API 29.
+        observer = object : FileObserver(dir.path, FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) {
             override fun onEvent(event: Int, path: String?) {
                 if (path?.endsWith(".msg") != true) return
                 ui.removeCallbacks(pollNow)  // one poll per burst of messages

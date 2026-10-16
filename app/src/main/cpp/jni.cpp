@@ -5,6 +5,8 @@
 #include "board/pcmcia.h"
 #include "board/codepatch.h"  // FakeRIL own number
 #include "net/usernet.h"
+#include "net/revival.h"  // Escargot host rules
+#include "net/mwsgate.h"  // Windows Live Mobile gateway (with the Escargot setting)
 #include <jni.h>
 #include <atomic>
 #include <cstring>
@@ -32,7 +34,7 @@ using namespace wm;
 
 namespace {
 
-// Android Dynamic Performance Framework (API 33+), looked up at runtime because minSdk is 29.
+// Android Dynamic Performance Framework (API 33+), looked up at runtime because minSdk is 26.
 // Reporting how long each 16 ms emulation frame was busy lets the scheduler boost CPU frequency
 // and placement for the emulation thread, the same way games get boosted.
 struct PerfHint {
@@ -488,6 +490,21 @@ JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_load
     return ok;
 }
 
+// A snapshot of this image saved with another screen or memory size (GuestStates.kt): RAM and flash
+// are restored and Windows Mobile boots again at this machine's size, keeping its storage. cold:
+// WM 6.x (memory may differ); else a warm restart (WM 5, same memory size).
+JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_adoptState(JNIEnv *env, jobject, jlong h,
+                                                                                       jstring path, jboolean cold) {
+    Session *s = S(h);
+    if (!s || s->running) return false;
+    const char *p = env->GetStringUTFChars(path, nullptr);
+    std::string err, sp = p;
+    env->ReleaseStringUTFChars(path, p);
+    bool ok = s->m->loadState(sp, err, cold ? Machine::Adopt::Cold : Machine::Adopt::Warm);
+    if (!ok) LOGW("snapshot adopt failed: %s", err.c_str());
+    return ok;
+}
+
 JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_bootComplete(JNIEnv *, jobject, jlong h) {
     Session *s = S(h);
     return s && s->m->bootComplete.load();
@@ -637,6 +654,92 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemRef
 JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemActive(JNIEnv *, jobject, jlong h) {
     Session *s = S(h);
     return s && s->m && s->m->modem->claimed();
+}
+
+// ---- Secure web proxy (net/tlsproxy.h): one per process, opened once (keys, Android's trust store) ----
+
+static std::mutex g_tlsMu;
+static std::shared_ptr<TlsProxy> g_tls;
+
+static std::shared_ptr<TlsProxy> tlsProxyFor(JNIEnv *env, jstring dir) {
+    const char *d = env->GetStringUTFChars(dir, nullptr);
+    std::string path = d;
+    env->ReleaseStringUTFChars(dir, d);
+    std::lock_guard<std::mutex> lk(g_tlsMu);
+    if (!g_tls || g_tls->dir() != path) g_tls = TlsProxy::open(path);
+    return g_tls;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_tlsCa(JNIEnv *env, jobject, jstring dir) {
+    std::shared_ptr<TlsProxy> p = tlsProxyFor(env, dir);
+    if (!p) return nullptr;
+    const std::vector<uint8_t> &der = p->caDer();
+    jbyteArray a = env->NewByteArray((jsize)der.size());
+    env->SetByteArrayRegion(a, 0, (jsize)der.size(), (const jbyte *)der.data());
+    return a;
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setTlsProxy(JNIEnv *env, jobject, jlong h, jstring dir) {
+    Session *s = S(h);
+    if (!s) return;
+    s->net.setTlsProxy(dir ? tlsProxyFor(env, dir) : nullptr);
+}
+
+// "Windows Live Messenger via Escargot": Microsoft's Messenger / Passport names answer with Escargot's
+// servers (net/revival.h, docs/research-escargot.md). HTTPS to them needs the secure web proxy too.
+// It also turns on the Windows Live Mobile gateway (net/mwsgate.h, prototype) for the Windows Live
+// client built into WM 6.1.4 / 6.5.3; its redacted capture goes next to the proxy's CA (mws-capture).
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setEscargot(JNIEnv *, jobject, jlong h, jboolean on) {
+    Session *s = S(h);
+    if (!s) return;
+    std::vector<HostRule> rules;
+    if (on) {
+        rules = MwsGateway::hostRules();
+        std::vector<HostRule> esc = escargotHostRules();
+        rules.insert(rules.end(), esc.begin(), esc.end());
+        static std::shared_ptr<MwsGateway> gateway;  // one per process; kept across sessions (signed-in users)
+        if (!gateway) gateway = std::make_shared<MwsGateway>(MwsGateway::Config{});
+        {
+            std::lock_guard<std::mutex> lk(g_tlsMu);  // the proxy may come up after this call: set it each time
+            if (g_tls && !g_tls->dir().empty()) {
+                gateway->setCaptureDir(g_tls->dir() + "/mws-capture");
+                gateway->setStateDir(g_tls->dir());
+            }
+        }
+        setLocalService(gateway);
+    } else {
+        setLocalService(nullptr);
+    }
+    s->net.setHostRules(rules);
+}
+
+static std::shared_ptr<TlsProxy> currentTlsProxy() {
+    std::lock_guard<std::mutex> lk(g_tlsMu);
+    return g_tls;
+}
+
+// Certificate warnings waiting for the user (TlsProxy::takePrompts), each "<id> <seconds> <host>\n<message>"
+// as the helper's "tlsask" command takes it. Polling also tells the proxy that someone can answer.
+JNIEXPORT jobjectArray JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_tlsPrompts(JNIEnv *env, jobject) {
+    std::shared_ptr<TlsProxy> p = currentTlsProxy();
+    std::vector<TlsProxy::CertPrompt> v;
+    if (p) v = p->takePrompts();
+    jobjectArray a = env->NewObjectArray((jsize)v.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < v.size(); i++) {
+        std::string s = std::to_string(v[i].id) + " " + std::to_string(v[i].seconds) + " " + v[i].host + "\n" + v[i].text;
+        jstring js = env->NewStringUTF(s.c_str());  // ASCII: the proxy keeps certificate text printable
+        env->SetObjectArrayElement(a, (jsize)i, js);
+        env->DeleteLocalRef(js);
+    }
+    return a;
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_tlsAnswer(JNIEnv *, jobject, jint id, jboolean allow) {
+    if (std::shared_ptr<TlsProxy> p = currentTlsProxy()) p->answerPrompt((uint32_t)id, allow);
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_tlsForget(JNIEnv *, jobject) {
+    if (std::shared_ptr<TlsProxy> p = currentTlsProxy()) p->clearExceptions();
 }
 
 }  // extern "C"

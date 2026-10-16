@@ -1,9 +1,11 @@
 #include "usernet.h"
+#include "localsvc.h"
 #include "../util/log.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
+#include <ctime>
 #include <cstring>
 #include <fcntl.h>
 #include <netdb.h>
@@ -108,6 +110,7 @@ void UserNet::stop() {
     char c = 0;
     (void)!write(wakeWr, &c, 1);
     thread.join();
+    if (namesDirty) saveNames();
     {
         std::lock_guard<std::mutex> lk(dnsBox->mu);
         dnsBox->alive = false;
@@ -142,6 +145,94 @@ bool UserNet::nextForGuest(std::vector<uint8_t> &frame) {
 void UserNet::popForGuest() {
     std::lock_guard<std::mutex> lk(outMu);
     if (!outbox.empty()) outbox.pop_front();
+}
+
+void UserNet::setTlsProxy(std::shared_ptr<TlsProxy> proxy, std::vector<uint16_t> ports) {
+    std::lock_guard<std::mutex> lk(cfgMu);
+    if (!!tls != !!proxy) LOGI("net: secure web proxy %s", proxy ? "on" : "off");
+    if (proxy && !proxy->dir().empty()) namesPath = proxy->dir() + "/names.txt";
+    tls = std::move(proxy);
+    tlsPorts = std::move(ports);
+}
+
+void UserNet::setHostRules(std::vector<HostRule> rules) {
+    for (HostRule &r : rules) {
+        for (char &ch : r.pattern) ch = (char)tolower((unsigned char)ch);
+        LOGI("net: DNS maps %s to %s", r.pattern.c_str(), r.target.c_str());
+    }
+    std::lock_guard<std::mutex> lk(cfgMu);
+    hostRules = std::make_shared<const std::vector<HostRule>>(std::move(rules));
+}
+
+// Kept for 6 hours: longer than the guest caches an answer (60 s TTL) or keeps a connection.
+static constexpr uint64_t kNameKeepMs = 6 * 3600 * 1000ull;
+
+void UserNet::rememberName(const std::string &name, const std::vector<uint32_t> &addrs) {
+    // Only names that can go into a certificate (the guest could ask for anything).
+    if (name.empty() || name.size() > 253) return;
+    for (char ch : name)
+        if (!(isalnum((unsigned char)ch) || ch == '-' || ch == '.' || ch == '_')) return;
+    uint64_t now = nowMs();
+    for (uint32_t a : addrs) {
+        auto &v = namesByIp[a];
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const SeenName &s) { return s.name == name || since(now, s.at) > kNameKeepMs; }), v.end());
+        v.insert(v.begin(), {name, now});
+        if (v.size() > 16) v.resize(16);
+    }
+    if (namesByIp.size() > 4096) namesByIp.clear();  // a guest resolving without end: start over
+    namesDirty = true;
+}
+
+// names.txt: "a.b.c.d name unix-seconds" per line, newest first per address.
+void UserNet::loadNames(const std::string &path) {
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f) return;
+    uint64_t now = nowMs();
+    long long wall = (long long)time(nullptr);
+    char line[512], name[300];
+    unsigned a, b, c, d;
+    long long t;
+    int n = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%u.%u.%u.%u %299s %lld", &a, &b, &c, &d, name, &t) != 6 || a > 255 || b > 255 || c > 255 || d > 255) continue;
+        long long ageS = wall - t;
+        if (ageS < 0 || (uint64_t)ageS * 1000 > kNameKeepMs) continue;
+        auto &v = namesByIp[a << 24 | b << 16 | c << 8 | d];
+        if (v.size() >= 16 || std::any_of(v.begin(), v.end(), [&](const SeenName &s) { return s.name == name; })) continue;
+        v.push_back({name, now > (uint64_t)ageS * 1000 ? now - (uint64_t)ageS * 1000 : 0});
+        n++;
+    }
+    fclose(f);
+    if (n) LOGI("net: %d remembered DNS names", n);
+}
+
+void UserNet::saveNames() {
+    if (namesLoadedPath.empty()) return;
+    std::string tmp = namesLoadedPath + ".tmp";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *f = fd >= 0 ? fdopen(fd, "w") : nullptr;
+    if (!f) { if (fd >= 0) close(fd); return; }
+    uint64_t now = nowMs();
+    long long wall = (long long)time(nullptr);
+    for (auto &kv : namesByIp)
+        for (auto &s : kv.second)
+            if (since(now, s.at) <= kNameKeepMs)
+                fprintf(f, "%u.%u.%u.%u %s %lld\n", kv.first >> 24, (kv.first >> 16) & 255, (kv.first >> 8) & 255, kv.first & 255,
+                        s.name.c_str(), wall - (long long)(since(now, s.at) / 1000));
+    fclose(f);
+    rename(tmp.c_str(), namesLoadedPath.c_str());
+    namesDirty = false;
+    namesSavedAt = now;
+}
+
+std::vector<std::string> UserNet::namesFor(uint32_t ip) {
+    std::vector<std::string> r;
+    auto it = namesByIp.find(ip);
+    if (it == namesByIp.end()) return r;
+    uint64_t now = nowMs();
+    for (auto &s : it->second)
+        if (since(now, s.at) <= kNameKeepMs) r.push_back(s.name);
+    return r;
 }
 
 void UserNet::pushToGuest(std::vector<uint8_t> f) {
@@ -347,12 +438,20 @@ void UserNet::dhcp(const uint8_t *p, size_t n) {
 }
 
 // DNS: A queries go through the phone's resolver (which knows the current network's servers and
-// private DNS); other types get an empty answer so the guest falls back to A.
+// private DNS); other types get an empty answer so the guest falls back to A. Host rules
+// (setHostRules) answer a name with a fixed address or another name's addresses: the hook for
+// revived services such as Escargot (docs/research-tls-proxy.md). Answers are remembered per
+// address for the secure web proxy (rememberName).
 void UserNet::dns(uint16_t guestPort, const uint8_t *p, size_t n) {
     if (n < 17) return;
     std::vector<uint8_t> q(p, p + n);
     std::shared_ptr<DnsBox> box = dnsBox;
-    std::thread([box, guestPort, q] {
+    std::shared_ptr<const std::vector<HostRule>> rules;
+    {
+        std::lock_guard<std::mutex> lk(cfgMu);
+        rules = hostRules;
+    }
+    std::thread([box, guestPort, q, rules] {
         std::string name;
         size_t i = 12;
         while (i < q.size() && q[i]) {
@@ -365,13 +464,18 @@ void UserNet::dns(uint16_t guestPort, const uint8_t *p, size_t n) {
         if (i + 5 > q.size()) return;
         size_t qend = i + 5;
         uint16_t qtype = get16(&q[i + 1]);
+        for (char &ch : name) ch = (char)tolower((unsigned char)ch);
         std::vector<uint32_t> addrs;
         bool nx = false;
-        if (qtype == 1) {
+        const HostRule *rule = findHostRule(rules.get(), name);
+        in_addr fixed{};
+        if (qtype == 1 && rule && inet_pton(AF_INET, rule->target.c_str(), &fixed) == 1) {
+            addrs.push_back(ntohl(fixed.s_addr));
+        } else if (qtype == 1) {
             addrinfo hints{}, *res = nullptr;
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
-            int rc = getaddrinfo(name.c_str(), nullptr, &hints, &res);
+            int rc = getaddrinfo((rule ? rule->target : name).c_str(), nullptr, &hints, &res);
             if (rc == 0) {
                 for (addrinfo *a = res; a && addrs.size() < 8; a = a->ai_next) {
                     uint32_t v = ntohl(((sockaddr_in *)a->ai_addr)->sin_addr.s_addr);
@@ -381,6 +485,11 @@ void UserNet::dns(uint16_t guestPort, const uint8_t *p, size_t n) {
             } else if (rc == EAI_NONAME) {
                 nx = true;
             }
+        }
+        if (g_logLevel <= LOG_DEBUG && qtype == 1) {  // --log debug: which names the guest's programs look up
+            std::string list;
+            for (uint32_t a : addrs) list += " " + std::to_string(a >> 24) + "." + std::to_string(a >> 16 & 255) + "." + std::to_string(a >> 8 & 255) + "." + std::to_string(a & 255);
+            LOGD("net: DNS %s ->%s%s%s", name.c_str(), list.empty() ? (nx ? " NXDOMAIN" : " (none)") : list.c_str(), rule ? " via rule " : "", rule ? rule->target.c_str() : "");
         }
         std::vector<uint8_t> r(q.begin(), q.begin() + qend);
         r[2] = 0x81 | (q[2] & 0x01);   // response, recursion desired as asked
@@ -396,7 +505,7 @@ void UserNet::dns(uint16_t guestPort, const uint8_t *p, size_t n) {
         }
         std::lock_guard<std::mutex> lk(box->mu);
         if (!box->alive) return;
-        box->done.push_back({guestPort, std::move(r)});
+        box->done.push_back({guestPort, std::move(r), name, addrs});
         char c = 0;
         (void)!write(box->wakeWr, &c, 1);
     }).detach();
@@ -428,20 +537,53 @@ void UserNet::handleTcp(const uint8_t *ip, const uint8_t *p, size_t n) {
             if (it->second->st == Tcp::SYNACK_SENT) sendTcp(*it->second, SYN | ACK, it->second->iss, nullptr, 0, true);
             return;
         }
-        if ((dst & 0xFFFFFF00) == 0x0A000200 && dst != kGateway) {
+        // 10.0.2.4: a service inside PocketStylus (localsvc.h), when one is installed.
+        std::shared_ptr<LocalService> local = dst == kLocalServiceIp ? localService() : nullptr;
+        if ((dst & 0xFFFFFF00) == 0x0A000200 && dst != kGateway && !local) {
+            LOGD("net: TCP to 10.0.2.%u:%u refused (no such host)", dst & 255, dport);
             sendRst(dst, dport, kGuest, sport, 0, seq + 1);
             return;
         }
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return;
-        nonblock(fd);
-        sockaddr_in a = hostAddr(dst, dport);
-        int rc = connect(fd, (sockaddr *)&a, sizeof a);
-        if (rc != 0 && errno != EINPROGRESS) {
-            LOGI("net: TCP connect error %d", errno);
-            close(fd);
-            sendRst(dst, dport, kGuest, sport, 0, seq + 1);
-            return;
+        int fd = -1;
+        std::shared_ptr<TlsProxy> proxy;
+        TlsProxy::Conn pc;
+        {
+            std::lock_guard<std::mutex> lk(cfgMu);
+            if (tls && dst != kGateway && std::find(tlsPorts.begin(), tlsPorts.end(), dport) != tlsPorts.end()) {
+                proxy = tls;
+                pc.rules = hostRules;
+            }
+        }
+        LOGD("net: TCP to %u.%u.%u.%u:%u%s", dst >> 24, dst >> 16 & 255, dst >> 8 & 255, dst & 255, dport,
+             proxy ? " (secure web proxy)" : local ? " (local service)" : "");
+        int sv[2];
+        if (proxy && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+            // The secure web proxy takes the other end; this connection relays to it like to a server.
+            fd = sv[0];
+            nonblock(fd);
+            pc.fd = sv[1];
+            pc.ip = dst;
+            pc.port = dport;
+            pc.names = namesFor(dst);
+            proxy->serve(std::move(pc));
+        } else if (local && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+            // Plain TCP to a local service: it takes the other end, like a server would.
+            fd = sv[0];
+            nonblock(fd);
+            std::vector<std::string> names = namesFor(dst);
+            local->serve(sv[1], dport, names.empty() ? std::string() : names[0], false);
+        } else {
+            fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) return;
+            nonblock(fd);
+            sockaddr_in a = hostAddr(dst, dport);
+            int rc = connect(fd, (sockaddr *)&a, sizeof a);
+            if (rc != 0 && errno != EINPROGRESS) {
+                LOGI("net: TCP connect error %d", errno);
+                close(fd);
+                sendRst(dst, dport, kGuest, sport, 0, seq + 1);
+                return;
+            }
         }
         auto c = std::make_unique<Tcp>();
         c->fd = fd;
@@ -607,7 +749,10 @@ void UserNet::loop() {
             std::lock_guard<std::mutex> lk(dnsBox->mu);
             done.swap(dnsBox->done);
         }
-        for (auto &d : done) sendUdp(kDns, 53, kGuest, d.guestPort, d.reply.data(), d.reply.size());
+        for (auto &d : done) {
+            if (!d.addrs.empty()) rememberName(d.name, d.addrs);
+            sendUdp(kDns, 53, kGuest, d.guestPort, d.reply.data(), d.reply.size());
+        }
 
         for (size_t i = 1; i < fds.size(); i++) {
             if (!fds[i].revents) continue;
@@ -662,6 +807,17 @@ void UserNet::loop() {
         // Timers run on a fresh clock: connections created above have later timestamps than `now`.
         now = nowMs();
         tcpTimers(now);
+        std::string np;
+        {
+            std::lock_guard<std::mutex> lk(cfgMu);
+            np = namesPath;
+        }
+        if (np != namesLoadedPath) {
+            if (namesDirty) saveNames();
+            namesLoadedPath = np;
+            loadNames(np);
+        }
+        if (namesDirty && since(now, namesSavedAt) > 30000) saveNames();
         for (auto it = udps.begin(); it != udps.end();) {
             if (now > it->second->last && now - it->second->last > 120000) {
                 close(it->second->fd);

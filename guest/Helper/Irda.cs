@@ -231,6 +231,32 @@ static class Irda
             Text = "Infrared";
             using (Graphics g = CreateGraphics()) k = g.DpiX / 96f;
             int w = Screen.PrimaryScreen.WorkingArea.Width - S(16), y = S(8);
+            if (Edition.Smartphone)
+            {
+                // Windows Mobile Standard has no buttons or check boxes: the choices are the soft keys.
+                Controls.Add(new Label { Text = "A program is starting an infrared transfer. Reach other devices through Bluetooth LE (nearby PocketStylus phones, left soft key) or InfraWAN (Internet, in Menu).", Left = S(4), Top = S(4), Width = w + S(8), Height = S(110) });
+                note = new Label { Text = "", Left = S(4), Top = S(118), Width = w + S(8), Height = S(36) };
+                Controls.Add(note);
+                Menu = new MainMenu();
+                var near = new MenuItem { Text = "Bluetooth LE" };
+                Menu.MenuItems.Add(near);
+                var more = new MenuItem { Text = "Menu" };
+                Menu.MenuItems.Add(more);
+                var wan = new MenuItem { Text = "InfraWAN (Internet)" };
+                var keep = new MenuItem { Text = "Remember my choice" };
+                var no = new MenuItem { Text = "Cancel" };
+                more.MenuItems.Add(wan);
+                more.MenuItems.Add(keep);
+                more.MenuItems.Add(no);
+                keep.Click += delegate { keep.Checked = !keep.Checked; };
+                near.Click += delegate { Pick("ble", keep.Checked); };
+                wan.Click += delegate { Pick("wan", keep.Checked); };
+                no.Click += delegate { Pick("cancel", false); };
+                poll.Interval = 500;
+                poll.Tick += delegate { if (note.Text != status) note.Text = status; };
+                poll.Enabled = true;
+                return;
+            }
             var head = new Label { Text = "A program is starting an infrared transfer.", Left = S(8), Top = y, Width = w, Height = S(36) };
             head.Font = new Font(head.Font.Name, head.Font.Size, FontStyle.Bold);
             Controls.Add(head);

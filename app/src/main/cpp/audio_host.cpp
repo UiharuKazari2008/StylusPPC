@@ -1,5 +1,6 @@
 #include "audio_host.h"
 #include <cstring>
+#include <dlfcn.h>
 #include "util/log.h"
 
 uint32_t FrameRing::write(const int16_t *src, uint32_t n) {
@@ -56,9 +57,14 @@ static AAudioStream *openStream(aaudio_direction_t dir, AAudioStream_dataCallbac
     AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_NONE);
     AAudioStreamBuilder_setDataCallback(b, cb, user);
     if (dir == AAUDIO_DIRECTION_OUTPUT) {
-        AAudioStreamBuilder_setUsage(b, usage);
-        AAudioStreamBuilder_setContentType(b, usage == AAUDIO_USAGE_MEDIA ? AAUDIO_CONTENT_TYPE_MUSIC
-                                                                         : AAUDIO_CONTENT_TYPE_SONIFICATION);
+        // Usage and content type are API 28; looked up at runtime because minSdk is 26 (Android 8.0
+        // streams play as plain media).
+        using SetInt = void (*)(AAudioStreamBuilder *, int32_t);
+        static auto setUsage = (SetInt)dlsym(RTLD_DEFAULT, "AAudioStreamBuilder_setUsage");
+        static auto setContent = (SetInt)dlsym(RTLD_DEFAULT, "AAudioStreamBuilder_setContentType");
+        if (setUsage) setUsage(b, usage);
+        if (setContent) setContent(b, usage == AAUDIO_USAGE_MEDIA ? AAUDIO_CONTENT_TYPE_MUSIC
+                                                                  : AAUDIO_CONTENT_TYPE_SONIFICATION);
     }
     AAudioStream *s = nullptr;
     aaudio_result_t r = AAudioStreamBuilder_openStream(b, &s);

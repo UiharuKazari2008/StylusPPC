@@ -9,6 +9,8 @@
 #include "../src/board/audio.h"
 #include "../src/board/pcmcia.h"
 #include "../src/net/usernet.h"
+#include "../src/net/revival.h"
+#include "../src/net/mwsgate.h"
 #include "../src/board/folder_share.h"
 #include "../src/board/camera.h"
 #include "../src/board/modem.h"
@@ -29,6 +31,8 @@
 #include <sys/stat.h>
 
 using namespace wm;
+
+int mwsSelfTest(int argc, char **argv);  // mws_test.cpp
 
 static uint64_t g_traceLeft = 0;
 static uint32_t g_traceAt = 0xFFFFFFFF;
@@ -259,6 +263,7 @@ static int runCompare(MachineConfig cfg, double seconds) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--mws-selftest")) return mwsSelfTest(argc, argv);
     if (argc < 2) {
         fprintf(stderr, "usage: %s <image> [--mem MB] [--seconds N] [--v4] [--dump out.ppm] [--trace N] "
                         "[--trace-at HEXPC] [--trace-file F] [--log debug]\n"
@@ -273,13 +278,31 @@ int main(int argc, char **argv) {
                         "  --cmd-burst T:N  N mixed commands (status, rotate, wallpaper, theme, backlight, ...)\n"
                         "  --quiet-share    no folder share call trace\n"
                         "  --no-remount     after --load-state the card stays as the guest knew it (no re-announce)\n"
+                        "  --adopt-state F  like --load-state, but F may be from another screen or memory size (>= 96 MB):\n"
+                        "                   WM 6.x boots again (cold) keeping its storage (the app's settings migration)\n"
+                        "  --adopt-warm F   the same as a warm restart, same memory size (WM 5: another screen)\n"
                         "  infrared (UART2, docs/research-irda.md):\n"
                         "  --irda-trace     log every IrLAP frame in and out\n"
                         "  --irda-udp L:R   frames over UDP on 127.0.0.1 (port L here, R the other instance)\n"
                         "  --irda-delay MS  UDP: send each frame MS ms late (network latency tests)\n"
                         "  --irda-wan URL   InfraWAN relay: ws://host:port/infrawan?room=R&user=U&token=T&name=N\n"
                         "  --irda-ask       connect only after the helper's popup (\"irda ask\" on start, needs --box)\n"
-                        "  --irda-choose T:ble|wan|cancel  answer the popup at T (as if its button was tapped)\n", argv[0]);
+                        "  --irda-choose T:ble|wan|cancel  answer the popup at T (as if its button was tapped)\n"
+                        "  secure web proxy (with --net, docs/research-tls-proxy.md):\n"
+                        "  --tls DIR        HTTPS through the proxy; DIR keeps its private root CA (made on first\n"
+                        "                   use; DIR/ca.cer is the root for the guest: helper \"tlsca install\")\n"
+                        "  --tls-ports P,.. ports to intercept (default 443)\n"
+                        "  --tls-roots DIR  validate servers against the PEM files in DIR instead of Android's store\n"
+                        "  --tls-ask        certificate warnings to the helper's dialog (\"tlsask\", needs --box) and\n"
+                        "                   its answers back to the proxy, as the app does (SecureProxy.kt)\n"
+                        "  --tls-answer yes|no  answer every certificate warning at once, without the helper\n"
+                        "  --tls-wait S     how long a request waits for the answer (default 40 s)\n"
+                        "  --host-map N=T   DNS: answer name N (\".domain\" = domain and below) as T (IPv4 or a name)\n"
+                        "  --escargot       Messenger / Passport names to Escargot (net/revival.h); --host-map rules win\n"
+                        "  --mws DIR        Windows Live Mobile gateway (net/mwsgate.h) at 10.0.2.4 for *.mws.mobile.live.com,\n"
+                        "                   MSNP to Escargot; every exchange (secrets redacted) captured into DIR\n"
+                        "  --mws-fake       the gateway signs in to a fake MSNP server on 127.0.0.1 instead (tests)\n"
+                        "  %s --mws-selftest [--probe] [--capture DIR]   the gateway without a guest\n", argv[0], argv[0]);
         return 2;
     }
     MachineConfig cfg;
@@ -288,6 +311,15 @@ int main(int argc, char **argv) {
     int fnCode = -1;
     bool nmea = false;
     bool net = false;
+    std::string tlsDir;                   // --tls
+    std::vector<uint16_t> tlsPorts{443};  // --tls-ports
+    bool tlsAsk = false;                  // --tls-ask
+    std::string tlsAnswer;                // --tls-answer
+    int tlsWait = 0;                      // --tls-wait
+    std::vector<HostRule> hostRules;      // --host-map
+    bool escargot = false;                // --escargot: escargotHostRules() after the --host-map rules
+    std::string mwsDir;                   // --mws: Windows Live Mobile gateway, capture folder
+    bool mws = false, mwsFake = false;    // --mws-fake: fake MSNP server instead of Escargot
     struct Tap { double t; int x, y; };
     std::vector<Tap> taps;
     struct Drag { double t; int x0, y0, x1, y1; };
@@ -299,6 +331,7 @@ int main(int argc, char **argv) {
     std::vector<double> resets;                         // --reset
     std::vector<std::pair<double, std::string>> puts;   // --put T:path:text  (e.g. a helper mailbox command)
     std::vector<std::pair<double, std::string>> batteries;  // --battery T:ac,percent  (the DE battery device)
+    std::vector<std::pair<double, std::string>> regDwords;  // --reg-dword T:name:value
     const char *ownNumber = nullptr;
     double burstT0 = 0, burstT1 = -1, burstDt = 0;      // --burst
     std::string burstPrefix;
@@ -320,6 +353,7 @@ int main(int argc, char **argv) {
     bool traceModem = false, modemStub = false;
     std::vector<double> modemRefresh;
     const char *saveStatePath = nullptr, *loadStatePath = nullptr;
+    Machine::Adopt adoptState = Machine::Adopt::No;  // --adopt-state / --adopt-warm: another screen or memory size
     const char *traceFile = nullptr;
     // Sleep/suspend tests (see the usage text).
     std::vector<std::pair<double, double>> pauses, warps;
@@ -351,6 +385,29 @@ int main(int argc, char **argv) {
         else if (a == "--fn") fnCode = (int)strtol(next(), nullptr, 0);
         else if (a == "--nmea") nmea = true;
         else if (a == "--net") net = true;
+        else if (a == "--tls") tlsDir = next();
+        else if (a == "--tls-roots") TlsProxy::setTrustDir(next());
+        else if (a == "--tls-ask") tlsAsk = true;
+        else if (a == "--tls-answer") tlsAnswer = next();
+        else if (a == "--tls-wait") tlsWait = atoi(next());
+        else if (a == "--tls-ports") {
+            tlsPorts.clear();
+            std::string v = next();
+            for (size_t i = 0; i < v.size();) {
+                size_t c = v.find(',', i);
+                if (c == std::string::npos) c = v.size();
+                tlsPorts.push_back((uint16_t)atoi(v.substr(i, c - i).c_str()));
+                i = c + 1;
+            }
+        }
+        else if (a == "--host-map") {
+            std::string v = next();
+            size_t e = v.find('=');
+            if (e != std::string::npos) hostRules.push_back({v.substr(0, e), v.substr(e + 1)});
+        }
+        else if (a == "--escargot") escargot = true;  // the app's "Windows Live Messenger via Escargot"
+        else if (a == "--mws") { mws = true; mwsDir = next(); }
+        else if (a == "--mws-fake") mwsFake = true;
         else if (a == "--tap") {  // T:x,y  pen down at T seconds, up a quarter second later
             std::string v = next();
             size_t c = v.find(':'), k = v.find(',');
@@ -382,6 +439,11 @@ int main(int argc, char **argv) {
             shots.push_back({atof(v.substr(0, c).c_str()), v.substr(c + 1)});
         }
         else if (a == "--own-number") ownNumber = next();  // FakeRIL's SIM number (codepatch.h)
+        else if (a == "--reg-dword") {  // T:name:value  experiment: set a REG_DWORD in the RAM hive cells
+            std::string rest;
+            double t = timeArg(next(), rest);
+            regDwords.push_back({t, rest});
+        }
         else if (a == "--battery") {
             std::string v = next();
             size_t c = v.find(':');
@@ -429,6 +491,8 @@ int main(int argc, char **argv) {
         else if (a == "--trace-io") traceIo = true;
         else if (a == "--save-state") saveStatePath = next();
         else if (a == "--load-state") loadStatePath = next();
+        else if (a == "--adopt-state") { loadStatePath = next(); adoptState = Machine::Adopt::Cold; }  // other screen / RAM size
+        else if (a == "--adopt-warm") { loadStatePath = next(); adoptState = Machine::Adopt::Warm; }  // WM 5: other screen
         else if (a == "--modem-net" || a == "--modem-call" || a == "--modem-ring" || a == "--modem-sms") {
             std::string v = next();
             size_t c = v.find(':');
@@ -479,7 +543,7 @@ int main(int argc, char **argv) {
     if (umstat0 >= 0) m.uart0.umstat = (uint32_t)umstat0;
     if (loadStatePath) {
         auto t = std::chrono::steady_clock::now();
-        if (!m.loadState(loadStatePath, err)) { LOGE("restore failed: %s", err.c_str()); return 1; }
+        if (!m.loadState(loadStatePath, err, adoptState)) { LOGE("restore failed: %s", err.c_str()); return 1; }
         LOGI("restored in %.2f s (pen %s, raw %d,%d, adctsc %x)", std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(),
              m.adc->penDown ? "down" : "up", m.adc->rawX, m.adc->rawY, m.adc->adctsc);
         if (rtcSkew != 0) { m.rtc.offsetSec += (int64_t)rtcSkew; LOGI("rtc: %+.0f s", rtcSkew); }
@@ -527,6 +591,7 @@ int main(int argc, char **argv) {
     }
     // --net: NE2000 card in the PCMCIA slot, connected to the user-mode network.
     UserNet userNet;
+    std::shared_ptr<TlsProxy> tlsProxy;
     if (net) {
         const uint8_t mac[6] = {0x02, 0x57, 0x4D, 0x44, 0x00, 0x01};
         m.pcmcia->setMac(mac);
@@ -535,6 +600,36 @@ int main(int argc, char **argv) {
             if (logged++ < 20) LOGI("net: guest sent %zu bytes, type %02x%02x", n, f[12], f[13]);
             userNet.fromGuest(f, n);
         };
+        if (mws) {
+            std::vector<HostRule> gw = MwsGateway::hostRules();
+            hostRules.insert(hostRules.end(), gw.begin(), gw.end());
+            MwsGateway::Config gc;
+            gc.captureDir = mwsDir;
+            if (mwsFake) {
+                gc.msnpHost = "127.0.0.1";
+                gc.msnpPort = startFakeMsnpServer(&gc.nexusUrl);
+            }
+            auto gw2 = std::make_shared<MwsGateway>(gc);
+            if (!tlsDir.empty()) gw2->setStateDir(tlsDir);
+            setLocalService(gw2);
+        }
+        if (escargot) {
+            std::vector<HostRule> esc = escargotHostRules();
+            hostRules.insert(hostRules.end(), esc.begin(), esc.end());
+        }
+        if (!hostRules.empty()) userNet.setHostRules(hostRules);
+        if (!tlsDir.empty()) {
+            std::string err;
+            auto proxy = TlsProxy::open(tlsDir, &err);
+            if (proxy) {
+                LOGI("tls: root %s (%s/ca.cer)", proxy->caThumbprint().c_str(), tlsDir.c_str());
+                if (tlsWait > 0) proxy->setPromptWait(tlsWait);
+                userNet.setTlsProxy(proxy, tlsPorts);
+                tlsProxy = proxy;
+            } else {
+                LOGE("tls: proxy not available: %s", err.c_str());
+            }
+        }
         userNet.start();
         m.pcmcia->setInserted(true);
     }
@@ -572,7 +667,7 @@ int main(int argc, char **argv) {
         else LOGE("irda: %s", e.c_str());
     };
     if (!irdaAsk) irdaConnect();
-    std::set<std::string> irdaSeenMsgs;
+    std::set<std::string> irdaSeenMsgs, tlsSeenMsgs;
 
     std::map<uint32_t, uint32_t> hist;
     auto t0 = std::chrono::steady_clock::now();
@@ -609,6 +704,29 @@ int main(int argc, char **argv) {
                 FILE *pf = fopen(pu.second.substr(0, c).c_str(), "w");
                 if (pf) { fputs(pu.second.substr(c + 1).c_str(), pf); fclose(pf); }
                 LOGI("put %s", pu.second.c_str());
+            }
+        for (auto &rd : regDwords)
+            if (rd.first == t) {
+                // Hive value cell as seen in the RAM dumps: u16 type (4), u16 data size (4), u8 name
+                // length, u8 flags, the UTF-16 name, then the data.
+                size_t c = rd.second.find(':');
+                std::string name = rd.second.substr(0, c);
+                uint32_t val = (uint32_t)strtoul(rd.second.substr(c + 1).c_str(), nullptr, 0);
+                std::vector<uint8_t> pat = {4, 0, 4, 0, (uint8_t)name.size()};
+                int n = 0;
+                for (size_t p = 0; p + 6 + name.size() * 2 + 4 <= m.ram.size(); p += 2) {
+                    if (memcmp(&m.ram[p], pat.data(), pat.size())) continue;
+                    bool ok = true;
+                    for (size_t k = 0; k < name.size() && ok; k++)
+                        ok = tolower(m.ram[p + 6 + k * 2]) == tolower((uint8_t)name[k]) && m.ram[p + 7 + k * 2] == 0;
+                    if (!ok) continue;
+                    uint32_t old;
+                    memcpy(&old, &m.ram[p + 6 + name.size() * 2], 4);
+                    memcpy(&m.ram[p + 6 + name.size() * 2], &val, 4);
+                    LOGI("reg-dword %s at pa %08zx: %u -> %u", name.c_str(), p + 0x30000000, old, val);
+                    n++;
+                }
+                LOGI("reg-dword %s: %d cells", name.c_str(), n);
             }
         for (auto &b : batteries)
             if (b.first == t) {   // as NativeBridge does: byte 0 = 0 on AC, byte 1 = percent used
@@ -727,6 +845,28 @@ int main(int argc, char **argv) {
                     if (strncmp(buf, "irda use ", 9) == 0) {
                         LOGI("irda: helper chose \"%s\"", buf + 9);
                         if (strncmp(buf + 9, "cancel", 6) != 0) irdaConnect();
+                    }
+                }
+        }
+        if (tlsProxy && (!tlsAnswer.empty() || (tlsAsk && boxDir))) {
+            // Certificate warnings: the app's part (SecureProxy.kt). Polling also tells the proxy that
+            // someone answers; without --tls-ask / --tls-answer it shows the error page at once.
+            for (auto &p : tlsProxy->takePrompts()) {
+                LOGI("tls ask #%u %s (%d s): %s", p.id, p.host.c_str(), p.seconds, p.text.c_str());
+                if (!tlsAnswer.empty()) tlsProxy->answerPrompt(p.id, tlsAnswer == "yes");
+                else boxCommand(boxDir, "tlsask " + std::to_string(p.id) + " " + std::to_string(p.seconds) + " " + p.host + "\n" + p.text);
+            }
+            if (tlsAsk && boxDir && s % 2 == 1)
+                for (auto &n : boxList(std::string(boxDir) + "/out", ".msg")) {
+                    if (!tlsSeenMsgs.insert(n).second) continue;
+                    FILE *mf = fopen((std::string(boxDir) + "/out/" + n).c_str(), "r");
+                    char buf[256] = "";
+                    if (mf) { size_t k = fread(buf, 1, sizeof buf - 1, mf); buf[k] = 0; fclose(mf); }
+                    unsigned id = 0;
+                    char ans[16] = "";
+                    if (sscanf(buf, "tlsask %u %15s", &id, ans) == 2) {
+                        LOGI("tls: helper answered #%u %s", id, ans);
+                        tlsProxy->answerPrompt(id, strcmp(ans, "yes") == 0);
                     }
                 }
         }

@@ -483,15 +483,15 @@ class PimSync(private val ctx: Context, private val guest: GuestBridge) {
         /** "Sync now" from the settings page; the running emulator picks it up within a second. */
         @Volatile var requested = false
 
-        fun contactsOn(ctx: Context) = Settings.prefs(ctx).getBoolean("pim.contacts", false) &&
+        fun contactsOn(ctx: Context) = Settings.global(ctx).getBoolean("pim.contacts", false) &&
             ctx.checkSelfPermission(Manifest.permission.WRITE_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
             ctx.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
-        fun calendarOn(ctx: Context) = Settings.prefs(ctx).getBoolean("pim.calendar", false) &&
+        fun calendarOn(ctx: Context) = Settings.global(ctx).getBoolean("pim.calendar", false) &&
             ctx.checkSelfPermission(Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED &&
             ctx.checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED
         fun anyOn(ctx: Context) = contactsOn(ctx) || calendarOn(ctx)
         fun setOn(ctx: Context, kind: String, on: Boolean) =
-            Settings.prefs(ctx).edit().putBoolean(if (kind == KIND_CONTACT) "pim.contacts" else "pim.calendar", on).apply()
+            Settings.global(ctx).edit().putBoolean(if (kind == KIND_CONTACT) "pim.contacts" else "pim.calendar", on).apply()
         fun status(ctx: Context): String = Settings.prefs(ctx).getString("pim.status", null) ?: "Not synced yet."
 
         const val ALLOW = 0
@@ -499,8 +499,8 @@ class PimSync(private val ctx: Context, private val guest: GuestBridge) {
         const val REJECT = 2
 
         /** "Prompt before accepting changes from Device": WM's changes wait for the user's OK. */
-        fun prompt(ctx: Context) = Settings.prefs(ctx).getBoolean("pim.prompt", false)
-        fun setPrompt(ctx: Context, on: Boolean) = Settings.prefs(ctx).edit().putBoolean("pim.prompt", on).apply()
+        fun prompt(ctx: Context) = Settings.global(ctx).getBoolean("pim.prompt", false)
+        fun setPrompt(ctx: Context, on: Boolean) = Settings.global(ctx).edit().putBoolean("pim.prompt", on).apply()
 
         private const val CHANNEL = "pim"
         private const val NOTE_ID = 0x7019

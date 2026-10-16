@@ -11,6 +11,10 @@ import android.content.Context
 class Settings(ctx: Context) {
     private val g = ctx.getSharedPreferences("wmdroid", Context.MODE_PRIVATE)
     private val p = prefs(ctx)
+    /** For the settings that live with their feature (CallBridge, SmsBridge, PimSync, InfraredSettings). */
+    val context: Context = ctx.applicationContext
+    /** Settings about the phone rather than the OS: the same for every release (GLOBAL_KEYS). */
+    private val gl = global(ctx)
 
     var profileId: String?
         get() = g.getString("profile", null)
@@ -24,6 +28,11 @@ class Settings(ctx: Context) {
     var memMB: Int
         get() = p.getInt("memMB", 0)
         set(v) = p.edit().putInt("memMB", v).apply()
+
+    /** The states folder (GuestStates) this OS last ran from: a new configuration can start from it. */
+    var lastStateDir: String
+        get() = p.getString("state.last", "")!!
+        set(v) = p.edit().putString("state.last", v).apply()
 
     var showStats: Boolean
         get() = p.getBoolean("stats", true)
@@ -288,6 +297,24 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("sync.clipboard", true)
         set(v) = p.edit().putBoolean("sync.clipboard", v).apply()
 
+    /**
+     * Secure web proxy (SecureProxy, docs/research-tls-proxy.md): Windows Mobile's HTTPS goes through
+     * the app, which checks each site with Android's certificate store and speaks modern TLS to it.
+     * On by default: without it almost no HTTPS site accepts WM's 2009-era TLS at all.
+     */
+    var secureProxy: Boolean
+        get() = p.getBoolean("net.secureproxy", true)
+        set(v) = p.edit().putBoolean("net.secureproxy", v).apply()
+
+    /**
+     * "Windows Live Messenger via Escargot" (docs/research-escargot.md): Microsoft's Messenger and
+     * Passport names answer with Escargot's servers (core/src/net/revival.h). Per OS like the other
+     * settings; off by default (it also sends WM's login.live.com to Escargot).
+     */
+    var escargot: Boolean
+        get() = p.getBoolean("net.escargot", false)
+        set(v) = p.edit().putBoolean("net.escargot", v).apply()
+
     /** The phone's keyboard instead of Windows Mobile's on-screen keyboard (ImeBridge). */
     var androidIme: Boolean
         get() = p.getBoolean("ime.android", false)
@@ -310,28 +337,28 @@ class Settings(ctx: Context) {
 
     /** Open foldable: landscape display on top, keyboard below (see FoldSkin). */
     var foldMode: Boolean
-        get() = p.getBoolean("fold.mode", true)
-        set(v) = p.edit().putBoolean("fold.mode", v).apply()
+        get() = gl.getBoolean("fold.mode", true)
+        set(v) = gl.edit().putBoolean("fold.mode", v).apply()
 
     /** Fold keyboard: "skin" (drawn slide-out keyboard) or "ime" (the phone's own keyboard). */
     var foldKeyboard: String
-        get() = p.getString("fold.keyboard", "skin")!!
-        set(v) = p.edit().putString("fold.keyboard", v).apply()
+        get() = gl.getString("fold.keyboard", "skin")!!
+        set(v) = gl.edit().putString("fold.keyboard", v).apply()
 
     /** Fold: row of hotkeys (soft keys etc.) above the keyboard. */
     var foldHotkeys: Boolean
-        get() = p.getBoolean("fold.hotkeys", true)
-        set(v) = p.edit().putBoolean("fold.hotkeys", v).apply()
+        get() = gl.getBoolean("fold.hotkeys", true)
+        set(v) = gl.edit().putBoolean("fold.hotkeys", v).apply()
 
     /** Fold: hinge size over the crease, 0..100 (0 = hidden, 50 = default). */
     var hingeSize: Int
-        get() = p.getInt("fold.hinge", 50)
-        set(v) = p.edit().putInt("fold.hinge", v).apply()
+        get() = gl.getInt("fold.hinge", 50)
+        set(v) = gl.edit().putInt("fold.hinge", v).apply()
 
     /** Fold: draw a hinge band across the middle of the inner display (see SkinLayout.hingeOn). */
     var hingeOn: Boolean
-        get() = p.getBoolean("fold.hinge.on", false)
-        set(v) = p.edit().putBoolean("fold.hinge.on", v).apply()
+        get() = gl.getBoolean("fold.hinge.on", false)
+        set(v) = gl.edit().putBoolean("fold.hinge.on", v).apply()
 
     /** Status bar data letters: "auto" (the phone's network), "gsm" (G/E/3G/H) or "cdma" (1X/EV). */
     var netIndicator: String
@@ -340,21 +367,21 @@ class Settings(ctx: Context) {
 
     /** Fold hinge look: "shadow", "classic", "crease" or "void". */
     var hingeStyle: String
-        get() = p.getString("fold.hinge.style", "crease")!!
-        set(v) = p.edit().putString("fold.hinge.style", v).apply()
+        get() = gl.getString("fold.hinge.style", "crease")!!
+        set(v) = gl.edit().putString("fold.hinge.style", v).apply()
 
     /** Fold hinge: thickness 0..100, offset from the fold -50..50, opacity 0..100. */
     var hingeThickness: Int
-        get() = p.getInt("fold.hinge.thick", 30)
-        set(v) = p.edit().putInt("fold.hinge.thick", v.coerceIn(0, 100)).apply()
+        get() = gl.getInt("fold.hinge.thick", 30)
+        set(v) = gl.edit().putInt("fold.hinge.thick", v.coerceIn(0, 100)).apply()
 
     var hingeLocation: Int
-        get() = p.getInt("fold.hinge.loc", 0)
-        set(v) = p.edit().putInt("fold.hinge.loc", v.coerceIn(-50, 50)).apply()
+        get() = gl.getInt("fold.hinge.loc", 0)
+        set(v) = gl.edit().putInt("fold.hinge.loc", v.coerceIn(-50, 50)).apply()
 
     var hingeOpacity: Int
-        get() = p.getInt("fold.hinge.alpha", 70)
-        set(v) = p.edit().putInt("fold.hinge.alpha", v.coerceIn(0, 100)).apply()
+        get() = gl.getInt("fold.hinge.alpha", 70)
+        set(v) = gl.edit().putInt("fold.hinge.alpha", v.coerceIn(0, 100)).apply()
 
     /**
      * Height/width of the display area on the outer (cover) screen, remembered so the boot
@@ -388,8 +415,8 @@ class Settings(ctx: Context) {
 
     /** Home pressed while PocketStylus is the phone's launcher shows Today ("today") or the Start menu ("start"). */
     var launcherHome: String
-        get() = p.getString("launcher.home", "today")!!
-        set(v) = p.edit().putString("launcher.home", v).apply()
+        get() = gl.getString("launcher.home", "today")!!
+        set(v) = gl.edit().putString("launcher.home", v).apply()
 
     /** Start > Programs > Android Apps in Windows Mobile, one program per Android app. */
     var androidFolder: Boolean
@@ -398,13 +425,35 @@ class Settings(ctx: Context) {
 
     /** Android apps left out of the Android Apps folder (AndroidApps.App.key). */
     var hiddenApps: Set<String>
-        get() = p.getStringSet("launcher.hidden", emptySet())!!.toSet()
-        set(v) = p.edit().putStringSet("launcher.hidden", v).apply()
+        get() = gl.getStringSet("launcher.hidden", emptySet())!!.toSet()
+        set(v) = gl.edit().putStringSet("launcher.hidden", v).apply()
 
-    /** The skin's dock of Android apps: DOCK_OFF, DOCK_TOP or DOCK_BOTTOM of the display. */
-    var dockPos: String
-        get() = p.getString("dock.pos", DOCK_OFF)!!
-        set(v) = p.edit().putString("dock.pos", v).apply()
+    /** Show the skin's dock of Android apps. (Before "dock.on", "dock.pos" top / bottom meant on.) */
+    var dockOn: Boolean
+        get() = p.getBoolean("dock.on", p.getString("dock.pos", DOCK_OFF) != DOCK_OFF)
+        set(v) = p.edit().putBoolean("dock.on", v).apply()
+
+    /** Where the dock goes: DOCK_AUTO (the skin's free space, else the bottom of the display), DOCK_TOP or DOCK_BOTTOM. */
+    var dockPlace: String
+        get() = p.getString("dock.place", null) ?: p.getString("dock.pos", null)?.takeIf { it != DOCK_OFF } ?: DOCK_AUTO
+        set(v) = p.edit().putString("dock.place", v).apply()
+
+    /** The dock as the skin places it: DOCK_OFF or [dockPlace]. */
+    val dockPos: String get() = if (dockOn) dockPlace else DOCK_OFF
+
+    /** Dock look: icon size and padding (dp), glass opacity (0-100) and wallpaper blur (0-25). */
+    var dockIcon: Int
+        get() = p.getInt("dock.icon", 48)
+        set(v) = p.edit().putInt("dock.icon", v.coerceIn(24, 96)).apply()
+    var dockPad: Int
+        get() = p.getInt("dock.pad", 8)
+        set(v) = p.edit().putInt("dock.pad", v.coerceIn(0, 32)).apply()
+    var dockOpacity: Int
+        get() = p.getInt("dock.opacity", 40)
+        set(v) = p.edit().putInt("dock.opacity", v.coerceIn(0, 100)).apply()
+    var dockBlur: Int
+        get() = p.getInt("dock.blur", 0)
+        set(v) = p.edit().putInt("dock.blur", v.coerceIn(0, 25)).apply()
 
     /** Dock slots, 4 to 8. */
     var dockSize: Int
@@ -448,7 +497,7 @@ class Settings(ctx: Context) {
         }
     }
 
-    fun effectiveMemMB(): Int = if (memMB > 0) memMB else profile?.defaultMemMB ?: 128
+    fun effectiveMemMB(): Int = profile?.memFor(memMB) ?: if (memMB > 0) memMB else 128
 
     companion object {
         /**
@@ -481,7 +530,45 @@ class Settings(ctx: Context) {
 
         const val SCREEN_AUTO = "auto"
 
+        /**
+         * Settings about the phone rather than the OS, kept in the shared file for every release:
+         * the foldable's slide-out keyboard and hinge, the launcher's Home choice and hidden apps,
+         * and phone calls, texts and contacts / calendar sync (CallBridge, CallOverlay, SmsBridge,
+         * PimSync). Infrared has its own file (InfraredSettings) and pinned shortcuts theirs
+         * (AndroidApps), both already shared.
+         */
+        val GLOBAL_KEYS = listOf("fold.mode", "fold.keyboard", "fold.hotkeys", "fold.hinge", "fold.hinge.on",
+            "fold.hinge.style", "fold.hinge.thick", "fold.hinge.loc", "fold.hinge.alpha", "launcher.home", "launcher.hidden",
+            "calls.enabled", "calls.wmRinger", "calls.background", "sms.enabled", "sms.defer",
+            "pim.contacts", "pim.calendar", "pim.prompt")
+        private const val GLOBAL_DONE = "global.migrated.1"
+
+        /**
+         * The shared file for GLOBAL_KEYS. The first time, the values the current OS had are moved
+         * there (the shared file may still hold older values from before settings were per OS), so
+         * the current setup carries over; after that every OS reads and writes the shared ones.
+         */
+        fun global(ctx: Context): android.content.SharedPreferences {
+            val g = ctx.getSharedPreferences("wmdroid", Context.MODE_PRIVATE)
+            if (g.getBoolean(GLOBAL_DONE, false)) return g
+            val p = prefs(ctx)
+            val e = g.edit()
+            if (p !== g) for (k in GLOBAL_KEYS) when (val v = p.all[k]) {
+                is Boolean -> e.putBoolean(k, v)
+                is Int -> e.putInt(k, v)
+                is Long -> e.putLong(k, v)
+                is Float -> e.putFloat(k, v)
+                is String -> e.putString(k, v)
+                is Set<*> -> e.putStringSet(k, v.filterIsInstance<String>().toSet())
+            }
+            // Only once an OS is chosen: before that there is nothing to carry over yet.
+            if (g.getString("profile", null) != null) e.putBoolean(GLOBAL_DONE, true)
+            e.commit()
+            return g
+        }
+
         const val DOCK_OFF = "off"
+        const val DOCK_AUTO = "auto"
         const val DOCK_TOP = "top"
         const val DOCK_BOTTOM = "bottom"
 

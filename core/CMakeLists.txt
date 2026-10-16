@@ -25,6 +25,8 @@ add_library(wmcore STATIC
   src/board/camera.cpp  # WMDroid camera bridge
   src/board/codepatch.cpp  # host fixes to driver code in guest RAM
   src/net/usernet.cpp
+  src/net/tlsproxy.cpp  # secure web proxy (HTTPS for WM's old TLS), BoringSSL below
+  src/net/mwsgate.cpp  # Windows Live Mobile gateway for the built-in WM 6.x client (MSNP to Escargot)
   src/board/snapshot.cpp
   src/board/machine.cpp
   src/util/log.cpp
@@ -34,7 +36,16 @@ if(ANDROID)
   target_link_libraries(wmcore PUBLIC log)
 endif()
 
+# Prebuilt BoringSSL (tools/build-boringssl.sh) for the secure web proxy; without it for this ABI
+# the proxy is compiled out and HTTPS passes through unchanged.
+set(BSSL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/boringssl)
+if(ANDROID AND EXISTS ${BSSL_DIR}/lib/${ANDROID_ABI}/libssl.a)
+  target_include_directories(wmcore PRIVATE ${BSSL_DIR}/include)
+  target_compile_definitions(wmcore PRIVATE WM_HAVE_TLS=1)
+  target_link_libraries(wmcore PUBLIC ${BSSL_DIR}/lib/${ANDROID_ABI}/libssl.a ${BSSL_DIR}/lib/${ANDROID_ABI}/libcrypto.a)
+endif()
+
 if(WMCORE_CLI)
-  add_executable(wmcore-cli cli/main.cpp cli/irda_link.cpp)
+  add_executable(wmcore-cli cli/main.cpp cli/irda_link.cpp cli/mws_test.cpp)
   target_link_libraries(wmcore-cli wmcore)
 endif()

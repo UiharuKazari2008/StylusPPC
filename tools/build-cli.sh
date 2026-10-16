@@ -12,8 +12,13 @@ CXX="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/${ARCH}-linux-android29-cl
 cd "$HERE"
 OUT="build-cli/$ARCH"
 mkdir -p "$OUT"
-SRCS="core/src/arm/cpu.cpp core/src/arm/disasm.cpp core/src/arm/jit.cpp core/src/board/bus.cpp core/src/board/s3c2410.cpp core/src/board/devices.cpp core/src/board/de_devices.cpp core/src/board/nled.cpp core/src/board/modem.cpp core/src/board/irda.cpp core/src/board/audio.cpp core/src/board/folder_share.cpp core/src/board/pcmcia.cpp core/src/board/camera.cpp core/src/board/codepatch.cpp core/src/net/usernet.cpp core/src/board/snapshot.cpp core/src/board/machine.cpp core/src/util/log.cpp core/cli/main.cpp core/cli/irda_link.cpp"
-"$CXX" -std=c++17 -O2 -g -Wall -Wno-unused-parameter -static-libstdc++ -Icore/src $SRCS -llog -o "$OUT/wmcore-cli"
+SRCS="core/src/arm/cpu.cpp core/src/arm/disasm.cpp core/src/arm/jit.cpp core/src/board/bus.cpp core/src/board/s3c2410.cpp core/src/board/devices.cpp core/src/board/de_devices.cpp core/src/board/nled.cpp core/src/board/modem.cpp core/src/board/irda.cpp core/src/board/audio.cpp core/src/board/folder_share.cpp core/src/board/pcmcia.cpp core/src/board/camera.cpp core/src/board/codepatch.cpp core/src/net/usernet.cpp core/src/net/tlsproxy.cpp core/src/net/mwsgate.cpp core/src/board/snapshot.cpp core/src/board/machine.cpp core/src/util/log.cpp core/cli/main.cpp core/cli/irda_link.cpp core/cli/mws_test.cpp"
+# BoringSSL for the secure web proxy (tools/build-boringssl.sh); compiled out when missing for this ABI
+case "$ARCH" in aarch64) ABI=arm64-v8a ;; *) ABI=$ARCH ;; esac
+BSSL=third_party/boringssl
+TLS=""
+[ -f "$BSSL/lib/$ABI/libssl.a" ] && TLS="-DWM_HAVE_TLS=1 -I$BSSL/include"
+"$CXX" -std=c++17 -O2 -g -Wall -Wno-unused-parameter -static-libstdc++ -Icore/src $TLS $SRCS ${TLS:+$BSSL/lib/$ABI/libssl.a $BSSL/lib/$ABI/libcrypto.a} -llog -o "$OUT/wmcore-cli"
 ADB="$SDK/platform-tools/adb"
 "$ADB" shell mkdir -p /data/local/tmp/wm
 "$ADB" push "$OUT/wmcore-cli" /data/local/tmp/wm/wmcore-cli >/dev/null

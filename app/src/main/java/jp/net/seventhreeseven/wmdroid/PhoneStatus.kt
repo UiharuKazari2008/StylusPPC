@@ -102,6 +102,7 @@ class PhoneStatus(private val ctx: Context) {
     private fun bars(s: android.telephony.SignalStrength): Int {
         oemBars(s)?.let { return it }
         var best = s.level
+        if (Build.VERSION.SDK_INT < 29) return best  // getCellSignalStrengths: API 29 (callers are 29+ today)
         for (c in s.cellSignalStrengths) {
             val dbm = c.dbm
             if (dbm == Int.MAX_VALUE || dbm == Int.MIN_VALUE || dbm >= 0) continue

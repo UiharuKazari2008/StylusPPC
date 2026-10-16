@@ -68,7 +68,7 @@ class AndroidAppsActivity : SettingsPage() {
         title("Dock apps")
         section("Up to $size apps")
         note("The dock shows the ticked apps in the order you tick them. Its position and size are in " +
-            "Settings > Launcher.")
+            "Settings > Dock.")
         val order = settings.dockApps.toMutableList()
         val apps = AndroidApps.apps(this)
         // The dock's current apps first, in their order, then the rest.

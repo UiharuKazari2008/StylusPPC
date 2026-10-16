@@ -3,6 +3,9 @@
 
     <!-- Storage passthrough of the whole phone or chosen folders as \Storage Card. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Android 8-10 (no All files access): the Storage permission, with legacy storage on 10. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <!-- Microphone passthrough to the guest's audio input. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Camera passthrough: the phone's camera as Windows Mobile's (only while the guest uses it). -->
@@ -79,6 +82,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.WMDroid"
+        android:requestLegacyExternalStorage="true"
         android:supportsRtl="true">
 
         <!-- Android 16 ignores orientation locks on large screens; the emulator must stay portrait

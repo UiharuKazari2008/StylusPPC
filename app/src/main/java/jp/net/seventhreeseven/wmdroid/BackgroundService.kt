@@ -34,7 +34,9 @@ class BackgroundService : Service() {
             return START_NOT_STICKY
         }
         try {
-            startForeground(ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            if (android.os.Build.VERSION.SDK_INT >= 29)
+                startForeground(ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            else startForeground(ID, notification())
         } catch (e: RuntimeException) {
             Log.w(TAG, "could not run in the foreground", e)
             wanted = false

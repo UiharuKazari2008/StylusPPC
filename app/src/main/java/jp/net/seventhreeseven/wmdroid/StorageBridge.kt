@@ -22,10 +22,17 @@ object StorageBridge {
 
     fun privateDir(ctx: Context): File = File(ctx.getExternalFilesDir(null), "StorageCard").apply { mkdirs() }
 
-    fun hasAllFilesAccess(): Boolean = Environment.isExternalStorageManager()
+    // Android 8-10 have no "All files access": the Storage permission (legacy storage on 10) gives
+    // the same plain-path access, and shared storage is writable once it is granted.
+    fun hasAllFilesAccess(): Boolean =
+        if (android.os.Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+        else Environment.getExternalStorageDirectory().canWrite()
 
     fun allFilesAccessIntent(ctx: Context) =
-        Intent(AndroidSettings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${ctx.packageName}"))
+        if (android.os.Build.VERSION.SDK_INT >= 30)
+            Intent(AndroidSettings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${ctx.packageName}"))
+        else  // App info, where Permissions > Storage is granted.
+            Intent(AndroidSettings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
 
     /** (guest folder name, host path) pairs; a single "" name maps the share root itself. */
     fun mounts(ctx: Context, settings: Settings): List<Pair<String, String>> {

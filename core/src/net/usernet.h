@@ -5,15 +5,21 @@
 // Handled: ARP, DHCP, DNS (resolved with the phone's resolver), UDP and TCP to any address, ping to
 // the gateway. 10.0.2.2 also stands for the phone itself (127.0.0.1), for app-side services.
 //
+// HTTPS: with a secure web proxy set (setTlsProxy, tlsproxy.h), guest connections to TLS ports go
+// to the proxy instead of straight out. DNS remembers which names it resolved to which address so
+// the proxy knows the host (Windows Mobile's TLS sends no SNI), and can remap names (setHostRules).
+//
 // Threads: the emulation thread hands frames in with fromGuest() and takes frames out with
 // nextForGuest()/popForGuest(); a private thread does all socket work.
 #pragma once
+#include "tlsproxy.h"
 #include <atomic>
 #include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -32,6 +38,14 @@ public:
     bool nextForGuest(std::vector<uint8_t> &frame);
     void popForGuest();
 
+    /**
+     * The secure web proxy for new guest connections to `ports` (null: none, connections go straight
+     * out). Connections already open keep what they had. Any thread.
+     */
+    void setTlsProxy(std::shared_ptr<TlsProxy> proxy, std::vector<uint16_t> ports = {443});
+    /** DNS remap rules (HostRule), replacing the current ones; the proxy follows them too. Any thread. */
+    void setHostRules(std::vector<HostRule> rules);
+
     static constexpr uint8_t kGuestIp[4] = {10, 0, 2, 15};
     static constexpr uint8_t kGatewayIp[4] = {10, 0, 2, 2};
     static constexpr uint8_t kDnsIp[4] = {10, 0, 2, 3};
@@ -39,7 +53,7 @@ public:
 private:
     struct Tcp;
     struct Udp;
-    struct DnsDone { uint16_t guestPort; std::vector<uint8_t> reply; };
+    struct DnsDone { uint16_t guestPort; std::vector<uint8_t> reply; std::string name; std::vector<uint32_t> addrs; };
 
     void loop();
     void handleFrame(const std::vector<uint8_t> &f);
@@ -84,6 +98,25 @@ private:
     uint16_t ipId = 1;
     std::map<uint64_t, std::unique_ptr<Tcp>> tcps;
     std::map<uint64_t, std::unique_ptr<Udp>> udps;
+
+    // Secure web proxy and DNS rules (set from any thread, read under cfgMu).
+    std::mutex cfgMu;
+    std::shared_ptr<TlsProxy> tls;
+    std::vector<uint16_t> tlsPorts;
+    std::shared_ptr<const std::vector<HostRule>> hostRules;
+    // Names the guest's DNS resolved per address, newest first (loop thread only).
+    struct SeenName { std::string name; uint64_t at; };
+    std::map<uint32_t, std::vector<SeenName>> namesByIp;
+    void rememberName(const std::string &name, const std::vector<uint32_t> &addrs);
+    std::vector<std::string> namesFor(uint32_t ip);
+    // The memory is kept in the proxy's folder (names.txt), so a session restored while the guest
+    // still caches an answer from before keeps its names.
+    std::string namesPath;        // wanted (cfgMu)
+    std::string namesLoadedPath;  // loop thread
+    bool namesDirty = false;
+    uint64_t namesSavedAt = 0;
+    void loadNames(const std::string &path);
+    void saveNames();
 };
 
 }  // namespace wm

@@ -83,16 +83,30 @@ class WmInCallService : InCallService() {
         super.onDestroy()
     }
 
+    // Call.Details.getState is API 31 and getCallDirection API 29; Android 8-11 use Call.getState,
+    // where a call added while ringing is the incoming one.
+    @Suppress("DEPRECATION")
+    private fun stateOf(call: Call): Int =
+        if (android.os.Build.VERSION.SDK_INT >= 31) call.details.state else call.state
+
+    private fun isIncoming(call: Call): Boolean =
+        if (android.os.Build.VERSION.SDK_INT >= 29) call.details.callDirection == Call.Details.DIRECTION_INCOMING
+        else stateOf(call) == Call.STATE_RINGING
+
+    private fun isOutgoing(call: Call): Boolean =
+        if (android.os.Build.VERSION.SDK_INT >= 29) call.details.callDirection == Call.Details.DIRECTION_OUTGOING
+        else !isIncoming(call)
+
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
-        if (call.details.callDirection == Call.Details.DIRECTION_INCOMING) {
+        if (isIncoming(call)) {
             incoming(call)
             return
         }
         val token = tokenOf(call)
         val link = CallLinkService.peer
-        Log.i(TAG, "call added: token=$token linked=${link != null} state=${call.details.state}")
-        if (token == null || link == null || call.details.callDirection != Call.Details.DIRECTION_OUTGOING) {
+        Log.i(TAG, "call added: token=$token linked=${link != null} state=${stateOf(call)}")
+        if (token == null || link == null || !isOutgoing(call)) {
             // Not Windows Mobile's (another app) or no emulator to show it.
             handOff("not a Windows Mobile call")
             return
@@ -114,7 +128,7 @@ class WmInCallService : InCallService() {
      */
     private fun incoming(call: Call) {
         val linked = CallLinkService.peer != null
-        Log.i(TAG, "incoming call: linked=$linked showing=${CallLinkService.showing} calls=${calls.size} state=${call.details.state}")
+        Log.i(TAG, "incoming call: linked=$linked showing=${CallLinkService.showing} calls=${calls.size} state=${stateOf(call)}")
         if (!linked || !CallLinkService.showing || owned.isNotEmpty() || calls.size > 1) {
             handOff("incoming call Windows Mobile cannot show")
             return
@@ -154,7 +168,7 @@ class WmInCallService : InCallService() {
 
     private fun report(call: Call) {
         val token = owned.entries.firstOrNull { it.value == call }?.key ?: return
-        val state = when (call.details.state) {
+        val state = when (stateOf(call)) {
             Call.STATE_NEW, Call.STATE_CONNECTING, Call.STATE_DIALING, Call.STATE_PULLING_CALL -> "dialing"
             Call.STATE_RINGING -> "ringing"
             Call.STATE_ACTIVE -> "active"

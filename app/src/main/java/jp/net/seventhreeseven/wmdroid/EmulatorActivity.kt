@@ -59,6 +59,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private lateinit var clipboard: ClipboardBridge  // "Sync Clipboard" (ClipboardBridge.kt)
     private lateinit var ime: ImeBridge  // "Use Android IME over Device IME" (ImeBridge.kt)
     private lateinit var launcher: LauncherBridge  // Android apps in WM and the dock (AndroidApps.kt)
+    private lateinit var secureProxy: SecureProxy  // "Secure Web Proxy": modern HTTPS for WM (SecureProxy.kt)
+    private var escargotApplied: Boolean? = null  // "Windows Live Messenger via Escargot" as set on this session
     /** Another emulator was already running: this instance only forwarded its intent (see onCreate). */
     private var duplicate = false
     /** Home was pressed (PocketStylus is the phone's launcher): WM goes to Today / Start on resume. */
@@ -120,6 +122,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         settings = Settings(this)
         settings.migrate()
         guest = GuestBridge(this, settings, this)
+        secureProxy = SecureProxy(this, guest) { handle }
         bluetooth = BluetoothBridge(this, settings, guest, ui).apply { start() }
         calls = CallBridge(this, guest) { handle }
         pim = PimSync(this, guest)
@@ -157,6 +160,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         skin = SkinLayout(this, surface) { vk, down -> sendKey(vk, down) }.apply {
             keysOn = settings.keysOn
             dpadOn = settings.dpadOn
+            keypad = this@EmulatorActivity.keypad  // Windows Mobile Standard: the keypad phone skin
             setSoftKeys(settings.softKeyVks)
             shineBrightness = settings.shineBrightness
             shineWidth = settings.shineWidth
@@ -193,6 +197,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         skin.onDockTap = { slot -> if (!launcher.dockTap(slot)) openLauncherPage(AndroidApps.CMD_DOCK) }
         skin.onDockLong = { openLauncherPage(AndroidApps.CMD_DOCK) }
         launcher.start()
+        applyDockLook()  // icon size, padding, opacity, blur (Dock page)
         powerMenu = PowerMenu(this, menuLayer) { skin.lockRect }
         val menuBack = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() = powerMenu.close()
@@ -233,26 +238,17 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     private fun boot() {
-        val profile = settings.profile
-        // One image per release: the installed one (older setups may name another variant).
-        val variant = profile?.let { pr -> ImageStore.available(this, pr).firstOrNull() } ?: settings.variant
-        val file = if (profile != null && variant != null) ImageStore.find(this, profile, variant) else null
-        if (profile == null || variant == null || file == null) {
+        // Release, image, screen and memory (GuestStates.resolve: also used to warn before a change).
+        val t = GuestStates.resolve(this, settings, { phoneAspect().also { GuestStates.lastAspect = it } })
+        if (t == null) {
             startActivity(Intent(this, SetupActivity::class.java))
             finish()
             return
         }
-        // Screen resolution: the board tells Windows Mobile its screen size at boot, so every release
-        // runs at any of these from its one image (checked in the CLI for WM 5, 6.1.4 and 6.5.3).
-        val res = Regex("""(\d+)x(\d+)""").matchEntire(settings.screenRes)
-        val w = res?.groupValues?.get(1)?.toInt() ?: variant.width
-        var h = res?.groupValues?.get(2)?.toInt() ?: variant.height
-        if (res == null) {
-            // Phone shape: as tall as the phone's display area; within 2% the image's own size stays.
-            val aspect = phoneAspect()
-            if (aspect > 1.0 && Math.abs(Math.log((variant.height.toDouble() / variant.width) / aspect)) > 0.02)
-                h = (Math.round(w * aspect).toInt() / 2 * 2).coerceIn(w, w * 2)
-        }
+        boot(t.profile, t.variant, t.file, t.w, t.h)
+    }
+
+    private fun boot(profile: OsProfile, variant: ImageVariant, file: File, w: Int, h: Int) {
         Log.i(TAG, "screen ${w}x$h (${settings.screenRes}, image ${variant.width}x${variant.height})")
         guestW = w
         guestH = h
@@ -270,6 +266,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 NativeBridge.setAudioGain(hd, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
                 val overlays = guest.prepare()
                 NativeBridge.setShareOverlays(hd, overlays.map { it.first }.toTypedArray(), overlays.map { it.second }.toTypedArray())
+                secureProxy.attach(hd, settings.secureProxy)  // after prepare(): it queues helper commands
+                escargotApplied = settings.escargot
+                NativeBridge.setEscargot(hd, settings.escargot)  // Messenger names to Escargot (revival.h)
             }
             return hd
         }
@@ -294,6 +293,23 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             NativeBridge.destroy(handle)  // a failed restore leaves the machine half-written
             handle = create()
         }
+        // A new Memory or Screen resolution setting: no state of its own yet, so start from the
+        // configuration last run (same image; WM 5: same memory): Windows Mobile boots again at the new
+        // size with its internal storage (files, settings, programs) kept.
+        if (candidates.none { it.exists() }) {
+            GuestStates.migrationSource(this, settings, GuestStates.Target(profile, variant, file, w, h, mem))?.let { src ->
+                if (NativeBridge.adoptState(handle, src.path, profile.coldBootKeepsStorage)) {
+                    Log.i(TAG, "started from ${src.parentFile?.name}/${src.name}")
+                    booting = true
+                } else {
+                    NativeBridge.destroy(handle)
+                    handle = create()
+                }
+            }
+        }
+        settings.lastStateDir = dir.name
+        bootedScreenRes = settings.screenRes
+        bootedMemMB = settings.memMB
         title = profile.title
         // Keep the phone awake while Windows Mobile boots; released once it reaches the home screen.
         if (booting) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -302,7 +318,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     private fun onGuestTouch(v: View, e: MotionEvent): Boolean {
         if (handle == 0L) return false
-        if (e.actionMasked == MotionEvent.ACTION_DOWN) skin.wakeBacklight()
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            skin.wakeBacklight()
+            GuestTyper.caretMoved()  // the tap may move WM's caret: the phone's keyboard forgets its text
+        }
+        if (keypad) return keypadTouch(v, e)
         val u = (e.x / v.width).coerceIn(0f, 1f)
         val w = (e.y / v.height).coerceIn(0f, 1f)
         // Fold mode shows the frame turned a quarter clockwise: the panel's x runs down the view,
@@ -313,6 +333,37 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> NativeBridge.touch(handle, true, x, y)
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> NativeBridge.touch(handle, false, x, y)
+        }
+        return true
+    }
+
+    // Standard has no touch screen: a tap on the soft key bar presses that soft key, a swipe on the
+    // screen is the D-pad (one press per tenth of the screen moved), a tap elsewhere the action key.
+    private var touchX = 0f
+    private var touchY = 0f
+    private var touchMoved = false
+
+    private fun keypadTouch(v: View, e: MotionEvent): Boolean {
+        val step = minOf(v.width, v.height) / 10f
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { touchX = e.x; touchY = e.y; touchMoved = false }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = e.x - touchX
+                val dy = e.y - touchY
+                if (Math.abs(dx) >= step || Math.abs(dy) >= step) {
+                    // Content follows the finger: dragging up moves down the list.
+                    val vk = if (Math.abs(dy) >= Math.abs(dx)) (if (dy < 0) Keymap.VK_DOWN else Keymap.VK_UP)
+                        else (if (dx < 0) 0x27 else 0x25)
+                    sendKey(vk, true); sendKey(vk, false)
+                    touchX = e.x; touchY = e.y; touchMoved = true
+                }
+            }
+            MotionEvent.ACTION_UP -> if (!touchMoved) {
+                // WM Standard's soft key bar is the bottom ~9% of the screen (26 of 320 lines).
+                val vk = if (e.y >= v.height * 0.91f) (if (e.x < v.width / 2f) Keymap.VK_TSOFT1 else Keymap.VK_TSOFT2)
+                    else Keymap.VK_RETURN
+                sendKey(vk, true); sendKey(vk, false)
+            }
         }
         return true
     }
@@ -466,12 +517,17 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** Windows Mobile is turned to landscape for the open-fold layout. */
     private var foldGuest = false
 
+    /** Windows Mobile Standard (Smartphone, OsProfile.touch false): keypad only, no rotation or slider. */
+    private val keypad get() = settings.profile?.touch == false
+    private val autoRotate get() = settings.rotateGuest && !keypad
+
     private var lastLayoutInfo: androidx.window.layout.WindowLayoutInfo? = null
 
     private fun onWindowLayout(info: androidx.window.layout.WindowLayoutInfo) {
         lastLayoutInfo = info
         val fold = info.displayFeatures.filterIsInstance<androidx.window.layout.FoldingFeature>().firstOrNull()
-        val open = settings.foldMode && fold != null
+        // Standard (keypad) releases stay portrait: no slider keyboard to type on, no rotation.
+        val open = settings.foldMode && fold != null && !keypad
         if (!open) {
             skin.foldCrease = null
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -482,7 +538,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 camera.panelRotation = 0  // the camera picture follows the panel, not WM's rotation
                 guest.send("rotate 0")
                 if (settings.showWallpaper) loadWallpaper()  // each screen can have its own wallpaper
-                if (settings.rotateGuest && foreground) rotation.start()
+                if (autoRotate && foreground) rotation.start()
                 wallpaperChecked = false
             }
             return
@@ -568,6 +624,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 checkHung()
                 guest.poll()  // first: what the helper said while we were away counts before checkHelper
                 checkHelper()
+                secureProxy.tick(guest.helperResponsive())  // certificate warnings to WM's dialog (SecureProxy)
                 updateDisplayOff()
                 // Cut the guest's picture only once the window has settled into the matching layout
                 // (right after folding or unfolding it is still the other shape for a moment).
@@ -648,7 +705,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         saveThread?.join()
         if (hibernated) wake()
         if (handle != 0L) NativeBridge.setCpuLimit(handle, 100)
-        layoutTracker.addWindowLayoutInfoListener(this, mainExecutor, layoutListener)
+        layoutTracker.addWindowLayoutInfoListener(this, androidx.core.content.ContextCompat.getMainExecutor(this), layoutListener)
         // The guest itself starts in onResume, after any settings result (which may recreate).
     }
 
@@ -686,7 +743,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         phone.start()
         myNumber = PhoneNumber.own(this)
         lastStatus = ""
-        if (settings.rotateGuest && !foldGuest) rotation.start()
+        if (autoRotate && !foldGuest) rotation.start()
         if (settings.keyShine) skin.startTilt()
         wallpaperChecked = false
         contentResolver.registerContentObserver(
@@ -694,7 +751,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         sendBrightness()
         syncTheme()
         if (Build.VERSION.SDK_INT >= 27) runCatching {
-            android.app.WallpaperManager.getInstance(this).addOnColorsChangedListener(wallpaperListener, ui)
+            android.app.WallpaperManager.getInstance(this).addOnColorsChangedListener(wallpaperListener as android.app.WallpaperManager.OnColorsChangedListener, ui)
         }
         ui.post(tick)
         if (pendingHome) {
@@ -728,8 +785,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             AndroidApps.requestHome(this, REQ_ROLE)
             return
         }
-        val i = AndroidAppsActivity.intentFor(this, command) ?: return
-        ownUi = true  // suspends without locking while the list is open
+        if (command == GuestSettings.CMD_PIM_SYNC) {
+            PimSync.requested = true
+            Toast.makeText(this, "Syncing contacts and calendar", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val i = GuestSettings.screenFor(this, command) ?: return
+        ownUi = true  // suspends without locking while the screen is open
         @Suppress("DEPRECATION")
         startActivityForResult(i, REQ_SETTINGS)  // closing it applies the live settings (dock, folder)
     }
@@ -755,7 +817,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         phone.stop()
         contentResolver.unregisterContentObserver(brightnessObserver)
         if (Build.VERSION.SDK_INT >= 27) runCatching {
-            android.app.WallpaperManager.getInstance(this).removeOnColorsChangedListener(wallpaperListener)
+            android.app.WallpaperManager.getInstance(this).removeOnColorsChangedListener(wallpaperListener as android.app.WallpaperManager.OnColorsChangedListener)
         }
         if (handle != 0L && micOn) {
             NativeBridge.setMicEnabled(handle, false)
@@ -769,15 +831,23 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** Opened by the full-screen incoming-call notification: over the lock screen, screen on. */
     private fun showForCall(intent: Intent?) {
         if (intent?.getBooleanExtra(CallBridge.EXTRA_CALL, false) != true) return
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
+        showWhenLocked(true)
         callShown = true
     }
 
     private var callShown = false
 
+    /** Over the lock screen with the screen turned on (the window flags before API 27). */
+    private fun showWhenLocked(on: Boolean) {
+        if (Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(on); setTurnScreenOn(on); return }
+        @Suppress("DEPRECATION")
+        val flags = android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        if (on) window.addFlags(flags) else window.clearFlags(flags)
+    }
+
     override fun onStop() {
-        if (callShown) { callShown = false; setShowWhenLocked(false); setTurnScreenOn(false) }
+        if (callShown) { callShown = false; showWhenLocked(false) }
         layoutTracker.removeWindowLayoutInfoListener(layoutListener)
         foreground = false
         calls.leave()  // WM can't show a call from the background: the phone's dialer takes it
@@ -1048,7 +1118,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 }
             },
             // WM 5's standby loses a kernel page on power-off and never wakes: no Suspend there.
-            if (settings.profileId == "wm5ppcphone") null
+            if (settings.profileId == "wm5ppcphone" || settings.profileId == "wm5sp") null
             else PowerMenu.Item("Suspend", "Windows Mobile's power button (again to wake)") {
                 if (userPaused) setUserPaused(false)
                 if (handle != 0L) NativeBridge.powerButton(handle)
@@ -1208,9 +1278,33 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onSettingsChanged(needsRestart: Boolean) {
         if (needsRestart) {
-            Toast.makeText(this, "Restarting Windows Mobile to apply the change", Toast.LENGTH_SHORT).show()
-            recreate()
+            // The settings app sends its changes one by one: decide once they are all in.
+            ui.removeCallbacks(restartForSettings)
+            ui.postDelayed(restartForSettings, 400)
         } else applyLiveSettings()
+    }
+
+    // Screen and memory this session booted with (boot), restored when a restart is declined.
+    private var bootedScreenRes = ""
+    private var bootedMemMB = 0
+    private var restartAsked = false
+
+    /** A restart for changed settings; asks first when it would not keep the internal storage (GuestStates). */
+    private val restartForSettings = Runnable {
+        if (restartAsked || isFinishing) return@Runnable
+        val change = GuestStates.change(this, settings, GuestStates.resolve(this, settings, { phoneAspect() }))
+        restartAsked = true
+        GuestStates.confirm(this, change, apply = {
+            restartAsked = false
+            Toast.makeText(this, if (change == GuestStates.Change.CARRY) "Restarting Windows Mobile at the new setting; " +
+                "your files and programs come along" else "Restarting Windows Mobile to apply the change", Toast.LENGTH_SHORT).show()
+            recreate()
+        }, cancel = {
+            restartAsked = false
+            settings.screenRes = bootedScreenRes
+            settings.memMB = bootedMemMB
+            guest.writeState()  // the settings app shows the values in use again
+        })
     }
 
     /** A setting changed from inside Windows Mobile: apply everything that can change live. */
@@ -1233,7 +1327,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         skin.hingeLocation = settings.hingeLocation
         skin.hingeOpacity = settings.hingeOpacity
         skin.setBacklight(settings.backlightOn, settings.backlightIntensity, settings.backlightTimeout, settings.backlightColor, settings.backlightDirt)
-        if (settings.rotateGuest && foreground && !foldGuest) rotation.start() else rotation.stop()
+        if (autoRotate && foreground && !foldGuest) rotation.start() else rotation.stop()
         if (handle != 0L) {
             NativeBridge.setFilter(handle, settings.screenFilter)
             NativeBridge.setAudioGain(handle, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
@@ -1254,14 +1348,79 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         }
         lastLayoutInfo?.let { onWindowLayout(it) }  // only acts when the fold state changed
         clipboard.apply()  // Sync Clipboard
+        secureProxy.apply(settings.secureProxy)  // Secure Web Proxy (also adds/removes WM's root)
+        if (handle != 0L && escargotApplied != settings.escargot) {  // Windows Live Messenger via Escargot
+            escargotApplied = settings.escargot
+            NativeBridge.setEscargot(handle, settings.escargot)
+        }
         ime.apply()  // Use Android IME over Device IME
         launcher.apply()  // Android Apps folder, hidden apps, dock
+        applyDockLook()
+        askFeaturePermissions()  // Phone / Contacts / Infrared turned on from Windows Mobile's settings app
         // The dock shrinks the display: the guest's wallpaper piece is cut again for its new place.
         val dockKey = "${settings.dockPos}/${settings.dockSize}"
         if (dockKey != lastDockLayout) { lastDockLayout = dockKey; wallpaperChecked = false }
     }
 
     private var lastDockLayout: String? = null
+
+    /** The dock's look (Dock page); its blurred wallpaper is built once per wallpaper and blur. */
+    private fun applyDockLook() {
+        skin.dockIconDp = settings.dockIcon
+        skin.dockPadDp = settings.dockPad
+        skin.dockOpacity = settings.dockOpacity / 100f
+        loadDockFrost()
+    }
+
+    private var askedFeatures = emptySet<String>()
+
+    /**
+     * Calls, texts, contacts / calendar sync and Bluetooth LE infrared can be turned on in Windows
+     * Mobile's settings app, where Android can't ask for their permissions: ask here, once per new
+     * set of missing permissions.
+     */
+    private fun askFeaturePermissions() {
+        if (!foreground) return
+        val wanted = buildSet {
+            if (CallBridge.enabled(this@EmulatorActivity)) addAll(CallBridge.permissions())
+            if (SmsBridge.enabled(this@EmulatorActivity)) addAll(SmsBridge.permissions())
+            val g = Settings.global(this@EmulatorActivity)
+            if (g.getBoolean("pim.contacts", false)) { add(Manifest.permission.READ_CONTACTS); add(Manifest.permission.WRITE_CONTACTS) }
+            if (g.getBoolean("pim.calendar", false)) { add(Manifest.permission.READ_CALENDAR); add(Manifest.permission.WRITE_CALENDAR) }
+            if (InfraredSettings(this@EmulatorActivity).mode == "ble") addAll(InfraredSettings.blePermissions())
+        }
+        val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }.toSet()
+        if (missing.isEmpty() || missing == askedFeatures) return
+        askedFeatures = missing
+        requestPermissions(missing.toTypedArray(), REQ_FEATURES)
+    }
+
+    private var dockFrostKey = ""
+
+    /** Dock Blur: a blurred copy of the wallpaper for the dock's glass (only with the wallpaper shown). */
+    private fun loadDockFrost() {
+        val blur = settings.dockBlur
+        val width = if (Build.VERSION.SDK_INT >= 30) windowManager.currentWindowMetrics.bounds.width()
+            else resources.displayMetrics.widthPixels
+        val key = "$blur/${settings.showWallpaper}/$width"
+        if (key == dockFrostKey) return
+        dockFrostKey = key
+        if (blur == 0 || !settings.showWallpaper) { skin.dockFrost = null; return }
+        thread(name = "dock-frost") {
+            val bmp = runCatching {
+                val d = phoneWallpaper() ?: return@runCatching null
+                val k = 4f + blur
+                val sw = (d.intrinsicWidth / k).toInt().coerceAtLeast(8)
+                val sh = (d.intrinsicHeight / k).toInt().coerceAtLeast(8)
+                val small = android.graphics.Bitmap.createBitmap(sw, sh, android.graphics.Bitmap.Config.ARGB_8888)
+                d.setBounds(0, 0, sw, sh)
+                d.draw(android.graphics.Canvas(small))
+                boxBlur(small, 2, 3)
+                small
+            }.getOrNull()
+            ui.post { if (!isFinishing) skin.dockFrost = bmp }
+        }
+    }
 
     override fun onOpenSettings() = openSettings()
 
@@ -1307,6 +1466,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onGuestIme(what: String) = ime.onGuest(what)
 
+    override fun onGuestTls(line: String) = secureProxy.onGuest(line)  // a certificate warning's answer
+
     /** The helper runs, but on a card WM named \Storage Card2 (the name was taken): re-insert it. */
     override fun onGuestRemount() {
         val h = handle
@@ -1351,6 +1512,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         pim.onHello()  // contacts / calendar sync shortly
         ime.resend()
         launcher.onHello()  // the Android Apps folder, in case WM's Start menu is from an older state
+        secureProxy.onHello()  // the proxy's root in WM's root store (or out of it when off)
     }
 
     // ---- Phone wallpaper and brightness mirrored into the guest ----
@@ -1367,12 +1529,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     /** The phone's wallpaper changed: re-cut it for the guest and redraw the backdrop. */
-    private val wallpaperListener = android.app.WallpaperManager.OnColorsChangedListener { _, which ->
+    // Lazy and typed Any: the listener interface is API 27, and Android 8.0 can't load a class implementing it.
+    private val wallpaperListener: Any by lazy { android.app.WallpaperManager.OnColorsChangedListener { _, which ->
         if (which and android.app.WallpaperManager.FLAG_SYSTEM == 0) return@OnColorsChangedListener
         wallpaperChecked = false
         if (settings.showWallpaper) loadWallpaper()
         syncTheme()
-    }
+    } }
 
     private var themeKeySent: String? = null
 
@@ -1541,8 +1704,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     /** Key Blur: a blurred copy of the wallpaper for the frosted keys (only with the wallpaper shown). */
     private fun loadKeyFrost() {
+        loadDockFrost()  // the dock's own blur, on the same occasions (screen size, wallpaper shown)
         val blur = settings.keyBlur
-        val key = "$blur/${settings.showWallpaper}/${windowManager.currentWindowMetrics.bounds.width()}"
+        val width = if (Build.VERSION.SDK_INT >= 30) windowManager.currentWindowMetrics.bounds.width()
+            else resources.displayMetrics.widthPixels
+        val key = "$blur/${settings.showWallpaper}/$width"
         if (key == keyFrostKey) return
         keyFrostKey = key
         if (blur == 0 || !settings.showWallpaper) { skin.keyFrost = null; return }
@@ -1672,7 +1838,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private fun guestKey(keyCode: Int): Int? = when (keyCode) {
         KeyEvent.KEYCODE_VOLUME_UP -> Keymap.volumeKey(settings.volumeUp, up = true)
         KeyEvent.KEYCODE_VOLUME_DOWN -> Keymap.volumeKey(settings.volumeDown, up = false)
-        else -> Keymap.vk(keyCode)
+        else -> if (keypad) Keymap.standardVk(keyCode) else Keymap.vk(keyCode)
     }
 
     private fun isLockKey(keyCode: Int) =
@@ -1680,6 +1846,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN && settings.volumeDown == Keymap.KeyAction.LOCK)
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_MENU && keypad) {
+            // A flip phone's Menu key: a tap is WM's right soft key (its "Menu"), a hold opens
+            // PocketStylus's settings (phones without a touch screen have no other way there).
+            if (event.repeatCount == 0) event.startTracking()
+            return true
+        }
         if (keyCode == KeyEvent.KEYCODE_MENU) { openSettings(); return true }
         if (isLockKey(keyCode)) {
             if (event.repeatCount == 0) guest.send("lock")
@@ -1690,7 +1862,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         return true
     }
 
+    override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_MENU && keypad) { openSettings(); return true }
+        return super.onKeyLongPress(keyCode, event)
+    }
+
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_MENU && keypad) {
+            if (event.isTracking && !event.isCanceled) { sendKey(Keymap.VK_TSOFT2, true); sendKey(Keymap.VK_TSOFT2, false) }
+            return true
+        }
         if (isLockKey(keyCode)) return true
         val vk = guestKey(keyCode) ?: return super.onKeyUp(keyCode, event)
         sendKey(vk, false)
@@ -1714,6 +1895,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         const val REQ_PHONE = 9
         const val REQ_LOCATION = 10
         const val REQ_ROLE = 11
+        const val REQ_FEATURES = 12
         /** Intent extra: started for Home (HomeActivity). */
         const val EXTRA_HOME = "jp.net.seventhreeseven.wmdroid.HOME"
         /** The live emulator (one at a time, see onCreate). */

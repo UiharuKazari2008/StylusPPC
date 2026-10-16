@@ -17,10 +17,10 @@ android {
 
     defaultConfig {
         applicationId = "jp.net.seventhreeseven.wmdroid"
-        minSdk = 29
+        minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "1.0.3"
+        versionCode = 14
+        versionName = "1.0.4"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }

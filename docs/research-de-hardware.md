@@ -226,7 +226,29 @@ Not emulated: IIC (`0x54000000`), SDI (`0x5A000000`), SPI0, DMA channels 0 and 3
 
 **Unmapped behaviour:** any other physical address is treated as I/O and goes to a "no device" handler that returns 0 on read and ignores writes, with a log line. Exception: accessing *known* devices at unknown offsets is mostly **fatal** (`TerminateWithMessage(ID_MESSAGE_UNSUPPORTED_HARDWARE)`). The guest therefore uses only the offsets listed here.
 
-`/memsize` only allocates the extension range. In V1 nothing tells the guest the size, so accesses past the end hit the "no device" handler. [GUESS] The OAL probes RAM by write and readback. The image address tables map VA `0x94000000` → PA `0x34000000` for 192 MB.
+`/memsize` only allocates the extension range. In V1 nothing tells the guest the size, so accesses past the end hit the "no device" handler. The image address tables map VA `0x94000000` → PA `0x34000000` for 192 MB.
+
+**Memory size as the guest sees it [OBS]** (WMDroid CLI, 2026-10-16, cold boots with the helper's `mem`/`df` and Settings > System > Memory):
+
+- `OEMGetExtensionDRAM` probes the extension by write/readback of `0x55555555`/`0xAAAAAAAA` in **1 MB steps, at most 0xC0 (192) steps** from VA 0x94000000 (6.5.3: code at 0x8806F210; WM5's debug build prints `OEMGetExtensionDRAM: found …`). Any size from 64 to 256 MB is found exactly. Together with the address table (0x94000000 + 192 MB ends at 0xA0000000, the end of the kernel's cached window) this makes **256 MB the ceiling**: a board with 320 MB still shows Program Total 221.9 MB on 6.5.3, the same as 256 MB.
+- It **reserves the first 32 MB of the extension (PA 0x34000000-0x35FFFFFF) for RAMFMD**, the storage volume ("Storage" 31.42 MB in every image). With 64 MB there is no extension: "Storage memory critically low" (6.5.3, WM5), the helper never starts. With 96 MB 6.x works but program memory is small (6.5.3 Pro: 3 MB free after opening Word, IE and Messaging; WM5: helper.exe crashed).
+- Free program memory after boot (helper `mem`; Total from the Memory panel where shown), each size then opened Internet Explorer and Messaging (plus Word and the Memory panel on Professional) and kept answering the helper:
+
+  | Image | 96 | 128 | 160 | 224 | 256 |
+  |---|---|---|---|---|---|
+  | 6.5.3 Pro | 18 MB (3 MB with programs open) | 50 | 83 | 149 | 181 (Total 221.9) |
+  | 6.1.4 Pro | 32 | 65 | 98 | 163 | 196 |
+  | 5.0 PPC Phone | helper crashes | 12 | 28 | 61 (Total 83.9) | 77 (Total 99.9) |
+  | 6.5.3 Standard | 33 | 65 | — | 164 | 196 |
+  | 6.1.4 Standard | 35 | — | — | 166 | 198 |
+  | 5.0 Smartphone | helper crashes | — | 33 | 66 | 82 |
+
+  WM 5 hands only part of the extension to programs. Sizes in between work the same (1 MB probe).
+- The storage volume's fixed place lets a snapshot move to another memory size (>= 96 MB) or screen (Machine::loadState Adopt, app: GuestStates.kt): restore RAM and flash, then boot again.
+  - **WM 6.x: cold flag** in BSP_ARGS. The OAL prints "soft reset flag not set, forcing clean boot" but RAMFMD, files, installed programs (.NET CF on 6.1.4) and flushed registry values survive; the new memory and screen take effect. Checked: 6.5.3 Pro 128 → 256 MB + 480x854 → 480x800, 256 → 160 MB; 6.1.4 Pro 128 → 224 MB + 480x800 → 480x854; 6.5.3 Standard 128 → 256 MB + 240x320 → 320x240.
+  - A *warm* flag keeps the kernel's old memory layout (6.5.3: Program Total 93.9 MB after 128 → 256 MB), but the new screen works.
+  - **WM 5 clears RAMFMD on any boot it treats as clean** ("RAMFMD: Clearing RAM storage region"): on the cold flag, and also on a warm flag when the rest of RAM is fresh (only the volume and the BSP_ARGS page restored). So WM 5 can only move to another screen with the same memory, by a warm restart with all RAM kept ("Starting with existing RAM storage region"; checked PPC 480x854 → 480x640).
+  - Registry values not yet flushed (RegFlushKey) are lost either way, as on a real soft reset: a helper `regset` HKCU value was gone 120 s later on 6.5.3/6.1.4 Pro and WM 5 PPC, while the Standard images (6.5.3, 6.1.4, WM 5) had flushed theirs. 6.1.4 Standard 128 MB 240x320 → 224 MB 320x320 (cold) and WM 5 Smartphone 240x320 → 320x240 (warm) carried files and registry too.
 
 ### 2.2 Image formats and the loader [SRC] `boards/loadbin_nb0.cpp`, `board.cpp: BoardMapVAToPA`
 

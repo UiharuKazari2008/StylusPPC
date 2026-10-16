@@ -20,17 +20,23 @@ class DeviceSettingsActivity : SettingsPage() {
             text = "Apply and restart Windows Mobile"
             isEnabled = false
             setOnClickListener {
-                for ((k, v) in pending) GuestSettings.entries.firstOrNull { it.key == k }?.set?.invoke(settings, v)
-                setResult(RESULT_OK)
-                finish()
+                // Another screen or memory size: ask first unless Windows Mobile's storage carries over (GuestStates).
+                val target = GuestStates.resolveElsewhere(this@DeviceSettingsActivity, settings,
+                    pending["res"] ?: settings.screenRes, pending["ram"]?.toIntOrNull() ?: settings.memMB)
+                GuestStates.confirm(this@DeviceSettingsActivity, GuestStates.change(this@DeviceSettingsActivity, settings, target), apply = {
+                    for ((k, v) in pending) GuestSettings.entriesFor(settings).firstOrNull { it.key == k }?.set?.invoke(settings, v)
+                    setResult(RESULT_OK)
+                    finish()
+                }, cancel = {})
             }
         }
         var page = ""
-        for (e in GuestSettings.entries) {
+        val catalogue = GuestSettings.entriesFor(settings)  // Standard: no touch-only settings
+        for (e in catalogue) {
             if (e.page != page) {
                 page = e.page
                 section(page)
-                if (GuestSettings.entries.any { it.page == page && it.restart })
+                if (catalogue.any { it.page == page && it.restart })
                     note("Changes here apply with the button at the bottom: Windows Mobile restarts.")
             }
             val value = e.get(settings)
@@ -45,7 +51,11 @@ class DeviceSettingsActivity : SettingsPage() {
                     if (value == "local:storage") startActivityForResult(Intent(this, StorageFoldersActivity::class.java), REQ_FOLDERS)
                     // Launcher page (AndroidApps): the home-app role, and the app lists.
                     else if (value == AndroidApps.CMD_ROLE) AndroidApps.requestHome(this, REQ_ROLE)
-                    else AndroidAppsActivity.intentFor(this, value)?.let { startActivity(it) }
+                    else if (value == GuestSettings.CMD_PIM_SYNC) {
+                        PimSync.requested = true
+                        android.widget.Toast.makeText(this, "Syncs the next time Windows Mobile is on screen", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    else GuestSettings.screenFor(this, value)?.let { startActivity(it) }
                 }
             }
         }

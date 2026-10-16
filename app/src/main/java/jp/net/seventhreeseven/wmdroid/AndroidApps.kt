@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.LauncherActivityInfo
 import android.content.pm.LauncherApps
+import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -106,12 +107,16 @@ object AndroidApps {
     // ---- The phone's launcher (HomeActivity) ----
 
     fun isHome(ctx: Context): Boolean =
-        ctx.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_HOME) == true
+        if (android.os.Build.VERSION.SDK_INT >= 29)
+            ctx.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_HOME) == true
+        else  // Android 8/9: no roles; the default HOME activity says who the launcher is.
+            ctx.packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+                PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName == ctx.packageName
 
     /** Asks Android to make PocketStylus the home app; when it already is, opens the default-home choice. */
     fun requestHome(a: Activity, requestCode: Int) {
-        val rm = a.getSystemService(RoleManager::class.java)
-        if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)) {
+        val rm = if (android.os.Build.VERSION.SDK_INT >= 29) a.getSystemService(RoleManager::class.java) else null
+        if (android.os.Build.VERSION.SDK_INT >= 29 && rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)) {
             @Suppress("DEPRECATION")
             if (runCatching { a.startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_HOME), requestCode) }.isSuccess) return
         }

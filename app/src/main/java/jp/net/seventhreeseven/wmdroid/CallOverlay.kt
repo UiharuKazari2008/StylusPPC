@@ -104,7 +104,7 @@ class CallOverlay(private val ctx: Context) {
         private const val TAG = "WMDroidCall"
 
         /** "Ring Windows Mobile while PocketStylus is in the background" (Settings > Phone calls). */
-        fun enabled(ctx: Context) = Settings.prefs(ctx).getBoolean("calls.background", true) && AndroidSettings.canDrawOverlays(ctx)
-        fun setEnabled(ctx: Context, on: Boolean) = Settings.prefs(ctx).edit().putBoolean("calls.background", on).apply()
+        fun enabled(ctx: Context) = Settings.global(ctx).getBoolean("calls.background", true) && AndroidSettings.canDrawOverlays(ctx)
+        fun setEnabled(ctx: Context, on: Boolean) = Settings.global(ctx).edit().putBoolean("calls.background", on).apply()
     }
 }

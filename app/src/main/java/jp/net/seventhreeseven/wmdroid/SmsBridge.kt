@@ -220,10 +220,10 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
         /** The running emulator's bridge (null with no session): receivers hand new messages to it. */
         @Volatile var live: SmsBridge? = null
 
-        fun enabled(ctx: Context) = Settings.prefs(ctx).getBoolean("sms.enabled", false)
-        fun setEnabled(ctx: Context, on: Boolean) = Settings.prefs(ctx).edit().putBoolean("sms.enabled", on).apply()
-        fun defer(ctx: Context) = Settings.prefs(ctx).getBoolean("sms.defer", false)
-        fun setDefer(ctx: Context, on: Boolean) = Settings.prefs(ctx).edit().putBoolean("sms.defer", on).apply()
+        fun enabled(ctx: Context) = Settings.global(ctx).getBoolean("sms.enabled", false)
+        fun setEnabled(ctx: Context, on: Boolean) = Settings.global(ctx).edit().putBoolean("sms.enabled", on).apply()
+        fun defer(ctx: Context) = Settings.global(ctx).getBoolean("sms.defer", false)
+        fun setDefer(ctx: Context, on: Boolean) = Settings.global(ctx).edit().putBoolean("sms.defer", on).apply()
 
         fun permissions(): Array<String> = buildList {
             add(Manifest.permission.SEND_SMS); add(Manifest.permission.RECEIVE_SMS); add(Manifest.permission.READ_SMS)
@@ -357,11 +357,9 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
             val nm = channel(ctx)
             val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, LauncherActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE)
-            val me = Person.Builder().setName("Me").build()
             for ((from, msgs) in queue(ctx).groupBy { it.from }) {
-                val sender = Person.Builder().setName(from).build()
-                val style = Notification.MessagingStyle(me)
-                msgs.forEach { style.addMessage(it.text, it.time, sender) }
+                val style = messagingStyle()
+                msgs.forEach { style.addFrom(it.text, it.time, from) }
                 val reply = PendingIntent.getBroadcast(ctx, from.hashCode(),
                     Intent(ctx, SmsReplyReceiver::class.java).putExtra("to", from),
                     PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -411,11 +409,21 @@ class SmsReplyReceiver : BroadcastReceiver() {
             .onFailure { Log.w("WMDroidSms", "quick reply failed", it) }
         // The conversation notification shows the reply and stays until Windows Mobile takes the messages.
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        val me = Person.Builder().setName("Me").build()
-        val style = Notification.MessagingStyle(me)
-        SmsBridge.queue(ctx).filter { it.from == to }.forEach { style.addMessage(it.text, it.time, Person.Builder().setName(to).build()) }
-        style.addMessage(text, System.currentTimeMillis(), me)
+        val style = messagingStyle()
+        SmsBridge.queue(ctx).filter { it.from == to }.forEach { style.addFrom(it.text, it.time, to) }
+        style.addFrom(text, System.currentTimeMillis(), null)
         nm.notify("wm.sms", to.hashCode(), Notification.Builder(ctx, SmsBridge.CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_running).setStyle(style).setOnlyAlertOnce(true).setGroup("wm.sms").build())
     }
+}
+
+// Conversation notifications: Person senders are API 28; Android 8.x uses the name-based style.
+private fun messagingStyle(): Notification.MessagingStyle =
+    if (Build.VERSION.SDK_INT >= 28) Notification.MessagingStyle(Person.Builder().setName("Me").build())
+    else @Suppress("DEPRECATION") Notification.MessagingStyle("Me")
+
+/** A message from [from], or from the user when it is null. */
+private fun Notification.MessagingStyle.addFrom(text: CharSequence, time: Long, from: String?) {
+    if (Build.VERSION.SDK_INT >= 28) addMessage(text, time, from?.let { Person.Builder().setName(it).build() })
+    else @Suppress("DEPRECATION") addMessage(text, time, from)
 }

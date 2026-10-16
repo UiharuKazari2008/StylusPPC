@@ -159,8 +159,7 @@ class CameraBridge(private val activity: Activity, private val settings: Setting
     }
 
     private fun startSession(d: CameraDevice, r: ImageReader, fps: Range<Int>?) {
-        val exec = Executor { bg.post(it) }
-        val config = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(OutputConfiguration(r.surface)), exec,
+        val stateCallback =
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
                     if (device !== d) { s.close(); return }
@@ -174,8 +173,14 @@ class CameraBridge(private val activity: Activity, private val settings: Setting
                     runCatching { s.setRepeatingRequest(req, null, bg) }.onFailure { failed("request", it) }
                 }
                 override fun onConfigureFailed(s: CameraCaptureSession) { if (device === d) failed("session", "configure failed") }
-            })
-        runCatching { d.createCaptureSession(config) }.onFailure { failed("session", it) }
+            }
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                val exec = Executor { bg.post(it) }
+                d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR,
+                    listOf(OutputConfiguration(r.surface)), exec, stateCallback))
+            } else @Suppress("DEPRECATION") d.createCaptureSession(listOf(r.surface), stateCallback, bg)  // SessionConfiguration is API 28
+        }.onFailure { failed("session", it) }
     }
 
     private fun onImage(r: ImageReader) {

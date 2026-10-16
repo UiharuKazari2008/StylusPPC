@@ -1,7 +1,7 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <style name="Theme.WMDroid" parent="Theme.Material3.DayNight.NoActionBar" />
     <style name="Theme.WMDroid.Fullscreen" parent="Theme.WMDroid">
         <item name="android:windowBackground">@android:color/black</item>
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
     </style>
 </resources>

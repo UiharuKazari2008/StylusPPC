@@ -53,6 +53,8 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestAndroid(line: String) {}
         /** A Launcher page button in WM's settings app: AndroidApps.CMD_* ("launcher role", ...). */
         fun onGuestLauncher(command: String) {}
+        /** The answer to a certificate warning: "<id> yes|no|timeout" (SecureProxy). */
+        fun onGuestTls(line: String) {}
     }
 
     private val root = File(ctx.filesDir, "overlay")
@@ -99,6 +101,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         // A restored session already has its helper running and won't say hello by itself: ask, so an
         // outdated helper is noticed (one too old to know "hello" answers "unknown").
         helloSeq = "%08d".format(seq)
+        helloSeen = false
         markAlive()  // a new session: its helper gets its full time to answer
         send("hello")
         return overlays()
@@ -128,7 +131,8 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             appendLine("screen.res=${settings.screenRes}")
             appendLine("resume=${settings.resumeSession}")
             appendLine("stats=${settings.showStats}")
-            appendLine("dpi=${settings.guestDpi}")  // Screen DPI (guest/Helper/Dpi.cs)
+            // Screen DPI (guest/Helper/Dpi.cs); Standard keeps its image's own (each size has its image).
+            appendLine("dpi=${if (settings.profile?.touch == false) 0 else settings.guestDpi}")
             if (settings.debugNoPatch) appendLine("patch.auto=0")
             append(CallBridge.stateLines(ctx))  // phone calls: calls=1 also keeps FakeRIL loading (Calls.cs)
         }
@@ -176,6 +180,16 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
     fun markAlive() { lastHeard = android.os.SystemClock.uptimeMillis() }
     fun pendingCommands(): Int = inDir.list()?.count { it.endsWith(".cmd") } ?: 0
 
+    /** A current helper said hello this session (cleared by [prepare]). */
+    private var helloSeen = false
+
+    /** The helper runs and reads its mailbox: it said hello, and no command has waited 10 s. */
+    fun helperResponsive(): Boolean {
+        if (!helloSeen) return false
+        val oldest = inDir.listFiles { f -> f.name.endsWith(".cmd") }?.minOfOrNull { it.lastModified() } ?: return true
+        return System.currentTimeMillis() - oldest < 10_000
+    }
+
     private fun handle(line: String) {
         if (line.isEmpty()) return
         lastHeard = android.os.SystemClock.uptimeMillis()
@@ -190,6 +204,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
                     return
                 }
                 syncTimeZone(force = true)
+                helloSeen = true
                 listener.onGuestHello()
             }
             line == "result $helloSeq unknown" -> {
@@ -215,8 +230,10 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             line == "clip" -> listener.onGuestClip()  // ClipboardBridge
             line == "remount" -> listener.onGuestRemount()
             line.startsWith("ime ") -> listener.onGuestIme(line.removePrefix("ime ").trim())  // ImeBridge
+            line.startsWith("tlsask ") -> listener.onGuestTls(line.removePrefix("tlsask ").trim())  // SecureProxy
             line.startsWith("android ") -> listener.onGuestAndroid(line.removePrefix("android ").trim())  // LauncherBridge
             line.startsWith("launcher ") -> listener.onGuestLauncher(line)  // Launcher page buttons (AndroidApps.CMD_*)
+            line in GuestSettings.ANDROID_COMMANDS -> listener.onGuestLauncher(line)  // Phone / Contacts / Infrared buttons
             line.startsWith("buttons ") -> {  // Keymap.HwButtons routes the buttons by it, helper or not
                 settings.hwButtonMap = line.removePrefix("buttons ").trim()
                 listener.onGuestButtons()

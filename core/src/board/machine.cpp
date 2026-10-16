@@ -287,8 +287,8 @@ void Machine::hardReset() {
 // "boot complete" without restarting). This does what the OAL's own reboot does instead: the core
 // comes out of reset (SVC, interrupts off, MMU off) at the image entry with RAM kept and a soft
 // reset flagged in the boot arguments, so the kernel boots again and StartUp runs the helper.
-void Machine::softReset() {
-    LOGI("soft reset (warm reboot from pc=%08x)", cpu.pc());
+void Machine::softReset(bool warm) {
+    LOGI("%s reset (reboot from pc=%08x)", warm ? "soft" : "cold", cpu.pc());
     folderShare->onGuestReset();
     dePage->nled.reset(dePage->leds);  // notification LED / vibrator off (nled.h)
     modem->reset();
@@ -306,12 +306,13 @@ void Machine::softReset() {
     intc.intsubmsk = 0x7FF;
     intc.srcpnd = intc.intpnd = intc.subsrcpnd = 0;
     intc.intoffset = 0;
-    writeBootArgs(true);
+    writeBootArgs(warm);
     cpu.reset();
     cpu.setPc(entryPa);
     intc.update();
     bootComplete = false;  // detect the home screen again after the guest restarts
     idleSeconds = 0;
+    oneTierScans = kOneTierScans;
     resetRequested = false;
 }
 
@@ -345,6 +346,7 @@ bool Machine::runFor(uint64_t ns) {
             irda->reset();
             bootComplete = false;
             idleSeconds = 0;
+            oneTierScans = kOneTierScans;
         }
         updateBootState(now);
         if (now >= end) break;
@@ -413,6 +415,11 @@ bool Machine::asleep(uint64_t now, uint64_t end) {
 void Machine::updateBootState(uint64_t now) {
     // Boot is done once the guest has been at least 80% idle in each of 10 consecutive seconds.
     // Boot itself contains shorter idle stretches (driver timeouts), so a single window is not enough.
+    if (oneTierScans > 0 && now >= oneTierNext) {  // Standard images (oneTierPolicy)
+        oneTierNext = now + 1000000000ull;
+        oneTierScans--;
+        oneTierPolicy();
+    }
     if (bootComplete) return;
     uint64_t span = now - windowStart;
     if (span < 1000000000ull) return;
@@ -425,6 +432,36 @@ void Machine::updateBootState(uint64_t now) {
         bootComplete = true;
         LOGI("boot complete after %.1f s", now / 1e9);
     }
+}
+
+// Security policy 4123 (0x101B, Privileged Applications) = 1: every program that runs is privileged
+// ("one-tier"), as on the Professional images. The Standard (Smartphone) images ship two-tier
+// (0x101B = 0), so the unsigned guest helper runs with normal trust and every write to a protected
+// registry key or \Windows fails (docs/research-standard.md). The value lives in the registry hive
+// in guest RAM: its cell is u16 type (REG_DWORD 4), u16 data size (4), u8 name length (8), u8 flags,
+// the UTF-16 name "0000101b", then the DWORD. Rewritten in place once a second during boot (the
+// hive and its object-store copies appear ~15 s in; the helper starts after the home screen).
+void Machine::oneTierPolicy() {
+    static const uint8_t kName[] = {'0', 0, '0', 0, '0', 0, '0', 0, '1', 0, '0', 0, '1', 0, 'b', 0};
+    static const uint8_t kHead[] = {4, 0, 4, 0, 8};
+    uint8_t *begin = ram.data(), *end = ram.data() + ram.size();
+    int patched = 0;
+    // memchr for the rare last letter is far faster than a byte-wise search through mostly-zero RAM.
+    for (uint8_t *b = begin + 6 + 14; b < end - 6;) {
+        b = (uint8_t *)memchr(b, 'b', end - 6 - b);
+        if (!b) break;
+        uint8_t *p = b - 14;
+        b++;
+        if (memcmp(p, kName, sizeof kName) || memcmp(p - 6, kHead, sizeof kHead)) continue;
+        uint8_t *v = p + sizeof kName;
+        uint32_t old;
+        memcpy(&old, v, 4);
+        if (old != 0) continue;
+        const uint32_t one = 1;
+        memcpy(v, &one, 4);
+        patched++;
+    }
+    if (patched) LOGI("security policy: Privileged Applications set to one-tier (%d hive cells)", patched);
 }
 
 void Machine::touch(bool down, int x, int y) {

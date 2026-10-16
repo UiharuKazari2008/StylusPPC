@@ -13,7 +13,7 @@ It was built and tuned on a Galaxy Z Fold7. On a foldable, opening the phone tur
 | GitHub | [**PocketStylus.apk**](https://github.com/UiharuKazari2008/StylusPPC/releases/latest/download/PocketStylus.apk) · [release notes](https://github.com/UiharuKazari2008/StylusPPC/releases/latest) |
 | yozora | [**PocketStylus.apk.zip**](https://yozora.bluesteel.737.jp.net/UiharuKazari2008/StylusPPC/releases/download/latest/PocketStylus.apk.zip) (the APK, zipped) · [release notes](https://yozora.bluesteel.737.jp.net/UiharuKazari2008/StylusPPC/releases/latest) |
 
-These links always point to the newest release. Android 10 or newer, ARM64.
+These links always point to the newest release. Android 8.0 or newer, ARM64.
 
 ### Screenshots
 
@@ -62,10 +62,13 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 | **Windows Mobile 6.5.3 Professional** | `PPC_USA_GSM_FWVGA_VR.BIN` | Main target. Titanium home screen, FakeRIL radio, everything below works. |
 | **Windows Mobile 6.1.4 Professional** | `PPC_USA_GSM_480x800.BIN` | .NET CF 3.5 is installed automatically on first boot. Its radio is PocketStylus's virtual GSM modem. |
 | **Windows Mobile 5.0 Pocket PC Phone** | `PPC_USA_GSM_VGA_VR.BIN` | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM (the default). |
+| **Windows Mobile 6.5.3 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_WVGA_VR.bin`) | Keypad edition: soft keys, D-pad, Talk/End and digits on the skin or the phone's own keys. The WVGA image is sharper, but its call screen draws garbled. |
+| **Windows Mobile 6.1.4 Standard** | `SP_USA_GSM_QVGA_VR.bin` | Calls through the virtual GSM modem. .NET CF 3.5 is installed automatically. |
+| **Windows Mobile 5.0 Smartphone** | `SP_USA_GSM_QVGA_VR.bin` | Runs at 240×400, 240×320 or 320×240. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM or more. |
 
-Each release needs just one image: the board tells Windows Mobile its screen size at boot, so Device Settings → **Screen resolution** runs it at your phone's shape (default), 480×854, 480×800, 480×640 or 480×480. Each release keeps its own saved sessions and device settings, so you can switch between them without losing anything.
+Each Professional release needs just one image: the board tells Windows Mobile its screen size at boot, so Device Settings → **Screen resolution** runs it at your phone's shape (default), 480×854, 480×800, 480×640 or 480×480. Standard releases offer their own sizes (240×320, 320×320, 320×240, and more where an image allows). Each release keeps its own saved sessions and device settings, so you can switch between them without losing anything.
 
-**Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by keypad, so it isn't offered: PocketStylus is built around touch. Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family.
+**Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by the keypad: the keypad skin, the phone's hardware keys (for example on an Android flip phone), or taps on the screen (soft-key bar taps press the soft keys, swipes move the D-pad, other taps press Action). Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family.
 
 ---
 
@@ -107,20 +110,23 @@ Each release needs just one image: the board tells Windows Mobile its screen siz
 | Feature | Status |
 |---|---|
 | Windows Mobile 6.5.3 Pro, 6.1.4 Pro, 5.0 Pocket PC Phone | ✅ |
-| Windows Mobile Standard (Smartphone, keypad only) | ❌ ([#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) |
+| Windows Mobile 6.5.3 / 6.1.4 Standard, 5.0 Smartphone (keypad only, [#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) | ✅ new in 1.0.4 (`docs/research-standard.md`) |
 | WM 6.0 / 6.1, 2003 SE | ❌ (6.0/6.1 run but aren't offered; 2003 SE doesn't boot) |
-| Android 10 or newer | ✅ (older: [#1](https://github.com/UiharuKazari2008/StylusPPC/issues/1)) |
+| Android 8.0 or newer ([#1](https://github.com/UiharuKazari2008/StylusPPC/issues/1)) | ✅ |
 | Snapshots, quick resume, Savepoint, warm reboot | ✅ |
+| Memory 96–256 MB; storage kept when Memory or Screen resolution changes | ✅ (WM 5: screen changes only) |
 | Material You theme, wallpaper sync | ✅ |
 | Status bar (battery, signal, carrier, G/E/3G/H or 1X/Ev, Wi-Fi) | ✅ |
 | Your own phone number in WM | ✅ |
-| Clipboard sync, Android keyboard | ✅ |
+| Clipboard sync, Android keyboard (with autocorrect and suggestions) | ✅ |
+| Modern HTTPS sites in IE Mobile (secure web proxy, `docs/research-tls-proxy.md`; a bad certificate asks "continue anyway?" in WM) | ✅ |
 | Contacts and calendar sync | ✅ |
 | Tasks and notes sync | ❌ |
 | Launcher mode, Android Apps folder, app dock | ✅ |
 | .NET Compact Framework 3.5 (auto-installed on 5.0/6.1.4) | ✅ |
-| Modern HTTPS websites (TLS 1.2+) | ❌ in progress (local-CA TLS proxy) |
-| Windows Live Messenger via Escargot | ❌ planned (after the TLS proxy) |
+| Windows Live Messenger via Escargot: Messenger / Passport names to Escargot through the secure web proxy, for classic MSNP clients (`docs/research-escargot.md`) | 🟡 |
+| Built-in Windows Live (6.5.3, 6.1.4) on Escargot, through PocketStylus's own Windows Live Mobile gateway | 🟡 sign-in works; contacts and chat in progress |
+| Built-in Pocket MSN (5.0) on Escargot | ❌ |
 
 ---
 
@@ -131,6 +137,7 @@ Each release needs just one image: the board tells Windows Mobile its screen siz
    - `Windows Mobile 6.5.3 Professional/Emulation Images`
    - `Windows Mobile 6.1.4 Professional/Emulation Images`
    - `Windows Mobile 5.0 (Pocket PC)/Emulation Images`
+   - for the keypad editions: `Windows Mobile 6.5.3 Standard`, `Windows Mobile 6.1.4 Standard` and `Windows Mobile 5.0 (Smartphone)`, each in its `Emulation Images` folder
 
    (They originally shipped with the *Windows Mobile 6.5.3 Developer Tool Kit*, the *Windows Mobile 6 SDK* image packages and the *Windows Mobile 5.0 SDK*.)
 3. Open PocketStylus. In the OS list:
@@ -163,6 +170,8 @@ Each section below expands to show how the feature works.
 - New device state is added as optional trailers after the flash section, so sessions saved by older builds keep loading.
 - **Power menu → Savepoint** writes a resume point without shutting down. **Reset** performs a real warm reboot: the host resets the CPU into the ROM's boot code with RAM intact, exactly as the OAL's `IOCTL_HAL_REBOOT` does. **Cold boot** discards the current release's saves only.
 - A hung guest (detected when the battery driver's polling stops while the CPU is busy) is never saved over a good session.
+- **Changing Memory or Screen resolution keeps internal storage.** Each combination has its own saves; the first time you pick a new one, it starts from the session you were just using and Windows Mobile boots again at the new size, with your files, programs and settings. WM 5 keeps storage across screen changes only (its storage doesn't survive a cold boot), so a WM 5 memory change, like a Standard screen size that uses a different image, asks first and says it starts fresh. Switching back returns to the earlier saves.
+- **Memory:** Windows Mobile finds at most 256 MB on this board (it probes 192 MB above the fixed 64 MB), so the choices are 96–256 MB in 32 MB steps, per release: 96 MB isn't offered where it fails (WM 5's helper crashes, WM 6.5.3 Pro runs out of program memory). See `docs/research-de-hardware.md`.
 </details>
 
 <details>
@@ -229,6 +238,8 @@ Each section below expands to show how the feature works.
 
 - **Internet:** an emulated NE2000 PCMCIA card on PocketStylus's own user-mode NAT (guest 10.0.2.15, gateway .2, DNS .3). The helper provisions Connection Manager so Internet Explorer and apps just work.
 - **Storage card:** a DE folder-share device mounts a phone folder (or several chosen folders, overlaid into one card root) as `\Storage Card`. Folders are managed from the Storage Card page in Windows Mobile's settings, using a folder browser for the phone's storage.
+- **Modern HTTPS (Secure Web Proxy):** IE Mobile and other programs only speak SSL 3.0 / TLS 1.0, which today's sites refuse. With the setting on, PocketStylus installs its own certificate authority in Windows Mobile (made on the phone, never leaves it) and terminates the guest's old TLS, then connects onwards with modern TLS (BoringSSL) and checks the real site's certificate. A bad certificate shows a Windows Mobile "Security Warning" with Yes/No: Yes allows that site's exact certificate for the session. See `docs/research-tls-proxy.md`.
+- **Windows Live Messenger via Escargot:** Microsoft's Messenger and Passport names lead to [Escargot](https://escargot.chat) instead, for classic MSN Messenger clients. The built-in Windows Live client (6.5.3, 6.1.4) speaks Microsoft's mobile gateway protocol, so PocketStylus answers it with its own gateway, which signs in to Escargot over MSNP (sign-in works; contacts and chat are next). See `docs/research-escargot.md`.
 - **GPS:** the phone's location as an NMEA receiver on COM1 (GGA, GSA, GSV and RMC once a second), where Windows Mobile's GPS Intermediate Driver reads it. Location is used only while a program has the port open.
 </details>
 
@@ -286,6 +297,8 @@ Each section below expands to show how the feature works.
 - **Send via Bluetooth** in Windows Mobile opens Android's share sheet with the file. Files the phone receives over Bluetooth appear on the storage card.
 - **Clipboard sync** works both ways.
 - **Use Android IME over Device IME:** tapping a Windows Mobile text field opens the phone's keyboard, and what you type is sent as Windows Mobile key events.
+  - The keyboard sees what you've typed, like in an Android text box, so autocorrect, tapping a suggestion, backspacing into a finished word and sliding the cursor on the space bar all edit Windows Mobile's text correctly. Enter is a real Enter key.
+  - Tapping Windows Mobile's screen (which may move its caret) starts the keyboard's view afresh.
 - **Hardware buttons:** the skin's Start, App Launch 1 and 2, and OK keys are Windows Mobile's Buttons 1–4, each assignable in Device Settings.
 </details>
 
@@ -296,7 +309,7 @@ Device Settings → **Launcher** (also a tab in Windows Mobile's own PocketStylu
 - **Use as Phone Launcher** makes PocketStylus Android's home app (Android's default-home choice). Home then brings the running Windows Mobile to the front and shows **Today** or the **Start menu** (*Home Goes To*). A small no-UI home activity (`HomeActivity`) forwards Home to the one emulator, so a session is never started twice and survives Recents, other apps and theme changes.
 - **Show Android Apps Folder** adds Start → Programs → **Android Apps** with every Android launcher app, named and with its own icon; tapping one opens the Android app. It follows installs, removals and updates; only changed icons are redrawn. **Hidden Apps** leaves apps out.
 - **Pinned shortcuts:** while PocketStylus is the launcher, an app's "Add to home screen" asks, then adds the shortcut as a program in Start → Programs (*Pinned Shortcuts* lists and removes them).
-- **Android App Dock:** a row of 4–8 Android apps at the top or bottom of the Windows Mobile screen. Tap to open, hold (or tap an empty slot) to pick its apps. The dock takes its band from the display's own area and the display shrinks into the rest (same shape, centred), so it never lies over Windows Mobile's touch area and the guest's resolution and saved sessions don't change.
+- **Android App Dock** (its own **Dock** page): a row of 4–8 Android apps. Tap to open, hold (or tap an empty slot) to pick its apps. *Auto* puts it in the skin's free space (with the slim 4-key row, the empty area below it); with no free space, or set to *Top* / *Bottom*, it takes a band of the display's area and the display shrinks into the rest (same shape, centred). Either way it never lies over Windows Mobile's touch area, and the guest's resolution and saved sessions don't change. Icon size, padding, background opacity and blur (a blurred copy of the wallpaper made once, not per frame) are adjustable.
 
 How it works: each Android app is a tiny native ARM program on the storage card (`guest/AppLink`, `tools/make-applink.py`) with the app's icon written into its icon resource; the helper keeps the shortcuts in step (`guest/Helper/AndroidApps.cs`), and the program writes `android launch <id>` to the helper's mailbox (`AndroidApps.kt`).
 </details>
@@ -346,7 +359,7 @@ How it works: each Android app is a tiny native ARM program on the storage card 
 
 ## Settings reference
 
-Device settings are per OS. They're in Settings → **Device Settings** on Android and in Windows Mobile under Settings → System → **PocketStylus**; most apply live.
+Device settings are per OS, except those about the phone itself, which every OS shares: the slide-out keyboard and hinge, Use as Phone Launcher, Home Goes To, Hidden Apps and Pinned Shortcuts, and the Phone, Contacts and Infrared pages. They're in Settings → **Device Settings** on Android and in Windows Mobile under Settings → System → **PocketStylus** (its **More** button opens the phone's own settings); most apply live.
 
 | Page | Settings |
 |---|---|
@@ -354,8 +367,13 @@ Device settings are per OS. They're in Settings → **Device Settings** on Andro
 | **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Opacity · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
 | **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
 | **Power** | Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
-| **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts · Android App Dock (off / top / bottom) · Dock Size (4–8) · Dock Apps |
-| **Device** | Screen resolution (phone shape / 480×854 / 480×800 / 480×640 / 480×480; restarts WM) · Memory · Screen DPI · Storage Card (mode, root, folders) |
+| **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts |
+| **Network** | Secure Web Proxy (modern HTTPS) · Windows Live Messenger via Escargot |
+| **Dock** | Show Android App Dock · Position (auto / top / bottom) · Number of Apps (4–8) · Dock Apps · Icon Size · Padding · Background Opacity · Background Blur |
+| **Phone** | Phone Calls in Windows Mobile · Use Phone's Ringer · Ring Windows Mobile in the Background · Text Messages · Defer Incoming SMS · Phone Number, Call Screen (Android) |
+| **Contacts** | Sync Contacts · Sync Calendar · Prompt before Accepting Changes from Device · Sync Now |
+| **Infrared** | When Windows Mobile Uses Infrared (ask / Bluetooth LE / InfraWAN / off) · Stay Reachable · InfraWAN Account, Test (Android) |
+| **Device** | Screen resolution (phone shape / 480×854 / 480×800 / 480×640 / 480×480, or the Standard sizes; restarts WM, keeps storage) · Memory (96–256 MB) · Screen DPI · Storage Card (mode, root, folders) |
 
 Other pages in the Android Settings screen:
 - **System:** choose the OS and image, or cold boot this OS.
@@ -375,6 +393,8 @@ Other pages in the Android Settings screen:
 ## Building from source
 
 Requirements: Windows with Android Studio (its JDK and SDK, NDK 29), and an ARM64 Android phone over adb for testing.
+
+BoringSSL (for the secure web proxy) is built once into `third_party/boringssl` with `sh tools/build-boringssl.sh` (Git Bash; the libraries are not in the repository). The guest helper's MAPIdotnet source is in `third_party/mapidotnet`.
 
 ```powershell
 # Guest programs (C# helper and tools; uses the .NET 3.5 compiler and the CF 3.5 reference assemblies)
@@ -413,7 +433,7 @@ Useful options:
 ```
 core/src/arm/     CPU, MMU, JIT, disassembler
 core/src/board/   SMDK2410 board: S3C2410, flash, PCMCIA/NE2000, DE devices, camera, snapshot
-core/src/net/     user-mode NAT
+core/src/net/     user-mode NAT, secure web proxy (TLS), Escargot / Windows Live gateway
 core/cli/         headless runner
 app/              Android app (Kotlin UI + JNI: GL presenter, AAudio, sensors, bridges)
 guest/Helper/     the in-guest helper (C#, .NET CF 3.5)
@@ -427,4 +447,4 @@ docs/             research notes: hardware, status bar, themes, calls, camera, G
 
 ## Legal
 
-Windows Mobile, Windows CE and the Device Emulator images are Microsoft's. PocketStylus includes no ROM images: you supply your own. The text-message bridge on WM 6.5.3 uses the MAPIdotnet (`MAPIlib.dll`) and OpenNETCF Smart Device Framework (`OpenNETCF.dll`) libraries, under their own licences. The APK bundles Microsoft's freely redistributable .NET Compact Framework 3.5 CAB (`NETCFv35.wm.armv4i.cab`), which is installed into releases that lack it, under Microsoft's redistribution terms. PocketStylus was written without using Device Emulator source code.
+Windows Mobile, Windows CE and the Device Emulator images are Microsoft's. PocketStylus includes no ROM images: you supply your own. The text-message bridge on WM 6.5.3 uses the MAPIdotnet (`MAPIlib.dll`, source in `third_party/mapidotnet`, shared by its author to use freely) and OpenNETCF Smart Device Framework (`OpenNETCF.dll`) libraries, under their own terms. The secure web proxy uses BoringSSL (`third_party/boringssl/LICENSE`). The APK bundles Microsoft's freely redistributable .NET Compact Framework 3.5 CAB (`NETCFv35.wm.armv4i.cab`), which is installed into releases that lack it, under Microsoft's redistribution terms. PocketStylus was written without using Device Emulator source code.

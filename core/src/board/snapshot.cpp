@@ -152,6 +152,7 @@ namespace {
 
 const uint32_t kMagic = 0x53444D57;  // "WMDS"
 const uint32_t kVersion = 1;
+const uint32_t kAdoptMinMB = 96;  // 64 MB bank + the 32 MB storage volume (loadState)
 
 }  // namespace
 
@@ -269,7 +270,7 @@ bool Machine::saveState(const std::string &path, std::string &err) {
     return true;
 }
 
-bool Machine::loadState(const std::string &path, std::string &err) {
+bool Machine::loadState(const std::string &path, std::string &err, Adopt adopt) {
     FILE *f = fopen(path.c_str(), "rb");
     if (!f) { err = "no snapshot"; return false; }
     std::vector<uint8_t> data;
@@ -288,8 +289,17 @@ bool Machine::loadState(const std::string &path, std::string &err) {
     uint64_t savedVirt = 0;
     s.io(savedVirt);
     if (magic != kMagic || version != kVersion) { err = "snapshot format differs"; return false; }
-    if (size != imageSize || crc != imageCrc || mem != cfg.memMB || w != cfg.screenW || h != cfg.screenH) {
+    bool sameConfig = mem == cfg.memMB && w == cfg.screenW && h == cfg.screenH;
+    if (size != imageSize || crc != imageCrc || (!sameConfig && adopt == Adopt::No)) {
         err = "snapshot is for a different image or configuration";
+        return false;
+    }
+    // Adopting another memory size: every DE image keeps its storage volume (RAMFMD) in the first
+    // 32 MB of the RAM extension (OEMGetExtensionDRAM reserves PA 0x34000000-0x35FFFFFF), so it carries
+    // over to any machine with at least 96 MB; the rest of RAM is rebuilt by the cold boot. A warm
+    // boot keeps the kernel's memory layout, so it needs the same size.
+    if (!sameConfig && mem != cfg.memMB && (adopt != Adopt::Cold || mem < 64 || cfg.memMB < kAdoptMinMB)) {
+        err = "snapshot memory size cannot be adopted";
         return false;
     }
     if (cfg.deterministic) {
@@ -298,13 +308,15 @@ bool Machine::loadState(const std::string &path, std::string &err) {
     }
     serializeDevices(s);
     s.tag("RAM0");
-    size_t pages = ram.size() / 4096;
-    std::vector<uint8_t> present(pages);
+    size_t pages = (size_t)mem << 8, ours = ram.size() / 4096;  // adopting: the sizes may differ
+    std::vector<uint8_t> present(pages), skipped(4096);
     s.bytes(present.data(), pages);
     for (size_t i = 0; i < pages && s.ok; i++) {
-        if (present[i]) s.bytes(&ram[i * 4096], 4096);
+        if (i >= ours) { if (present[i]) s.bytes(skipped.data(), 4096); }  // beyond a smaller machine's RAM
+        else if (present[i]) s.bytes(&ram[i * 4096], 4096);
         else memset(&ram[i * 4096], 0, 4096);
     }
+    if (pages < ours) memset(&ram[pages * 4096], 0, (ours - pages) * 4096);
     s.tag("NOR0");
     for (;;) {
         uint32_t page = 0xFFFFFFFFu;
@@ -322,6 +334,16 @@ bool Machine::loadState(const std::string &path, std::string &err) {
     }
     cpu.flushTlb();
     uart2.updateTx();  // the IR port's level TX interrupt (states saved before it existed)
+    if (!sameConfig) {
+        // Another memory size or screen: Windows Mobile boots again with RAM and flash kept and reads
+        // the screen from the boot arguments. Cold (WM 6.x): the OAL probes RAM again and the storage
+        // volume, registry and programs survive. WM 5 clears its storage volume on a cold boot, so
+        // it restarts warm, which keeps the kernel's old memory layout (docs/research-de-hardware.md 2.1).
+        LOGI("snapshot adopted: %s (saved at %u MB %dx%d, now %u MB %dx%d, %s)", path.c_str(), mem, w, h, cfg.memMB,
+             cfg.screenW, cfg.screenH, adopt == Adopt::Cold ? "cold" : "warm");
+        softReset(adopt == Adopt::Warm);
+        return true;
+    }
     LOGI("snapshot restored: %s", path.c_str());
     return true;
 }

@@ -45,7 +45,7 @@ class BluetoothBridge(
     fun start() {
         sendDir.mkdirs()
         cleanSendDir(maxAgeMs = DAY_MS)
-        ctx.contentResolver.registerContentObserver(DOWNLOADS, true, observer)
+        DOWNLOADS?.let { ctx.contentResolver.registerContentObserver(it, true, observer) }
         scan()
     }
 
@@ -101,7 +101,7 @@ class BluetoothBridge(
 
     /** Looks for newly received files (coalesced; runs on a worker thread). */
     fun scan() {
-        if (!settings.bluetoothReceive || !StorageBridge.hasAllFilesAccess()) return
+        if (DOWNLOADS == null || !settings.bluetoothReceive || !StorageBridge.hasAllFilesAccess()) return
         if (!queued.compareAndSet(false, true)) return
         worker.execute {
             queued.set(false)
@@ -110,6 +110,7 @@ class BluetoothBridge(
     }
 
     private fun scanNow() {
+        val DOWNLOADS = DOWNLOADS ?: return
         val cr = ctx.contentResolver
         val baseline = settings.bluetoothBaseline
         if (baseline < 0) {
@@ -182,7 +183,9 @@ class BluetoothBridge(
 
     companion object {
         const val TAG = "WMDroidBluetooth"
-        private val DOWNLOADS: Uri = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        // MediaStore.Downloads (and OWNER_PACKAGE_NAME) are API 29: receiving is off on Android 8/9.
+        private val DOWNLOADS: Uri? =
+            if (android.os.Build.VERSION.SDK_INT >= 29) MediaStore.Downloads.EXTERNAL_CONTENT_URI else null
         private const val HOUR_MS = 3_600_000L
         private const val DAY_MS = 24 * HOUR_MS
         private const val KEEP_IDS = 500

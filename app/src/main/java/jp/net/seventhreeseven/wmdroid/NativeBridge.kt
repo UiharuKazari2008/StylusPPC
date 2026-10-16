@@ -51,6 +51,12 @@ object NativeBridge {
     /** Snapshots; only while paused. After a failed loadState the handle must be destroyed. */
     external fun saveState(handle: Long, path: String): Boolean
     external fun loadState(handle: Long, path: String): Boolean
+    /**
+     * A snapshot of the same image saved with another screen or memory size: Windows Mobile boots again
+     * at this session's size with its internal storage kept (GuestStates). [cold]: WM 6.x, the memory
+     * may differ; else a warm restart (WM 5), same memory only. False: destroy the handle.
+     */
+    external fun adoptState(handle: Long, path: String, cold: Boolean): Boolean
     /** True once the guest has finished booting (sustained idle at the home screen). */
     external fun bootComplete(handle: Long): Boolean
     /** Folders shown to the guest as \Storage Card; empty arrays turn sharing off. */
@@ -86,6 +92,20 @@ object NativeBridge {
     external fun modemActive(handle: Long): Boolean
     /** Announce the registration again (the guest's RIL then re-reads the operator name). */
     external fun modemRefresh(handle: Long)
+
+    // ---- Secure web proxy (core/src/net/tlsproxy.h, SecureProxy.kt) ----
+    /** The private root CA kept in [dir] (made on first use: slow, call off the UI thread), as DER; null on failure. */
+    external fun tlsCa(dir: String): ByteArray?
+    /** HTTPS from the guest through the proxy with the CA in [dir], or straight out when [dir] is null. */
+    external fun setTlsProxy(handle: Long, dir: String?)
+    /** Messenger / Passport names answer with Escargot's servers (core/src/net/revival.h, docs/research-escargot.md). */
+    external fun setEscargot(handle: Long, on: Boolean)
+    /** Certificate warnings waiting for the user, each "<id> <seconds> <host>\n<message>"; polling also tells the proxy someone answers. */
+    external fun tlsPrompts(): Array<String>
+    /** The user's answer to warning [id]: [allow] continues to that site with that certificate for this session. */
+    external fun tlsAnswer(id: Int, allow: Boolean)
+    /** Forgets the "continue anyway" choices (a new session). */
+    external fun tlsForget()
 
     // ---- Camera bridge (camera_jni.cpp, CameraBridge.kt) ----
     /** True while Windows Mobile has its camera open, so the phone's camera runs only then. */

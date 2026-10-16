@@ -45,4 +45,6 @@ icon-candidates/
 
 ### Third-party SDKs and sources used only to build guest libraries (not redistributed)
 third_party/wm6sdk/
-third_party/mapidotnet/
+
+### Prebuilt BoringSSL libraries (rebuild with tools/build-boringssl.sh; headers and licence are kept)
+third_party/boringssl/lib/

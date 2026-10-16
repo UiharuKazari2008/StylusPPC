@@ -158,6 +158,13 @@ object GuestSettings {
         hwButton(2, "button2", "Button 2 (App Launch 1)"),
         hwButton(3, "button3", "Button 3 (App Launch 2)"),
         hwButton(4, "button4", "Button 4 (OK key)"),
+        // ---- Network ----
+        // HTTPS through the app's secure web proxy (SecureProxy): applies at once, with the root
+        // certificate added to or removed from WM's root store by the helper (TlsCa.cs).
+        bool("Network", "secureproxy", "Secure Web Proxy (modern HTTPS)", { it.secureProxy }, { s, v -> s.secureProxy = v }),
+        // Messenger / Passport names to Escargot's MSN revival servers (NativeBridge.setEscargot;
+        // docs/research-escargot.md: classic MSNP clients only, not the built-in mobile clients)
+        bool("Network", "escargot", "Windows Live Messenger via Escargot", { it.escargot }, { s, v -> s.escargot = v }),
         // ---- Power ----
         bool("Power", "displayoff", "Lock Android on Screen Off", { it.mirrorDisplayOff }, { s, v -> s.mirrorDisplayOff = v }),
         bool("Power", "lockoff", "Lock Device when Android Screen's Off", { it.lockOnScreenOff }, { s, v -> s.lockOnScreenOff = v }),
@@ -177,16 +184,49 @@ object GuestSettings {
         bool("Launcher", "androidfolder", "Show Android Apps Folder", { it.androidFolder }, { s, v -> s.androidFolder = v }),
         action("Launcher", "hiddenapps", "Hidden Apps…", AndroidApps.CMD_HIDDEN),
         action("Launcher", "pinnedapps", "Pinned Shortcuts…", AndroidApps.CMD_PINS),
-        choice("Launcher", "dockpos", "Android App Dock", listOf(Settings.DOCK_OFF to "Off", Settings.DOCK_TOP to "Top of Screen",
-            Settings.DOCK_BOTTOM to "Bottom of Screen"), { it.dockPos }, { s, v -> s.dockPos = v }),
-        slider("Launcher", "docksize", "Dock Size (apps)", 4, 8, { it.dockSize }, { s, v -> s.dockSize = v }),
-        action("Launcher", "dockapps", "Dock Apps…", AndroidApps.CMD_DOCK),
+        // ---- Dock: Android apps on the skin (DeviceSkin dock, LauncherBridge) ----
+        bool("Dock", "dockon", "Show Android App Dock", { it.dockOn }, { s, v -> s.dockOn = v }),
+        choice("Dock", "dockpos", "Position", listOf(Settings.DOCK_AUTO to "Auto (free space on the skin)",
+            Settings.DOCK_TOP to "Top of Screen", Settings.DOCK_BOTTOM to "Bottom of Screen"),
+            { it.dockPlace }, { s, v -> s.dockPlace = v }),
+        slider("Dock", "docksize", "Number of Apps", 4, 8, { it.dockSize }, { s, v -> s.dockSize = v }),
+        action("Dock", "dockapps", "Dock Apps…", AndroidApps.CMD_DOCK),
+        slider("Dock", "dockicon", "Icon Size", 24, 96, { it.dockIcon }, { s, v -> s.dockIcon = v }),
+        slider("Dock", "dockpad", "Padding", 0, 32, { it.dockPad }, { s, v -> s.dockPad = v }),
+        slider("Dock", "dockopacity", "Background Opacity", 0, 100, { it.dockOpacity }, { s, v -> s.dockOpacity = v }),
+        slider("Dock", "dockblur", "Background Blur", 0, 25, { it.dockBlur }, { s, v -> s.dockBlur = v }),
+        // ---- Phone: calls and texts (CallBridge, CallOverlay, SmsBridge; shared by every OS) ----
+        // Turning one on from Windows Mobile has the app ask for its permissions (EmulatorActivity).
+        bool("Phone", "calls", "Phone Calls in Windows Mobile", { CallBridge.enabled(it.context) },
+            { s, v -> CallBridge.setEnabled(s.context, v) }),
+        bool("Phone", "wmringer", "Use Phone's Ringer", { CallBridge.wmRinger(it.context) }, { s, v -> CallBridge.setWmRinger(s.context, v) }),
+        // (the stored choice: ringing in the background also needs "Display over other apps")
+        bool("Phone", "callbg", "Ring Windows Mobile in the Background", { Settings.global(it.context).getBoolean("calls.background", true) },
+            { s, v -> CallOverlay.setEnabled(s.context, v) }),
+        bool("Phone", "sms", "Text Messages in Windows Mobile", { SmsBridge.enabled(it.context) }, { s, v -> SmsBridge.setEnabled(s.context, v) }),
+        bool("Phone", "smsdefer", "Defer Incoming SMS Messages", { SmsBridge.defer(it.context) }, { s, v -> SmsBridge.setDefer(s.context, v) }),
+        action("Phone", "phonemore", "Phone Number, Call Screen…", CMD_CALLS),
+        // ---- Contacts & calendar sync (PimSync; shared by every OS) ----
+        bool("Contacts", "pimcontacts", "Sync Contacts", { Settings.global(it.context).getBoolean("pim.contacts", false) },
+            { s, v -> PimSync.setOn(s.context, PimSync.KIND_CONTACT, v) }),
+        bool("Contacts", "pimcalendar", "Sync Calendar", { Settings.global(it.context).getBoolean("pim.calendar", false) },
+            { s, v -> PimSync.setOn(s.context, PimSync.KIND_APPOINTMENT, v) }),
+        bool("Contacts", "pimprompt", "Prompt before Accepting Changes from Device", { PimSync.prompt(it.context) },
+            { s, v -> PimSync.setPrompt(s.context, v) }),
+        action("Contacts", "pimsync", "Sync Now", CMD_PIM_SYNC),
+        // ---- Infrared (InfraredSettings, its own shared file) ----
+        choice("Infrared", "irmode", "When Windows Mobile Uses Infrared", listOf("ask" to "Ask each time",
+            "ble" to "Nearby phones (Bluetooth LE)", "wan" to "InfraWAN (Internet)", "off" to "Off"),
+            { InfraredSettings(it.context).mode }, { s, v -> InfraredSettings(s.context).mode = v }),
+        bool("Infrared", "irlisten", "Stay Reachable while PocketStylus is Open", { InfraredSettings(it.context).listen },
+            { s, v -> InfraredSettings(s.context).listen = v }),
+        action("Infrared", "irmore", "InfraWAN Account, Test…", CMD_INFRARED),
         // ---- Device (applies on restart) ----
         choice("Device", "res", "Screen resolution", listOf(Settings.SCREEN_AUTO to "Phone shape (auto)",
             "480x854" to "480×854 (FWVGA)", "480x800" to "480×800 (WVGA)", "480x640" to "480×640 (VGA)",
             "480x480" to "480×480 (square)"), { it.screenRes }, { s, v -> s.screenRes = v }, restart = true),
-        choice("Device", "ram", "Memory", listOf("0" to "Default", "64" to "64 MB", "128" to "128 MB", "192" to "192 MB", "256" to "256 MB"),
-            { it.memMB.toString() }, { s, v -> s.memMB = v.toInt() }, restart = true),
+        // Sizes per release (entriesFor, OsProfile.memSizes); 256 MB is the board's ceiling.
+        choice("Device", "ram", "Memory", memOptions(null), { it.memMB.toString() }, { s, v -> s.memMB = v.toInt() }, restart = true),
         // Windows Mobile's logical DPI; the helper writes it and restarts WM once (guest/Helper/Dpi.cs).
         choice("Device", "dpi", "Screen DPI", listOf("0" to "Image default", "192" to "High DPI (192, large)",
             // Below 192 WM 6.5's home screen breaks; 6.1.4 and 5.0 work but lose some title-bar icons.
@@ -196,10 +236,66 @@ object GuestSettings {
         action("Device", "editfolders", "Storage Card…", "local:storage"),
     )
 
+    /**
+     * The catalogue for [settings]' release. Windows Mobile Standard (keypad, OsProfile.touch false)
+     * leaves out what needs a touch screen or a Professional image (rotation, the foldable slider and
+     * hinge, the Pro hardware buttons, DPI), offers its own screen sizes (OsProfile.screens) and the
+     * keypad skin as its Hardware Keys.
+     */
+    fun entriesFor(settings: Settings): List<Entry> {
+        val profile = settings.profile
+        if (profile == null) return entries
+        val ram = memOptions(profile)
+        val ramEntry: (Entry) -> Entry = { e ->
+            choice(e.page, e.key, e.label, ram, { s -> s.memMB.toString().takeIf { v -> ram.any { it.first == v } } ?: "0" },
+                { s, v -> s.memMB = v.toInt() }, restart = true)
+        }
+        if (profile.touch) return entries.map { if (it.key == "ram") ramEntry(it) else it }
+        val res = listOf(Settings.SCREEN_AUTO to "Phone shape (auto)") + profile.screens.map { it.id to it.label }
+        return entries.filter { it.key !in TOUCH_ONLY }.map { e ->
+            when (e.key) {
+                "res" -> choice(e.page, e.key, e.label, res,
+                    { s -> s.screenRes.takeIf { r -> res.any { it.first == r } } ?: Settings.SCREEN_AUTO },
+                    { s, v -> s.screenRes = v }, restart = true)
+                "ram" -> ramEntry(e)
+                "hwkeys" -> choice(e.page, e.key, e.label,
+                    listOf("full" to "Keypad (soft keys, D-pad, number pad)", "none" to "None (the phone's own keypad)"),
+                    { if (it.keysOn) "full" else "none" }, { s, v -> s.keysOn = v != "none" })
+                else -> e
+            }
+        }
+    }
+
+    /** Memory choices: the release's default and the sizes it runs with (OsProfile.memSizes). */
+    private fun memOptions(profile: OsProfile?): List<Pair<String, String>> =
+        listOf("0" to (profile?.let { "Default (${it.defaultMemMB} MB)" } ?: "Default")) +
+            (profile?.memSizes ?: OsProfiles.MEM_SIZES).map { "$it" to "$it MB" }
+
+    /** Settings a Standard (keypad) release doesn't have (entriesFor). */
+    private val TOUCH_ONLY = setOf("rotate", "rotdelay", "rotsens", "fold", "foldkb", "hinge", "hingestyle", "hingethick",
+        "hingeloc", "hingealpha", "button1", "button2", "button3", "button4", "dpi")
+
+    // Buttons whose screens are Android's (role requests, permissions, text entry, a connection
+    // test): the guest sends the command, EmulatorActivity / DeviceSettingsActivity open the screen.
+    const val CMD_CALLS = "open calls"
+    const val CMD_PIM = "open pim"
+    const val CMD_INFRARED = "open infrared"
+    const val CMD_PIM_SYNC = "open pimsync"
+    /** The commands of such buttons (GuestBridge routes them to onGuestLauncher). */
+    val ANDROID_COMMANDS = setOf(CMD_CALLS, CMD_PIM, CMD_INFRARED, CMD_PIM_SYNC)
+
+    /** The Android screen an action's [command] opens, or null if it opens none. */
+    fun screenFor(ctx: android.content.Context, command: String): android.content.Intent? = when (command) {
+        CMD_CALLS -> android.content.Intent(ctx, CallSettingsActivity::class.java)
+        CMD_PIM -> android.content.Intent(ctx, PimSettingsActivity::class.java)
+        CMD_INFRARED -> android.content.Intent(ctx, InfraredSettingsActivity::class.java)
+        else -> AndroidAppsActivity.intentFor(ctx, command)
+    }
+
     /** Writes the catalogue with current values for the guest. */
     fun write(file: File, settings: Settings) {
         val text = buildString {
-            for (e in entries) {
+            for (e in entriesFor(settings)) {
                 val value = e.get(settings)
                 val extra = when (e.kind) {
                     Kind.CHOICE -> e.options.joinToString(";") { "${it.first}=${it.second}" }
@@ -221,7 +317,7 @@ object GuestSettings {
 
     /** Applies "set key=value" from the guest: null if unknown or unchanged, else whether it needs a restart. */
     fun apply(settings: Settings, key: String, value: String): Boolean? {
-        val e = entries.firstOrNull { it.key == key && it.kind != Kind.ACTION } ?: return null
+        val e = entriesFor(settings).firstOrNull { it.key == key && it.kind != Kind.ACTION } ?: return null
         if (e.get(settings) == value) return null
         e.set(settings, value)
         return e.restart

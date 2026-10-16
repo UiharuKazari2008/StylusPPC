@@ -134,18 +134,18 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         /** EmulatorActivity opened from the full-screen call notification: show over the lock screen. */
         const val EXTRA_CALL = "jp.net.seventhreeseven.wmdroid.INCOMING_CALL"
 
-        fun enabled(ctx: Context) = Settings.prefs(ctx).getBoolean(PREF, false)
+        fun enabled(ctx: Context) = Settings.global(ctx).getBoolean(PREF, false)
         fun setEnabled(ctx: Context, on: Boolean) =
-            Settings.prefs(ctx).edit().putBoolean(PREF, on).apply()
+            Settings.global(ctx).edit().putBoolean(PREF, on).apply()
 
         /**
          * "Use Phone's Ringer": on, Windows Mobile's Phone rings with its own ringtone (on the ringer
          * volume) and this phone's ringtone is silenced for that call; off, this phone rings as usual
          * and Windows Mobile stays quiet while it rings.
          */
-        fun wmRinger(ctx: Context) = Settings.prefs(ctx).getBoolean(PREF_RINGER, false)
+        fun wmRinger(ctx: Context) = Settings.global(ctx).getBoolean(PREF_RINGER, false)
         fun setWmRinger(ctx: Context, on: Boolean) =
-            Settings.prefs(ctx).edit().putBoolean(PREF_RINGER, on).apply()
+            Settings.global(ctx).edit().putBoolean(PREF_RINGER, on).apply()
 
         /** Not per OS: the phone's ring stream muted for a call, to unmute if the app died during it. */
         private fun ringState(ctx: Context) = ctx.getSharedPreferences("wmdroid.calls", Context.MODE_PRIVATE)
@@ -153,10 +153,16 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
         /** WMDroid is the default phone app, so WM's call screen can be the only one. */
         fun holdsRole(ctx: Context): Boolean =
-            ctx.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_DIALER) == true
+            if (Build.VERSION.SDK_INT >= 29)
+                ctx.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_DIALER) == true
+            else  // Android 8/9: no roles; the default dialer app is the same thing.
+                ctx.getSystemService(TelecomManager::class.java)?.defaultDialerPackage == ctx.packageName
 
-        fun roleRequest(ctx: Context): Intent? = ctx.getSystemService(RoleManager::class.java)
-            ?.takeIf { it.isRoleAvailable(RoleManager.ROLE_DIALER) }?.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+        fun roleRequest(ctx: Context): Intent? =
+            if (Build.VERSION.SDK_INT >= 29) ctx.getSystemService(RoleManager::class.java)
+                ?.takeIf { it.isRoleAvailable(RoleManager.ROLE_DIALER) }?.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+            else Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER)
+                .putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, ctx.packageName)
 
         /**
          * Permissions placing, answering and ending calls need (the dialer role grants them too);
@@ -552,6 +558,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     @Suppress("DEPRECATION")
     @SuppressLint("MissingPermission")
     private fun endCallWithoutRole() {
+        // API 28; Android 8.x has no public way to end a call it does not own (the call stays up).
+        if (Build.VERSION.SDK_INT < 28) { Log.w(TAG, "endCall needs Android 9"); return }
         runCatching { telecom.endCall() }.onFailure { Log.w(TAG, "endCall failed", it) }
     }
 
@@ -779,13 +787,15 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     private fun isEmergency(number: String): Boolean {
         val n = number.filter { it.isDigit() || it == '+' }
-        val known = runCatching { telephony.isEmergencyNumber(n) }.getOrNull()
+        @Suppress("DEPRECATION")
+        val known = if (Build.VERSION.SDK_INT >= 29) runCatching { telephony.isEmergencyNumber(n) }.getOrNull()
+            else runCatching { android.telephony.PhoneNumberUtils.isEmergencyNumber(n) }.getOrNull()
         return known ?: (n in setOf("911", "112", "999", "000", "110", "119", "118", "08", "100", "101", "102", "103"))
     }
 
     private fun openSystemDialer(number: String) {
         val intent = Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", number, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        telecom.systemDialerPackage?.let { intent.setPackage(it) }
+        DialActivity.systemDialerPackage(ctx)?.let { intent.setPackage(it) }
         runCatching { ctx.startActivity(intent) }.onFailure { Log.w(TAG, "no dialer", it) }
     }
 

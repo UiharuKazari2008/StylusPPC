@@ -62,9 +62,9 @@ class ThemeGenerator(private val ctx: Context) {
             n2 = systemTones("neutral2")!!
         } else {
             // Before Material You: tones of the wallpaper's main colour (n = 0 white .. 1000 black).
-            val seed = runCatching {
+            val seed = (if (Build.VERSION.SDK_INT >= 27) runCatching {  // WallpaperColors: API 27
                 WallpaperManager.getInstance(ctx).getWallpaperColors(WallpaperManager.FLAG_SYSTEM)?.primaryColor?.toArgb()
-            }.getOrNull() ?: 0xFF3F51B5.toInt()
+            }.getOrNull() else null) ?: 0xFF3F51B5.toInt()
             val hsv = FloatArray(3).also { Color.colorToHSV(seed, it) }
             fun tones(hue: Float, sat: Float): (Int) -> Int = { n ->
                 val l = 1f - n / 1000f

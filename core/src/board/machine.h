@@ -45,7 +45,7 @@ public:
     ~Machine();
     bool load(std::string &err);
     void hardReset();
-    void softReset();
+    void softReset(bool warm = true);  // warm false: the boot arguments say cold boot (RAM still kept)
 
     // Runs the guest for about `ns` nanoseconds of host time. Returns false if the guest stopped.
     bool runFor(uint64_t ns);
@@ -64,7 +64,12 @@ public:
     // Snapshots (quick boot / suspend). After a failed loadState the machine is inconsistent and
     // must be recreated.
     bool saveState(const std::string &path, std::string &err);
-    bool loadState(const std::string &path, std::string &err);
+    // Adopt: also a snapshot of this image saved with another screen size (Warm or Cold) or memory
+    // size (Cold, this machine at least 96 MB). Only on a freshly loaded machine: RAM and flash are
+    // restored and the guest boots again at this machine's size, its storage volume kept (WM 6.x:
+    // Cold; WM 5 clears it on a cold boot: Warm, same memory size only).
+    enum class Adopt { No, Cold, Warm };
+    bool loadState(const std::string &path, std::string &err, Adopt adopt = Adopt::No);
 
     MachineConfig cfg;
     Bus bus;
@@ -113,6 +118,10 @@ private:
     uint32_t imageSize = 0, imageCrc = 0;
     bool flashFromRam = false;   // B000FF images: flash is not a copy of the image file
     void updateBootState(uint64_t now);
+    void oneTierPolicy();  // Standard images: unsigned programs privileged (machine.cpp)
+    static constexpr int kOneTierScans = 180;  // once a second for the first 3 minutes after a (re)boot
+    int oneTierScans = kOneTierScans;
+    uint64_t oneTierNext = 0;
     bool asleep(uint64_t now, uint64_t end);  // S3C2410 sleep (CLKCON POWER_OFF) and the wake-up reset
     bool sleepNoticed = false;
     uint32_t sleepPresses = 0;

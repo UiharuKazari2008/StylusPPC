@@ -86,7 +86,9 @@ static class Patch
             // FakeRIL off: the app supplies the phone's real network state, and FakeRIL's
             // "Fake Network" events would keep overwriting it. DEVFLAGS_NOLOAD keeps the driver
             // registered but unloaded; the original flags are kept to undo it.
-            if (Helper.Get("patch.fakeril", "off") != "off" || ModemRil) return;
+            // Standard (Smartphone) keeps it: without a radio it opens a "SIM Failure" message at
+            // every start that only the keypad can close.
+            if (Helper.Get("patch.fakeril", "off") != "off" || ModemRil || Edition.Smartphone) return;
             using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"Drivers\BuiltIn\RIL", true))
             {
                 if (k == null) return;
