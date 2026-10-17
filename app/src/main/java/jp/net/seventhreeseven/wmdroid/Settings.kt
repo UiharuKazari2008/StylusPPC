@@ -460,6 +460,14 @@ class Settings(ctx: Context) {
         get() = p.getInt("dock.size", 5).coerceIn(4, 8)
         set(v) = p.edit().putInt("dock.size", v.coerceIn(4, 8)).apply()
 
+    /**
+     * With the dock on, boot a 480-wide screen that is taller than 800 at 480×800 so the dock
+     * has the strip the tall screen was using (480×852 and 480×854 become 480×800).
+     */
+    var dockResizeScreen: Boolean
+        get() = p.getBoolean("dock.resize", false)
+        set(v) = p.edit().putBoolean("dock.resize", v).apply()
+
     /** The dock's apps in order (AndroidApps.App.key); slots beyond the list are empty. */
     var dockApps: List<String>
         get() = p.getString("dock.apps", "")!!.split('\n').filter { it.isNotEmpty() }
@@ -539,7 +547,7 @@ class Settings(ctx: Context) {
          */
         val GLOBAL_KEYS = listOf("fold.mode", "fold.keyboard", "fold.hotkeys", "fold.hinge", "fold.hinge.on",
             "fold.hinge.style", "fold.hinge.thick", "fold.hinge.loc", "fold.hinge.alpha", "launcher.home", "launcher.hidden",
-            "calls.enabled", "calls.wmRinger", "calls.background", "sms.enabled", "sms.defer",
+            "calls.enabled", "calls.wmRinger", "calls.background", "calls.audio", "sms.enabled", "sms.defer",
             "pim.contacts", "pim.calendar", "pim.prompt")
         private const val GLOBAL_DONE = "global.migrated.1"
 

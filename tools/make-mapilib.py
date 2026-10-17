@@ -81,13 +81,13 @@ def abs32_relocs(b, sections):
     return sorted(set(out))
 
 
-def build_pe(entry, sections, symbols, relocs):
+def build_pe(entry, sections, symbols, relocs, dllname='MAPIlib.dll', prefixes=EXPORT_PREFIXES):
     iat_start, iat_end = symbols['iat_start'], symbols['iat_end']
     slots = sorted((a, n) for n, a in symbols.items() if n.startswith('iat_') and n not in ('iat_start', 'iat_end'))
     assert len(slots) * 4 == iat_end - iat_start, 'every .iat slot must be one iat_<dll>_<name> variable'
     if not slots:
         iat_start = iat_end = 0
-    exports = sorted(n for n in symbols if n.startswith(EXPORT_PREFIXES) and symbols[n] >= IMAGEBASE)
+    exports = sorted(n for n in symbols if n.startswith(prefixes) and symbols[n] >= IMAGEBASE)
 
     parts = []
     for n in ('.text', '.rdata', '.data'):
@@ -139,13 +139,13 @@ def build_pe(entry, sections, symbols, relocs):
     funcs_off = len(edata); edata += bytes(4 * n)
     names_off = len(edata); edata += bytes(4 * n)
     ords_off = len(edata); edata += bytes(2 * n)
-    dllname = rva + len(edata); edata += b'MAPIlib.dll\0'
+    name_rva = rva + len(edata); edata += dllname.encode() + b'\0'
     for i, e in enumerate(exports):
         struct.pack_into('<I', edata, funcs_off + 4 * i, symbols[e] - IMAGEBASE)
         struct.pack_into('<I', edata, names_off + 4 * i, rva + len(edata))
         struct.pack_into('<H', edata, ords_off + 2 * i, i)
         edata += e.encode() + b'\0'
-    struct.pack_into('<IIHHIIIIIII', edata, 0, 0, 0, 0, 0, dllname, 1, n, n, rva + funcs_off, rva + names_off, rva + ords_off)
+    struct.pack_into('<IIHHIIIIIII', edata, 0, 0, 0, 0, 0, name_rva, 1, n, n, rva + funcs_off, rva + names_off, rva + ords_off)
     parts.append(['.edata', rva, len(edata), edata])
 
     # .reloc: HIGHLOW for every absolute address, in 4K blocks

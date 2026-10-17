@@ -25,6 +25,7 @@ class Camera;  // camera.h
 class Modem;   // modem.h
 class Irda;    // irda.h
 class CodePatcher;  // codepatch.h
+class Motion;  // motion.h
 class StateIO;
 uint32_t snapshotCrc(const uint8_t *p, size_t n);
 
@@ -96,6 +97,7 @@ public:
     std::unique_ptr<Modem> modem;    // virtual GSM modem on UART0 for rilgsm images (modem.h)
     std::unique_ptr<Irda> irda;      // infrared (SIR) transceiver on UART2, tunnelled to other devices (irda.h)
     std::unique_ptr<CodePatcher> codePatch;  // host fixes to driver code in guest RAM (codepatch.h)
+    std::unique_ptr<Motion> motion;  // accelerometer for the SEN0: driver (motion.h), at Motion::BASE
     std::vector<uint8_t> ram;
     std::atomic<bool> stopRequested{false};
     uint64_t startHostNs = 0;
@@ -106,9 +108,7 @@ public:
     std::atomic<bool> bootComplete{false};
     uint64_t idleNs = 0;            // host time spent with the guest idle
     uint64_t idleWakes = 0;         // host sleeps while idle (each one a wake-up)
-    bool idleCoalescing = true;     // see runFor
-    bool lastRunIdle = false;
-    bool lastRunHalfIdle = false;   // >= 50% idle: enough to coalesce while audio streams
+    bool idleCoalescing = true;     // while halted, batch the 1 ms tick to the slice (see runFor)
     uint64_t virtNs = 0;            // deterministic clock
 
 private:

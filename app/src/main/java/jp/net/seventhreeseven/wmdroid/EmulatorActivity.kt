@@ -137,6 +137,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             startActivity(Intent(this, EmulatorActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         }
+        // A call kept the session running after we left; once it ends, the usual leave policy applies.
+        calls.onIdle = { if (!foreground && !isFinishing && !suspended && !hibernated) leave() }
         showForCall(intent)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         // The phone's keyboard (fold mode) overlays the keyboard half; nothing moves.
@@ -287,6 +289,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             if (NativeBridge.loadState(handle, snap.path)) {
                 Log.i(TAG, "restored ${snap.name}")
                 booting = !NativeBridge.bootComplete(handle)
+                alignRotationPending = true
                 break
             }
             snap.delete()
@@ -301,6 +304,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 if (NativeBridge.adoptState(handle, src.path, profile.coldBootKeepsStorage)) {
                     Log.i(TAG, "started from ${src.parentFile?.name}/${src.name}")
                     booting = true
+                    alignRotationPending = true
                 } else {
                     NativeBridge.destroy(handle)
                     handle = create()
@@ -501,8 +505,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         val dp = "${newConfig.screenWidthDp}x${newConfig.screenHeightDp}"
-        if (dp == lastScreenDp) return
+        val same = dp == lastScreenDp
         lastScreenDp = dp
+        // A 180° flip in fold mode keeps the same dp size; the skin still has to lay out again.
+        if (::skin.isInitialized && foldGuest) skin.requestLayout()
+        if (same) return
         if (::settings.isInitialized && settings.showWallpaper) loadWallpaper()
         if (::settings.isInitialized) loadKeyFrost()
         wallpaperChecked = false
@@ -516,10 +523,22 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private val layoutListener = androidx.core.util.Consumer<androidx.window.layout.WindowLayoutInfo> { onWindowLayout(it) }
     /** Windows Mobile is turned to landscape for the open-fold layout. */
     private var foldGuest = false
+    /** After a restore or wake, force the phone's current orientation once the guest is up. */
+    private var alignRotationPending = false
 
     /** Windows Mobile Standard (Smartphone, OsProfile.touch false): keypad only, no rotation or slider. */
     private val keypad get() = settings.profile?.touch == false
     private val autoRotate get() = settings.rotateGuest && !keypad
+
+    /** The guest's saved orientation is often not how the phone is held. Apply the current one, portrait included. */
+    private fun alignRotation() {
+        if (handle == 0L || keypad) return
+        if (foldGuest) {
+            guest.send("rotate 90")
+            return
+        }
+        if (autoRotate) rotation.poke() else guest.send("rotate 0")
+    }
 
     private var lastLayoutInfo: androidx.window.layout.WindowLayoutInfo? = null
 
@@ -543,8 +562,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             }
             return
         }
-        // Fixed landscape (not sensor): the backdrop wallpaper and the guest's stay the right way up.
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        // Both landscape directions. Windows Mobile stays at 90°; the window turning is what flips.
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         if (!foldGuest) {
             foldGuest = true
             boost()
@@ -650,6 +669,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                     booting = false
                     bootCompleteAt = System.nanoTime()
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    if (alignRotationPending) {
+                        alignRotationPending = false
+                        alignRotation()
+                    }
                 }
                 // The saved boot state is the patched system: wait for the helper to report it,
                 // or give up waiting on releases the helper cannot run on.
@@ -733,7 +756,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 askedNumber = true
                 add(PhoneNumber.PERMISSION)
             }
-            if (Build.VERSION.SDK_INT >= 33 && settings.runsInBackground && !askedNotify &&
+            if (Build.VERSION.SDK_INT >= 33 && (settings.runsInBackground || CallBridge.enabled(this@EmulatorActivity)) && !askedNotify &&
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 askedNotify = true
                 add(Manifest.permission.POST_NOTIFICATIONS)
@@ -744,6 +767,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         myNumber = PhoneNumber.own(this)
         lastStatus = ""
         if (autoRotate && !foldGuest) rotation.start()
+        if (alignRotationPending && handle != 0L && !booting) {
+            alignRotationPending = false
+            alignRotation()
+        }
         if (settings.keyShine) skin.startTilt()
         wallpaperChecked = false
         contentResolver.registerContentObserver(
@@ -850,7 +877,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (callShown) { callShown = false; showWhenLocked(false) }
         layoutTracker.removeWindowLayoutInfoListener(layoutListener)
         foreground = false
-        calls.leave()  // WM can't show a call from the background: the phone's dialer takes it
+        calls.leave()  // the call stays with this session; leave() keeps it running
         irda.stop()  // off screen: other devices see this one leave its IR room
         leave()
         super.onStop()
@@ -934,6 +961,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             if (SystemClock.uptimeMillis() < eventUntil) { ui.postDelayed(this, 500); return }
             eventLock?.let { runCatching { it.release() } }
             if (handle == 0L) return
+            if (calls.inCall()) {
+                eventResumed = false
+                if (!serviceOn) serviceOn = BackgroundService.start(this@EmulatorActivity)
+                if (serviceOn) NativeBridge.setCpuLimit(handle, 100)
+                return
+            }
             if (eventResumed) { eventResumed = false; suspendSession() }
             else if (serviceOn) NativeBridge.setCpuLimit(handle, backgroundCpu(getSystemService(PowerManager::class.java)?.isInteractive == false))
         }
@@ -949,15 +982,21 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     /**
-     * The app left the screen. Closing, recreating or opening our own settings suspends as
-     * before. Otherwise, after an optional lock, the background setting decides: run on at a
-     * stepped-down CPU share (for good, or for a while), suspend, or hibernate.
+     * The app left the screen. An ongoing call keeps the session running so Windows Mobile still
+     * owns it. Closing or recreating suspends as before. Otherwise, after an optional lock, the
+     * background setting decides: run on at a stepped-down CPU share (for good, or for a while),
+     * suspend, or hibernate.
      */
     private fun leave() {
         if (handle == 0L) return
-        if (isFinishing || isChangingConfigurations || ownUi) {
+        if (isFinishing || isChangingConfigurations) {
             // Closing: the lock waits in the mailbox and acts when the saved session resumes.
             if (isFinishing && settings.lockOnLeave && !userPaused && settings.restoresSession && !booting) sendLock()
+            suspendSession()
+            return
+        }
+        if (keepForCall()) return
+        if (ownUi) {
             suspendSession()
             return
         }
@@ -967,6 +1006,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (!userPaused && settings.runsInBackground && runInBackground(screenOff)) return
         val hibernate = mode == Settings.BG_HIBERNATE || (mode == Settings.BG_HIBERNATE_AFTER && !userPaused)
         afterLock { if (hibernate) hibernate() else suspendSession() }
+    }
+
+    /** A Windows Mobile call is up: keep this session at full speed so it still owns the call. */
+    private fun keepForCall(): Boolean {
+        if (!calls.inCall() || handle == 0L || isFinishing) return false
+        if (!serviceOn) serviceOn = BackgroundService.start(this)
+        if (!serviceOn) return false
+        cancelBackgroundTimer()
+        NativeBridge.setCpuLimit(handle, 100)
+        return true
     }
 
     private fun sendLock() {
@@ -1012,7 +1061,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** "After X minutes": the handler's clock stops in deep sleep, so the screen turning on checks too. */
     private val backgroundTimeout = Runnable {
         bgDeadline = 0L
-        if (!foreground) {
+        if (!foreground && !calls.inCall()) {
             if (settings.backgroundMode == Settings.BG_HIBERNATE_AFTER) hibernate() else suspendSession()
         }
     }
@@ -1036,7 +1085,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         override fun onReceive(c: Context, intent: Intent) {
             val off = intent.action == Intent.ACTION_SCREEN_OFF
             if (off && settings.lockOnScreenOff && shouldRun()) sendLock()
-            if (serviceOn && handle != 0L) NativeBridge.setCpuLimit(handle, backgroundCpu(off))
+            if (serviceOn && handle != 0L && !calls.inCall()) NativeBridge.setCpuLimit(handle, backgroundCpu(off))
             if (!off && bgDeadline != 0L && SystemClock.elapsedRealtime() >= bgDeadline) {
                 ui.removeCallbacks(backgroundTimeout)
                 backgroundTimeout.run()
@@ -1052,6 +1101,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         cancelBackgroundTimer()
         if (handle == 0L) { releaseService(); return }
         suspended = true
+        alignRotationPending = true
+        calls.handOff()
         if (settings.restoresSession && !booting && !resumeSaved) saveResume { releaseService() }
         else {
             if (saveThread?.isAlive != true) NativeBridge.pause(handle)
@@ -1066,6 +1117,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (h == 0L) { releaseService(); return }
         if (booting) { suspendSession(); return }  // a half-booted system is not worth keeping
         suspended = true
+        alignRotationPending = true
+        calls.handOff()
         val release = {
             if (handle == h && !foreground) {
                 NativeBridge.destroy(h)
@@ -1110,6 +1163,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     private fun showPowerMenu() {
         powerMenu.show(listOfNotNull(
+            if (!calls.inCall()) null
+            else PowerMenu.Item("Call audio", CallAudio.savedName(this)) { calls.pickOutput() },
             PowerMenu.Item("Savepoint", "Save the session now; PocketStylus resumes from here next time") {
                 if (handle == 0L || booting) return@Item
                 // Written as the resume point: the next start (or a hibernate) continues from here.
@@ -1366,6 +1421,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     /** The dock's look (Dock page); its blurred wallpaper is built once per wallpaper and blur. */
     private fun applyDockLook() {
+        skin.fillDisplay = settings.dockResizeScreen  // 480×800 still fills the screen's edge-to-edge place
         skin.dockIconDp = settings.dockIcon
         skin.dockPadDp = settings.dockPad
         skin.dockOpacity = settings.dockOpacity / 100f
@@ -1499,7 +1555,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         helperKicks = 0
         helperAsked = false
         lastStatus = ""
-        if (foldGuest) guest.send("rotate 90") else rotation.resend()
+        if (foldGuest) guest.send("rotate 90")
+        else if (foreground && !booting) alignRotation()
+        else alignRotationPending = true
         lastBacklight = -1
         sendBrightness()
         wallpaperSent = false

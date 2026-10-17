@@ -4,6 +4,7 @@
 #include "modem.h"
 #include "irda.h"
 #include "codepatch.h"  // host fixes to driver code in guest RAM
+#include "motion.h"  // accelerometer for the SEN0: driver
 #include "audio.h"
 #include "de_devices.h"
 #include "folder_share.h"
@@ -140,6 +141,7 @@ Machine::Machine(const MachineConfig &c)
     uart2.peer = [this](uint8_t c) { irda->fromGuest(c); };
     uart2.txLevel = true;  // the IR driver writes whole frames: level TX interrupt (s3c2410.h)
     codePatch.reset(new CodePatcher(cpu, bus));
+    motion.reset(new Motion());
     cpu.codeScanCtx = codePatch.get();
     cpu.codeScan = [](void *ctx, uint32_t pa) { static_cast<CodePatcher *>(ctx)->scanPage(pa); };
 }
@@ -248,6 +250,7 @@ bool Machine::load(std::string &err) {
     bus.mapDevice(0x5A000000, 0x100000, own(new Probe("sdi", 0x100)));
     bus.mapDevice(Camera::BASE, 0x100000, camera.get());  // WMDroid camera bridge (no snapshot state)
     bus.mapDevice(CodePatcher::BASE, 0x100000, codePatch.get());  // host code fixes (no snapshot state)
+    bus.mapDevice(Motion::BASE, 0x100000, motion.get());  // accelerometer (no snapshot state)
 
     hardReset();
     return true;
@@ -274,6 +277,7 @@ void Machine::hardReset() {
     modem->reset();
     irda->reset();
     codePatch->onGuestReset();
+    motion->onGuestReset();
     cpu.reset();
     gpio.gstatus2 = 0;
     writeBootArgs(false);
@@ -294,6 +298,7 @@ void Machine::softReset(bool warm) {
     modem->reset();
     irda->reset();
     codePatch->onGuestReset();
+    motion->onGuestReset();
     clk.clkcon &= ~8u;     // not asleep
     sleepNoticed = false;
     gpio.gstatus2 &= ~2u;  // not a resume
@@ -318,16 +323,12 @@ void Machine::softReset(bool warm) {
 
 bool Machine::runFor(uint64_t ns) {
     uint64_t end = nowNs() + ns;
-    // Idle coalescing: when the guest was (nearly) all idle last time, its periodic timer tick
-    // (1 ms on Windows Mobile) does not wake the host on its own; the host sleeps to the end of
-    // the slice and the owed ticks are delivered in a burst. ~60 host wake-ups a second instead
-    // of ~1000 lets the phone's CPU reach its deep idle states. DMA (audio) keeps exact timing.
-    // While sound streams the guest is ~80% idle (decoding in bursts), below the 90% rule; its
-    // audio is paced by the DMA interrupts, which still wake the host on time, so ticks can be
-    // coalesced as long as the guest was at least half idle.
-    bool coalesce = idleCoalescing && !cfg.deterministic && (lastRunIdle || (lastRunHalfIdle && dma->active()));
-    uint64_t start = nowNs(), idleStart = idleNs;
-    modem->service(start);  // host updates and unsolicited codes, once per slice batch
+    // While the guest is halted, its 1 ms tick does not wake the host. The sleep runs to the end
+    // of this slice (the owed ticks are delivered in a burst once the guest runs again) and never
+    // past the next audio DMA event, so playback keeps its sample clock. A guest that is actually
+    // running is not halted and is not delayed.
+    bool coalesce = idleCoalescing && !cfg.deterministic;
+    modem->service(nowNs());  // host updates and unsolicited codes, once per slice batch
     while (!stopRequested) {
         uint64_t now = nowNs();
         pwm.advance(now);
@@ -374,9 +375,6 @@ bool Machine::runFor(uint64_t ns) {
         uint64_t ran = cpu.run(slice);
         if (cfg.deterministic) virtNs += ran * 5;
     }
-    uint64_t span = nowNs() - start;
-    lastRunIdle = span > 0 && (idleNs - idleStart) * 100 >= span * 90;
-    lastRunHalfIdle = span > 0 && (idleNs - idleStart) * 100 >= span * 50;
     return !stopRequested;
 }
 

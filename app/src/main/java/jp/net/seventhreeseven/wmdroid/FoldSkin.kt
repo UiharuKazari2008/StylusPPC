@@ -26,15 +26,16 @@ class FoldSkin {
      * [creaseTop]..[creaseBottom]: the fold in view coordinates; [aspect]: display width / height;
      * [topInset]: below the lock button. Like the cover screen the display runs edge to edge: from
      * the left edge, down to just above the fold (~48% of the height); keys fill the rest of the row.
+     * [fill]: use that whole place, so a shorter guest picture is not pulled in from the edges.
      */
-    fun layout(w: Int, h: Int, creaseTop: Int, creaseBottom: Int, aspect: Float, topInset: Float) {
+    fun layout(w: Int, h: Int, creaseTop: Int, creaseBottom: Int, aspect: Float, topInset: Float, fill: Boolean = false) {
         val m = h * 0.015f
         val y0 = topInset + m
         val bottom = minOf(h * 0.48f, creaseTop - m)
         var sh = bottom - y0
-        var sw = sh * aspect
         val maxW = w * 0.8f
-        if (sw > maxW) { sw = maxW; sh = sw / aspect }
+        var sw = if (fill) maxW else sh * aspect
+        if (!fill && sw > maxW) { sw = maxW; sh = sw / aspect }
         screen.set(0, y0.toInt(), sw.toInt(), (y0 + sh).toInt())
         // Key column to the right of the display.
         val col = RectF(sw + 2 * m, y0, w - 2 * m, y0 + sh)

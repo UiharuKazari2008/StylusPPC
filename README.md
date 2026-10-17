@@ -40,7 +40,7 @@ Microsoft's Device Emulator (DE) was a Windows-only x86 program, and it was neve
 
 - **A full ARM computer, written from scratch.** DE emulates a Samsung SMDK2410 development board: an ARM920T-class CPU, the S3C2410 system-on-chip (interrupt controller, timers, DMA, LCD, touch ADC, UARTs, GPIO, RTC, sleep logic), AMD CFI NOR flash, a PCMCIA bridge with an NE2000 network card, and a set of DE-only devices for battery, LEDs, audio and folder sharing. PocketStylus re-implements every one of them in portable C++ (about 11,000 lines in `core/` and the native app layer). Each register was rebuilt from documentation and from observing the guest. DE's own source code is under an academic, Windows-only licence, so not one line of it is used (see `docs/research-de-hardware.md`).
 - **A CPU fast enough to be pleasant.** A naive ARMv5TE interpreter gave about 21 MIPS; Windows Mobile 6.5 needs far more to feel like a phone. The core has an ARM64 JIT with a software TLB, block chaining and inlined fast paths. It runs at 380–420 MIPS under load and peaks around 800. A lockstep `--compare` mode checks it against the interpreter instruction by instruction. Cold boot to the home screen takes about 30 seconds. Resuming a saved session takes under one second.
-- **A phone battery is not a desktop PC.** Windows Mobile ticks its scheduler 1,000 times a second, and an emulator that faithfully wakes 1,000 times a second keeps a phone's CPU from ever sleeping. PocketStylus coalesces idle time and replays the owed timer ticks, cutting idle wake-ups from about 1,040 to about 135 per second. It presents only the screen rows that changed, sends performance hints to Android, and steps down when nothing happens.
+- **A phone battery is not a desktop PC.** Windows Mobile ticks its scheduler 1,000 times a second, and an emulator that faithfully wakes 1,000 times a second keeps a phone's CPU from ever sleeping. When Windows Mobile is halted, PocketStylus batches that tick into the 16 ms frame and replays the owed ticks, so a quiet screen does not wake the phone a thousand times a second. It presents only the screen rows that changed, reports real work to Android's performance hints, and steps down when nothing happens.
 - **An operating system that never knew Android existed.** To make Windows Mobile believe the phone's hardware is its own, PocketStylus runs a small agent inside the guest: a .NET Compact Framework 3.5 helper, plus a hand-built native ARM bootstrap that installs .NET CF 3.5 silently on releases that lack it. The agent and the app talk through a mailbox on an emulated storage card. To make everything feel native, the project had to reverse-engineer undocumented Windows Mobile behaviour:
   - how the title bar picks the G / E / 3G / H / 1X / Ev icon;
   - how Titanium caches wallpapers;
@@ -177,10 +177,10 @@ Each section below expands to show how the feature works.
 <details>
 <summary><b>Power and efficiency</b></summary>
 
-- **Idle coalescing:** when the guest was idle for the last slice, the host sleeps to the end of the next 16 ms slice instead of waking for every 1 ms tick, then delivers the owed PWM timer ticks one by one. Guest time stays exact, and idle wake-ups drop from about 1,040 to about 135 per second.
-- Audio DMA keeps exact timing. Coalescing continues while music plays if the guest is at least half idle.
+- **Idle coalescing:** while the guest is halted, the host sleeps to the end of the 16 ms slice instead of waking for every 1 ms tick, then delivers the owed PWM timer ticks one by one. Guest time stays exact.
+- Audio DMA keeps its own clock. The sleep never runs past the next audio event, so playback stays in time.
 - The OpenGL presenter uploads only the rows that changed since the last frame and asks for 60 Hz with `ANativeWindow_setFrameRate`.
-- Android performance hints: a CPU boost on rotations and layout changes; nice 0 and no hints after a second of idling.
+- Android performance hints: a frame that fills 16 ms is on time, so the CPU can leave the top clock. A touch, rotation, or layout change reports past the target and the clock rises for the redraw. Nice 0 and no hints after a second of idling.
 - Background modes: keep running (music keeps playing at full speed), suspend, or hibernate to a save after a timer.
 </details>
 

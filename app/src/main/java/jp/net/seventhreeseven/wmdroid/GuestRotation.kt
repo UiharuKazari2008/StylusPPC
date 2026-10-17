@@ -35,6 +35,10 @@ class GuestRotation(
     private var candidateSince = 0L
     private val g = FloatArray(3)
     private var primed = false
+    /** The next clear reading is sent at once, including portrait (0). Set after a restore. */
+    private var pokePending = false
+    /** poke() started the sensor itself: stop it once that reading is sent. */
+    private var pokeStopAfter = false
 
     private fun autoRotate() =
         Settings.System.getInt(ctx.contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) == 1
@@ -53,9 +57,20 @@ class GuestRotation(
         sensors.unregisterListener(this)
     }
 
-    /** The guest helper restarted: tell it again. */
-    fun resend() {
-        if (current != 0) send(current)
+    /** The guest helper restarted: tell it the last orientation again, portrait included. */
+    fun resend() = send(current)
+
+    /**
+     * After a restore or wake the guest's orientation is whatever the snapshot saved, which is
+     * often not how the phone is held, and a turn to that same orientation is ignored. The next
+     * clear accelerometer reading is applied at once.
+     */
+    fun poke() {
+        pokePending = true
+        if (!running) {
+            pokeStopAfter = true
+            start()
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -64,7 +79,21 @@ class GuestRotation(
         if (!primed) { e.values.copyInto(g, 0, 0, 3); primed = true }
         for (i in 0..2) g[i] += (e.values[i] - g[i]) * FILTER
         val now = SystemClock.uptimeMillis()
-        val want = if (autoRotate()) quadrant() ?: return else 0
+        val sensed = if (autoRotate()) quadrant() else 0
+        if (pokePending) {
+            if (sensed == null) return
+            pokePending = false
+            current = sensed
+            candidate = sensed
+            candidateSince = now
+            send(sensed)
+            if (pokeStopAfter) {
+                pokeStopAfter = false
+                android.os.Handler(android.os.Looper.getMainLooper()).post { stop() }
+            }
+            return
+        }
+        val want = sensed ?: return
         if (want != candidate) {
             candidate = want
             candidateSince = now

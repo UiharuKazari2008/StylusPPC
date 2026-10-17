@@ -48,7 +48,10 @@ static class Display
         foreach (short size in new short[] { 192, (short)Marshal.SizeOf(typeof(DEVMODE)) })
         {
             dm.dmSize = size;
-            r = ChangeDisplaySettingsEx(null, ref dm, IntPtr.Zero, 0, IntPtr.Zero);
+            // CDS_RESET applies the angle again when the driver already claims to be there. A
+            // restored session often is: the saved orientation and the panel disagree, and a plain
+            // change is ignored, so turning back to the way the phone is held does nothing.
+            r = ChangeDisplaySettingsEx(null, ref dm, IntPtr.Zero, CDS_RESET, IntPtr.Zero);
             if (r == 0) return "ok size=" + size;
         }
         // Report which orientations the display driver offers (DMDO_* bits) to diagnose it.

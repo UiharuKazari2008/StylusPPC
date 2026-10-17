@@ -15,6 +15,7 @@
 #include "../src/board/camera.h"
 #include "../src/board/modem.h"
 #include "../src/board/codepatch.h"
+#include "../src/board/motion.h"
 #include "../src/board/irda.h"  // infrared bridge on UART2
 #include "irda_link.h"
 #include "../src/util/log.h"
@@ -331,6 +332,7 @@ int main(int argc, char **argv) {
     std::vector<double> resets;                         // --reset
     std::vector<std::pair<double, std::string>> puts;   // --put T:path:text  (e.g. a helper mailbox command)
     std::vector<std::pair<double, std::string>> batteries;  // --battery T:ac,percent  (the DE battery device)
+    std::vector<std::pair<double, std::string>> accels;     // --accel T:ax,ay,az  (m/s^2 like Android; motion.h)
     std::vector<std::pair<double, std::string>> regDwords;  // --reg-dword T:name:value
     const char *ownNumber = nullptr;
     double burstT0 = 0, burstT1 = -1, burstDt = 0;      // --burst
@@ -443,6 +445,11 @@ int main(int argc, char **argv) {
             std::string rest;
             double t = timeArg(next(), rest);
             regDwords.push_back({t, rest});
+        }
+        else if (a == "--accel") {
+            std::string v = next();
+            size_t c = v.find(':');
+            if (c != std::string::npos) accels.push_back({atof(v.substr(0, c).c_str()), v.substr(c + 1)});
         }
         else if (a == "--battery") {
             std::string v = next();
@@ -728,6 +735,13 @@ int main(int argc, char **argv) {
                 }
                 LOGI("reg-dword %s: %d cells", name.c_str(), n);
             }
+        for (auto &ac : accels)
+            if (ac.first == t) {
+                float ax = 0, ay = 0, az = 9.80665f;
+                sscanf(ac.second.c_str(), "%f,%f,%f", &ax, &ay, &az);
+                m.motion->setAccel(ax, ay, az);
+                LOGI("accel: %.2f %.2f %.2f (guest reads so far %u)", ax, ay, az, m.motion->reads());
+            }
         for (auto &b : batteries)
             if (b.first == t) {   // as NativeBridge does: byte 0 = 0 on AC, byte 1 = percent used
                 int ac = 0, pct = 100;
@@ -970,6 +984,7 @@ int main(int argc, char **argv) {
              (unsigned long long)js.helperCalls, (unsigned long long)js.invalidations, (unsigned long long)js.flushes,
              (unsigned long long)(js.codeBytes >> 10));
     }
+    LOGI("motion: %u guest reads", m.motion->reads());
     LOGI("codepatch: status %x, %llu page scans, battery reads %llu", m.codePatch->status(),
          (unsigned long long)m.codePatch->pagesScanned, (unsigned long long)m.dePage->batteryReads);
     if (saveStatePath) {

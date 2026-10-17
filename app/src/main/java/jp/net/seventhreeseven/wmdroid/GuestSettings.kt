@@ -186,6 +186,7 @@ object GuestSettings {
         action("Launcher", "pinnedapps", "Pinned Shortcuts…", AndroidApps.CMD_PINS),
         // ---- Dock: Android apps on the skin (DeviceSkin dock, LauncherBridge) ----
         bool("Dock", "dockon", "Show Android App Dock", { it.dockOn }, { s, v -> s.dockOn = v }),
+        bool("Dock", "dockresize", "Resize Screen for Dock", { it.dockResizeScreen }, { s, v -> s.dockResizeScreen = v }, restart = true),
         choice("Dock", "dockpos", "Position", listOf(Settings.DOCK_AUTO to "Auto (free space on the skin)",
             Settings.DOCK_TOP to "Top of Screen", Settings.DOCK_BOTTOM to "Bottom of Screen"),
             { it.dockPlace }, { s, v -> s.dockPlace = v }),

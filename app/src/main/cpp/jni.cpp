@@ -35,8 +35,8 @@ using namespace wm;
 namespace {
 
 // Android Dynamic Performance Framework (API 33+), looked up at runtime because minSdk is 26.
-// Reporting how long each 16 ms emulation frame was busy lets the scheduler boost CPU frequency
-// and placement for the emulation thread, the same way games get boosted.
+// Reporting how long each 16 ms frame was actually busy lets the scheduler drop frequency when
+// the guest finishes early. A full frame meets the target; only a touch burst reports past it.
 struct PerfHint {
     using GetManager = void *(*)();
     using CreateSession = void *(*)(void *, const int32_t *, size_t, int64_t);
@@ -135,7 +135,8 @@ struct Session {
         // The guest CPU is latency-bound work: ask the scheduler to keep it on fast cores.
         if (setpriority(PRIO_PROCESS, (id_t)gettid(), -10) != 0) LOGW("could not raise emulation thread priority");
         PerfHint hint;
-        hint.start((int32_t)gettid(), 12000000);  // below the 16 ms frame, so a busy guest reads as "behind"
+        // 16 ms, the same slice runFor is given. A frame that fills it is on time, not late.
+        hint.start((int32_t)gettid(), 16000000);
         audio.startOutput();
         uint64_t lastInsns = m->cpu.insnCount;
         uint64_t lastT = m->nowNs(), lastIdle = m->idleNs;
@@ -175,7 +176,8 @@ struct Session {
             uint64_t span = m->nowNs() - t0, idleSpan = m->idleNs - idle0;
             uint64_t busy = span > idleSpan ? span - idleSpan : 0;
             if (boostNow.exchange(false)) hint.loadUp();
-            // While boosted, report a full frame of work so the CPU stays clocked up during the redraw.
+            // While boosted, report past the 16 ms target so the redraw keeps a high clock.
+            // Other frames report time actually spent running, so an early finish can drop a step.
             bool boosted = m->nowNs() < boostUntilNs.load();
             int lim = cpuLimit.load();
             // Sound playing (music in the background): no step-down, or decoding starves and the
@@ -188,7 +190,7 @@ struct Session {
                 else if (!idleSinceNs) idleSinceNs = now;
                 bool settled = idleSinceNs && now - idleSinceNs > 1000000000ull;
                 // One last (small) report after going quiet, so the session's boost winds down.
-                if (!settled || hinting) hint.work(boosted ? 16000000 : (int64_t)busy);
+                if (!settled || hinting) hint.work(boosted ? 22000000 : (int64_t)busy);
                 hinting = !settled;
                 if (settled == raised) {
                     raised = !settled;

@@ -28,6 +28,7 @@ class CallSettingsActivity : AppCompatActivity() {
     private fun dp(v: Int) = (v * d).toInt()
     private lateinit var roleState: TextView
     private lateinit var roleButton: MaterialButton
+    private lateinit var audioBox: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         DynamicColors.applyToActivityIfAvailable(this)
@@ -47,8 +48,17 @@ class CallSettingsActivity : AppCompatActivity() {
             "screen shows it: Dialing, Connected with the timer, Ended, and the call history entry. Calls " +
             "to this phone ring in Windows Mobile while PocketStylus is on screen: Answer, Ignore and End " +
             "there act on the real call, and missed calls show in Windows Mobile. The sound stays on this " +
-            "phone's earpiece and microphone (or speaker and headset); it does not pass through the emulator.",
+            "phone; it does not pass through the emulator.",
             alpha = 0.8f)
+
+        text("Call audio", 16f)
+        text("Windows Mobile's Speaker button does not switch this phone: its radio driver does not report " +
+            "audio devices, so the button never changes. Choose the earpiece, the speaker, or a connected " +
+            "Bluetooth device here. During a call, long-press the lock button and choose Call audio; that " +
+            "keeps Windows Mobile's call screen. With several Bluetooth devices connected, each one is listed.",
+            13f, 0.65f)
+        audioBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(audioBox, LinearLayout.LayoutParams(-1, -2))
 
         val enable = MaterialSwitch(this).apply {
             text = "Phone calls in Windows Mobile"
@@ -162,6 +172,32 @@ class CallSettingsActivity : AppCompatActivity() {
         val held = CallBridge.holdsRole(this)
         roleState.text = if (held) "PocketStylus is the default phone app." else "Your usual phone app is the default."
         roleButton.text = if (held) "Change the default phone app…" else "Use Windows Mobile's call screen…"
+        fillAudio()
+    }
+
+    private fun fillAudio() {
+        audioBox.removeAllViews()
+        if (!BluetoothRadio.permissionGranted(this) && BluetoothRadio.permissions().isNotEmpty()) {
+            audioBox.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "Show Bluetooth devices"
+                setOnClickListener { requestPermissions(BluetoothRadio.permissions(), REQ_BT) }
+            }, LinearLayout.LayoutParams(-1, -2))
+        }
+        val saved = CallAudio.saved(this)
+        for (o in CallAudio.outputs(this)) {
+            audioBox.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = if (o.id == saved) "${o.name}  ·  in use" else o.name
+                setOnClickListener {
+                    CallAudio.select(this@CallSettingsActivity, o.id)
+                    fillAudio()
+                }
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_BT) fillAudio()
     }
 
     private fun askPermissions() {
@@ -200,5 +236,6 @@ class CallSettingsActivity : AppCompatActivity() {
 
     companion object {
         private const val REQ_ROLE = 31
+        private const val REQ_BT = 33
     }
 }

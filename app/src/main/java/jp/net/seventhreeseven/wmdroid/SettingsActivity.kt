@@ -118,8 +118,7 @@ class SettingsActivity : SettingsPage() {
         group("Contacts & calendar")
         button("Contacts & calendar…") { startActivity(Intent(this, PimSettingsActivity::class.java)) }
         group("Bluetooth")
-        note("To send from Windows Mobile, use Start > Send via Bluetooth. Receiving is switched in Device Settings > " +
-            "Hardware and needs All files access (Bluetooth saves received files in Download).")
+        button("Bluetooth…") { startActivity(Intent(this, BluetoothSettingsActivity::class.java)) }
         group("Infrared")  // IrDA beams over Bluetooth LE or an InfraWAN relay (InfraredSettings.kt)
         button("Infrared…") { startActivity(Intent(this, InfraredSettingsActivity::class.java)) }
         group("Phone hardware")

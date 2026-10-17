@@ -167,11 +167,16 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     }
 
     // ---- Dock: a row of Android apps (LauncherBridge) ----
-    // Auto puts it in the skin's free space below the keys (the slim key row leaves the D-pad's
-    // area empty); when there is none, and for Top / Bottom, its band is taken from the display's
-    // own area and the display shrinks (same shape, centred) into the rest. Either way it never lies
-    // over Windows Mobile's screen, so touches there never reach the guest, and the guest's
-    // resolution (and its saved states) stay as they are.
+    // It only sits in space the skin is not already using (under the keys, between the display and
+    // the keyboard, or above the display). It never takes a band out of the display, so the screen
+    // stays edge to edge. If nowhere fits, the dock is left off.
+
+    /**
+     * The guest is 480×800 for the dock: draw it in the screen's whole edge-to-edge place, instead
+     * of letterboxing the shorter picture inside that place.
+     */
+    var fillDisplay = false
+        set(v) { if (field != v) { field = v; requestLayout(); keysView.invalidate() } }
 
     /** Settings.DOCK_OFF / DOCK_AUTO / DOCK_TOP / DOCK_BOTTOM. */
     var dockPos = Settings.DOCK_OFF
@@ -212,45 +217,45 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         onDockLong?.invoke(slot)
     }
 
-    /** Places the dock (after the layout placed the display and keys); may shrink the display. */
+    /** Places the dock in free space. The display's rectangle is left as the layout set it. */
     private fun carveDock(pw: Int, ph: Int) {
         dockRect.setEmpty()
         if (dockPos == Settings.DOCK_OFF || screenRect.isEmpty) return
         val d = resources.displayMetrics.density
         val pad = dockPadDp * d
-        if (dockPos == Settings.DOCK_AUTO && foldCrease == null) {
-            // The free space under everything the skin shows.
-            var used = screenRect.bottom.toFloat()
-            for (k in specKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
-            for (k in softKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
-            if (!dpad.isEmpty && (specActive || dpadOn || keypad)) used = maxOf(used, dpad.bottom)
-            val m = maxOf(pw * KEY_MARGIN, cornerRadius * 0.3f)
-            val top = used + 4 * d
-            val bottom = ph - maxOf(4 * d, cornerRadius * 0.3f)
-            val width = pw - 2 * m
-            val icon = minOf(dockIconDp * d, width / dockSlots * 0.8f)
-            val h = icon + 2 * pad
-            if (bottom - top >= h) {
-                val y = top + (bottom - top - h) / 2
-                dockRect.set(m, y, pw - m, y + h)
-                dockIcon = icon
-                return
-            }
+        val m = maxOf(pw * KEY_MARGIN, cornerRadius * 0.3f)
+        val span = pw - 2 * m
+        if (span <= 0f) return
+        val icon = minOf(dockIconDp * d, span / dockSlots * 0.8f)
+        val need = icon + 2 * pad
+        val floor = ph - maxOf(4 * d, cornerRadius * 0.3f)
+        // Gaps the skin is not using: above the display, between it and the next control, and
+        // under everything. Added in that order, so the last one under the display is the lowest.
+        val gaps = ArrayList<RectF>()
+        fun consider(top: Float, bottom: Float) {
+            if (bottom - top >= need) gaps.add(RectF(m, top, pw - m, bottom))
         }
-        // Top / Bottom (and Auto without free space): a band of the display's area.
-        val r = Rect(screenRect)
-        val icon = minOf(dockIconDp * d, r.width().toFloat() / dockSlots * 0.8f, r.height() * 0.1f)
-        val h = minOf(icon + 2 * pad, r.height() * 0.2f)
-        val nh = r.height() - h
-        val nw = nh * r.width() / r.height()
-        val left = r.left + (r.width() - nw) / 2
-        if (dockPos == Settings.DOCK_TOP) {
-            dockRect.set(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.top + h)
-            screenRect.set(left.toInt(), Math.ceil((r.top + h).toDouble()).toInt(), (left + nw).toInt(), r.bottom)
-        } else {
-            dockRect.set(r.left.toFloat(), r.bottom - h, r.right.toFloat(), r.bottom.toFloat())
-            screenRect.set(left.toInt(), r.top, (left + nw).toInt(), (r.bottom - h).toInt())
-        }
+        val aboveTop = maxOf(cutoutBottom.toFloat(), if (lockKey.rect.isEmpty) 0f else lockKey.rect.bottom, 4 * d)
+        consider(aboveTop, screenRect.top.toFloat())
+        var next = floor
+        val kb = foldSkin.keyboard
+        if (!kb.isEmpty && kb.top >= screenRect.bottom) next = minOf(next, kb.top - 4 * d)
+        for (k in specKeys) if (!k.rect.isEmpty && k.rect.top >= screenRect.bottom - 1) next = minOf(next, k.rect.top - 4 * d)
+        for (k in softKeys) if (!k.rect.isEmpty && k.rect.top >= screenRect.bottom - 1) next = minOf(next, k.rect.top - 4 * d)
+        if (!dpad.isEmpty && dpad.top >= screenRect.bottom - 1) next = minOf(next, dpad.top - 4 * d)
+        consider(screenRect.bottom + 4 * d, next)
+        var used = screenRect.bottom.toFloat()
+        if (!kb.isEmpty) used = maxOf(used, kb.bottom.toFloat())
+        for (k in specKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
+        for (k in softKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
+        if (!dpad.isEmpty) used = maxOf(used, dpad.bottom)
+        consider(used + 4 * d, floor)
+        val gap = when (dockPos) {
+            Settings.DOCK_TOP -> gaps.firstOrNull { it.bottom <= screenRect.top + 1 }
+            else -> gaps.lastOrNull { it.top >= screenRect.bottom - 1 }  // Auto and Bottom: the lowest space under the display
+        } ?: return
+        val y = gap.top + (gap.height() - need) / 2
+        dockRect.set(gap.left, y, gap.right, y + need)
         dockIcon = icon
     }
 
@@ -428,7 +433,10 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         for (it in l.items) {
             val r = RectF(it.x * pw, it.y * ph, (it.x + it.w) * pw, (it.y + it.h) * ph)
             when (it.type) {
-                "screen" -> {
+                "screen" -> if (fillDisplay) {
+                    // The whole place the skin gave the display, so a 480×800 picture stays edge to edge.
+                    screenRect.set(Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom))
+                } else {
                     var w = r.width()
                     var h = w * ratio
                     if (h > r.height() * 1.02f) { h = r.height(); w = h / ratio }
@@ -868,7 +876,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             // Open foldable: the display is turned to landscape in the slider's top half.
             // The lock button keeps its cover-screen size (sized from a phone-width, not the wide window).
             placeLock((ph * 0.4f).toInt())
-            foldSkin.layout(pw, ph, crease.top, crease.bottom, guestH.toFloat() / guestW, lockKey.rect.bottom)
+            foldSkin.layout(pw, ph, crease.top, crease.bottom, guestH.toFloat() / guestW, lockKey.rect.bottom, fillDisplay)
             screenRect.set(foldSkin.screen)
             topBar.setEmpty()
             keys.forEach { it.rect.setEmpty() }
@@ -882,8 +890,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             // No keys, but the lock button stays: it is also the way to the power menu and settings.
             val top = minTop(pw)
             val room = ph - top
-            val w = minOf(pw.toFloat(), room / aspect)
-            val h = w * aspect
+            val w = if (fillDisplay) pw.toFloat() else minOf(pw.toFloat(), room / aspect)
+            val h = if (fillDisplay) room else w * aspect
             val y = top + (room - h) / 2
             screenRect.set(((pw - w) / 2).toInt(), y.toInt(), ((pw + w) / 2).toInt(), (y + h).toInt())
             topBar.setEmpty()
@@ -893,11 +901,13 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             return
         }
         // Full width when it fits; otherwise (wide windows) full height between the bars.
+        // Resize for dock fills that whole place, so 480×800 does not sit in from the edges.
         val bottom = bottomArea(pw)
         var w = pw.toFloat()
         var h = w * aspect
         val room = ph - minTop(pw) - bottom
-        if (h > room) { h = room; w = h / aspect }
+        if (fillDisplay) { w = pw.toFloat(); h = room.coerceAtLeast(0f) }
+        else if (h > room) { h = room; w = h / aspect }
         // Display at the top (below the cut-out); keys and D-pad underneath.
         val top = minTop(pw).coerceAtMost(ph - h - bottom)
         val left = (pw - w) / 2

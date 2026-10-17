@@ -5,6 +5,10 @@
 // server on 127.0.0.1. Nothing reaches a real service; --probe adds a reachability check of
 // Escargot (MSNP VER/CVR and the Passport nexus) that signs nobody in.
 #include "../src/net/mwsgate.h"
+#include "../src/net/mwspdu.h"
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include "../src/util/log.h"
 #include <chrono>
 #include <cstdio>
@@ -86,6 +90,54 @@ int mwsSelfTest(int argc, char **argv) {
                  rst.find("urn:passport:compact") != std::string::npos,
                  "token response has compact tokens and proof keys for the client");
     if (!rstOk) printf("response: %.600s\n", rst.c_str());
+    // The push channel: the connect PDU the phone's client sends (captured), then a heartbeat.
+    {
+        int sv[2];
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+        gw.serve(sv[1], 50001, "tcp.mws.mobile.live.com", false);
+        const uint8_t connect[] = {0x30, 0x01, 0, 0, 0, 0, 0, 0, 0x0c, 0, 0, 0x03, 0x08, 0x02, 0x01, 0, 0, 0x06, 0x01, 0, 0x08, 0x02, 0x0c, 0};
+        const uint8_t heartbeat[] = {0x30, 0x04, 0, 0, 0, 0, 0, 0, 0x04, 0, 0, 0x05, 0x00, 0x02, 0x0e, 0x01};
+        auto exchange = [&](const uint8_t *p, size_t n, MwsPdu &out) {
+            if (send(sv[0], p, n, 0) != (ssize_t)n) return false;
+            std::string buf;
+            for (int i = 0; i < 50; i++) {
+                pollfd pf{sv[0], POLLIN, 0};
+                if (poll(&pf, 1, 100) > 0) {
+                    char tmp[512];
+                    ssize_t r = recv(sv[0], tmp, sizeof tmp, 0);
+                    if (r <= 0) return false;
+                    buf.append(tmp, (size_t)r);
+                }
+                if (parseMwsPdu(buf, out) > 0) return true;
+            }
+            return false;
+        };
+        MwsPdu a;
+        bool ok = exchange(connect, sizeof connect, a) && a.type == 0x82 && a.opt(2) && a.opt(2)->size() >= 5 &&
+                  (uint8_t)(*a.opt(2))[2] == 5 && (uint8_t)(*a.opt(2))[3] == a.opt(2)->size() - 4;
+        all &= check(ok, "push channel: connect answered with 0x82 and a session id (option 2)");
+
+        // Reproduce exactly what WLMService.dll does with a received 0x82 to decide ConnectionStatus
+        // (TCP::_ThdRecv 0x4243c8 reads a u32 from option 4; the platform at 0x40ca18 writes
+        // ConnectionStatus = 4 when that is > 0 while the connect state is 1, else 1). The plugins sync
+        // only at 4. getOption returns a pointer at the option entry [next_type][len][data...]; the DLL
+        // reads the word at entry+4, i.e. data bytes 2..5.
+        auto connectionStatus = [](const std::string &wire) -> int {
+            MwsPdu q;
+            if (parseMwsPdu(wire, q) <= 0 || q.type != 0x82) return -1;
+            const std::string *o4 = q.opt(4);
+            uint32_t seq = 0;
+            if (o4 && o4->size() >= 6)
+                seq = (uint8_t)(*o4)[2] | (uint8_t)(*o4)[3] << 8 | (uint8_t)(*o4)[4] << 16 | (uint8_t)(*o4)[5] << 24;
+            return seq > 0 ? 4 : 1;  // connect state is 1 after a good handshake
+        };
+        all &= check(connectionStatus(buildMwsPdu(a)) == 4,
+                     "push channel: the 0x82 drives ConnectionStatus to 4 (connected), so plugins sync");
+        MwsPdu h;
+        all &= check(exchange(heartbeat, sizeof heartbeat, h) && h.type == 0x84 && h.opt(5) && *h.opt(5) == std::string("\x0e\x01", 2),
+                     "push channel: heartbeat answered with 0x84 and the same TTL (option 5)");
+        close(sv[0]);
+    }
     std::this_thread::sleep_for(std::chrono::seconds(4));  // let the session go online and answer the challenge
     printf(all ? "ALL PASSED\n" : "SOME FAILED\n");
     return all ? 0 : 1;

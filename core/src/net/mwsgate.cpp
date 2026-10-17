@@ -1019,6 +1019,13 @@ void MwsGateway::Impl::servePush(int fd, std::string buf, const std::string &cap
                 o += (char)session.size();
                 o += session;
                 a.opts.push_back({2, o});
+                // Option 4 carries the server's message sequence. _ThdRecv reads a u32 from it on every
+                // type-0x82 PDU (TCP::_ThdRecv at 0x4243c8 in WLMService.dll) into field +0x29c, and the
+                // platform writes ConnectionStatus = 4 ("connected") only when that is > 0 (0x40ca18);
+                // with 0 it stays 1 ("connecting") and no plugin syncs — the "failed to synchronise" the
+                // user saw. The client's own option 4 is "01 00" + a 4-byte sequence + "00 40 01 00"; a
+                // sequence of 1 makes the read nonzero. docs/research-escargot.md §10.
+                a.opts.push_back({4, std::string("\x01\x00\x01\x00\x00\x00\x00\x40\x01\x00", 10)});
                 {
                     std::lock_guard<std::mutex> lk(mu);
                     for (auto &kv : sessions) kv.second->lastUse = nowMs();

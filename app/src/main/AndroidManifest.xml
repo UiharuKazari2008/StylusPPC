@@ -27,6 +27,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 16 status chip while a Windows Mobile call stays up (CallBridge). -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <!-- Phone calls from Windows Mobile's Phone app (CallBridge.kt, CallService.kt): placing and
          ending calls, and the screen-off-at-the-ear lock while Windows Mobile shows a call. -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
@@ -201,6 +203,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".CallSettingsActivity" android:exported="false" android:label="Phone calls" />
+        <activity android:name=".BluetoothSettingsActivity" android:exported="false" android:label="Bluetooth" />
         <activity android:name=".PimSettingsActivity" android:exported="false" android:label="Contacts &amp; calendar" />
         <activity android:name=".InfraredSettingsActivity" android:exported="false" android:label="Infrared" />
         <!-- Text messages for Windows Mobile (SmsBridge.kt): incoming SMS into the queue, quick replies. -->
@@ -210,6 +213,8 @@
             </intent-filter>
         </receiver>
         <receiver android:name=".SmsReplyReceiver" android:exported="false" />
+        <!-- Hang up from the ongoing-call status chip (CallBridge). -->
+        <receiver android:name=".CallPillReceiver" android:exported="false" />
         <!-- Accept / Reject for Windows Mobile's contact and calendar changes (PimSync.kt). -->
         <receiver android:name=".PimDecisionReceiver" android:exported="false" />
     </application>

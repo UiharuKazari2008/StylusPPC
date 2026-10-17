@@ -73,6 +73,9 @@ object GuestStates {
             if (a > 1.0 && Math.abs(Math.log((variant.height.toDouble() / variant.width) / a)) > 0.02)
                 h = (Math.round(w * a).toInt() / 2 * 2).coerceIn(w, w * 2)
         }
+        // "Resize screen for dock": the tall 480-wide screen (the phone's 852, or 854) gives up
+        // the bottom strip and Windows Mobile boots at 480×800, which is where the dock sits.
+        if (settings.dockResizeScreen && w == 480 && h > 800) h = 800
         return Target(profile, variant, file, w, h, mem)
     }
 

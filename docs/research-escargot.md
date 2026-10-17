@@ -470,8 +470,157 @@ wmcore-cli fwvga.bin --mem 192 --net --tls <ca dir> --load-state <state> --mws c
    `session.mobile.msn.com` / `services.mobile.msn.com` while the setting is on. Then judge whether its PDU
    protocol can be served.
 
+## 9. The push channel on port 50001 (third round, 2026-10-16)
+
+**The user's first real sign-in** (app, 6.5.3, with the whole Escargot address typed):
+- RST.srf succeeded: the gateway signed in to Escargot with MSNP8/Tweener and returned its token.
+- The client then connected to `tcp.mws.mobile.live.com:50001` and sent 24 bytes:
+  `30 01 00 00 00 00 00 00 0c 00 00 03 08 02 01 00 00 06 01 00 08 02 0c 00`.
+- It got no answer, gave up after about 15 s, and retried.
+- A later retry with `name@hotmail.com` (the page's default domain) was refused by Escargot.
+
+### 9.1 Framing [ROM: WLMService.dll 10.6 code]
+
+The framing is the MSP PDU that Pocket MSN's `MSPPDUGateway` also used: a 12-byte header, then a chain of
+options in the style of IPv6 extension headers, then the payload. Each fact below was read from the
+receive thread (`TCP::_ThdRecv` at 0x42406c in the 6.1.4 DLL as mapped), the reassembler (0x40da44), the
+dispatcher (0x40e8f4), the connect-answer handler (0x40e454) and the PDU builders. `core/src/net/mwspdu.h`
+encodes it.
+
+**Header (12 bytes):**
+
+| Bytes | Field |
+|---|---|
+| 0 | `0x30`. Anything else is dropped. |
+| 1 | type |
+| 2–3 | message id (LE) |
+| 4–7 | sequence (LE) |
+| 8–9 | length of the rest (LE, at most 0x4000) |
+| 10 | flags (bit 0: more fragments follow) |
+| 11 | type of the first option (0: none) |
+
+**Option:** `[type of the next option, 0 = last][data length][data]`. Sub-items inside an option's data
+are `[01 00]` followed by `[id][len][bytes]`. Padding to 4 bytes is inside the data.
+
+**Client types:**
+
+| Type | Meaning |
+|---|---|
+| 0x01 | connect. Option 3 `01 00` + optional device id (`HKLM\Services\Windows Live\DID`); option 8 `01 00 08 02 0c 00`. |
+| 0x02 | reconnect, with option 2 = the session |
+| 0x03 | disconnect: option 2 session plus option 4 ack. Sent by 0x424714, which then closes the socket. |
+| 0x04 | heartbeat: option 5 = TTL in seconds, u16. 270 s was seen. |
+| 0x00 | data ack: option 4 = `01 00` + sequence u32 + `00 40 01 00` |
+| 0x10 | data: option 0x10, whose second data byte is 3 for plain or 4 for zlib; zlib payloads start `78 BB` + the DICTID of a policy dictionary. Fragments are joined by message id. |
+
+**Server types the client handles:**
+
+| Type | Meaning |
+|---|---|
+| 0x81 / 0x82 | connect answer. **Option 2 is required:** `01 00 05 <len> <session id>`. Option 3 (device id, saved to the registry), 6 (a string), 8 (byte 4 must have bit 3) and 9 are optional; 0x81 also requires option 6. |
+| 0x83 | logged only |
+| 0x84 | heartbeat answer. Option 5 = next TTL, clamped to 90–7200 s. |
+| 0x10 | data |
+| 0xff | error. Option 0xfe holds a u16 code; 7 means reconnect. |
+| 0x00 | control, with option 9 |
+
+### 9.2 What the gateway does now [MEASURED]
+
+| Client sends | Gateway answers |
+|---|---|
+| connect / reconnect | `0x82` with option 2 = a 10-character session id |
+| heartbeat | `0x84` with the same TTL |
+| disconnect | `0x83` |
+| data | captured (reassembled, decoded when it is text), not answered yet |
+
+Captures now give the real byte count in their headers. The earlier "140 bytes" was the hex dump's length.
+
+**Host self-test:** `wmcore-cli --mws-selftest` now also replays the captured connect PDU and a heartbeat
+(PASS).
+
+**Guest run (CLI, 6.5.3, `--mws-fake`):**
+
+```
+push channel <- type 0x01 id 0 seq 0 flags 0 opt3[01 00] opt8[01 00 08 02 0c 00]
+push channel -> type 0x82 id 0 seq 0 flags 0 opt2[01 00 05 0a <10-character session id>]
+push channel <- type 0x04 id 0 seq 0 flags 0 opt5[0e 01]
+push channel -> type 0x84 id 0 seq 0 flags 0 opt5[0e 01]
+push channel <- type 0x03 ... opt2[session] opt4[01 00 00 00 00 00 00 40 01 00]
+```
+
+- The client **accepts the connect answer**: setup goes on to 3/5 (Today screen), 4/5 (contacts, e-mail)
+  and 5/5.
+- Setup 5/5 then shows *Synchronization failed*, and Messenger shows *There was a problem signing you in
+  to Messenger*.
+- No data PDU and no further HTTPS call came before the client sent its disconnect. Contacts and Messenger
+  sign-in therefore expect something the gateway doesn't send yet. Candidates:
+  - option 4 in the connect answer (the receive thread reads a u32 and a byte from it on 0x82);
+  - an unsolicited 0x10 message;
+  - the Dictionaries in the policy.
+
+That needs the client's next requests, or the code that decides to disconnect. It is the next step.
+
+### 9.3 Address memory
+
+- After a successful sign-in the gateway remembers the address and maps `name@hotmail.com`, `@live.com` or
+  `@msn.com` back to it when the name before the `@` matches.
+- It is kept in memory and in `<secure web proxy folder>/mws-addresses.txt`: addresses only, no secrets.
+- A new sign-in of the same address ends that address's older MSNP session.
+
+## 10. "Personal settings: failed to synchronise" (fourth round, 2026-10-16)
+
+**The user's retest on 6.5.3 with the full `@escargot.chat` address:** RST.srf 200, MSNP signed in (online
+at Escargot), the push channel connected and the heartbeat was answered. Then **the client sent nothing** —
+no further HTTPS on any host, no more 50001 data — and the phone showed *Personal settings: failed to
+synchronise*.
+
+### 10.1 Why [ROM: WLMService.dll 10.6 code]
+
+The client won't start any plugin sync until the platform marks the connection *fully* up. That decision is
+a registry value the plugins watch:
+
+- `TCP::_ThdRecv` (0x4243c8) does, for **every received type-0x82 PDU**: `getOption(pdu, 4)`, and if present
+  reads the u32 at the option entry + 4 into the TCP object field at `+0x29c`.
+- The platform's connection-state function (0x40c918) writes
+  `HKLM\Services\Windows Live\ConnectionStatus` (0x40ca18): when the connect state is 1 (a good handshake),
+  the value is **4 when `+0x29c` > 0, else 1**.
+- The plugins (profile = "personal settings", contacts, messaging) sync only at ConnectionStatus 4.
+
+Our connect reply was a type-0x82 with option 2 only. With no option 4, `+0x29c` stayed 0, so
+ConnectionStatus stayed 1 ("connecting"): the connection looked up but not *data-ready*, and nothing synced.
+
+### 10.2 Fix [MEASURED host-side]
+
+The connect reply now also carries **option 4** = `01 00` + a 4-byte sequence + `00 40 01 00`, the client's
+own option-4 shape, with the sequence set to 1. The word the DLL reads is then nonzero, so `+0x29c` > 0 and
+ConnectionStatus becomes 4.
+
+- The connect handler (0x40e454) processes only options 2, 3, 6, 8 and 9, so adding option 4 doesn't touch
+  the working connect; only the recv-thread sequence logic reads it.
+- `wmcore-cli --mws-selftest` now reimplements the DLL's extraction and the ConnectionStatus formula and
+  checks the reply yields 4 (PASS).
+
+### 10.3 What the user should retest
+
+1. New APK, 6.5.3, full `@escargot.chat` address, **Windows Live Messenger via Escargot** on.
+2. Expect setup to get past *failed to synchronise* at the connection level. Two outcomes are useful:
+   - it reaches a later step or signs in to Messenger, or
+   - it now **issues its sync** (HTTPS to `http.mws.mobile.live.com`, or data on 50001). Either is captured.
+3. Send the `mws-capture` folder. The service calls after ConnectionStatus 4 are the next thing to
+   translate (profile, contacts ssync, messaging Register), and this capture is the first chance to see
+   them — the client sent nothing before.
+
+### 10.4 Still open
+
+- If the client still won't sync, the server likely has to push a first data (0x82) message rather than
+  fold the sequence into the connect reply, or the connect reply needs option 6/8/9 too. The retest's
+  capture decides.
+- The MWS service layer (profile/contacts/messaging SOAP) is still unimplemented: it is captured and
+  answered 503.
+
 ## Files
 
+- `core/src/net/mwspdu.h` (new, §9): push-channel PDU framing.
 - `core/src/net/localsvc.h` (new): local services at 10.0.2.4 (§8.3).
 - `core/src/net/mwsgate.h`, `core/src/net/mwsgate.cpp` (new): Windows Live Mobile gateway, MSNP8/Tweener
   client, fake MSNP server for tests.

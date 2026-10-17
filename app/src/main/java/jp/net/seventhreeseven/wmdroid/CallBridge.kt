@@ -3,7 +3,13 @@ package jp.net.seventhreeseven.wmdroid
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Person
 import android.app.role.RoleManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -38,9 +44,10 @@ import java.util.concurrent.Executor
  *
  * Two modes:
  *  - WMDroid holds the dialer role: WmInCallService (process ":call", CallService.kt) gets the call,
- *    no Android in-call screen appears, and the WM controls act on the call through it. Whenever
- *    Windows Mobile cannot show the call (the app leaves the screen, the emulator dies) the call is
- *    handed to the phone's own dialer.
+ *    no Android in-call screen appears, and the WM controls act on the call through it. The call
+ *    stays there while the session is still running, including in the background, with a status-chip
+ *    notification. It is handed to the phone's dialer only when the session suspends, hibernates or
+ *    closes. Android will not give a handed-off cellular call back, and WM's timer cannot be moved.
  *  - Without the role: TelecomManager.placeCall shows the phone's dialer as usual and WM mirrors the
  *    call from the phone state (off-hook counts as connected; there is no finer state without the
  *    role). End uses TelecomManager.endCall; mute and speaker are best effort.
@@ -68,6 +75,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         val placedAt = SystemClock.uptimeMillis()
         /** The phone went off-hook since this call was placed (an idle state before that is stale). */
         var offHook = false
+        /** Wall-clock time the call connected (Telecom's connectTimeMillis, else when we saw active). */
+        var connectedAt = 0L
         fun stale() = !incoming && !offHook && SystemClock.uptimeMillis() - placedAt > 30_000
     }
 
@@ -103,12 +112,17 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     var guestFrame: (() -> Triple<Int, Int, Boolean>)? = null
     /** Brings the emulator to the front (an incoming call answered from the overlay). */
     var bringFront: (() -> Unit)? = null
+    /** The last Windows Mobile call just ended while the app is in the background (EmulatorActivity.leave). */
+    var onIdle: (() -> Unit)? = null
     /** Gives the guest's picture back to the activity's own surface (after the overlay had it). */
     var reattach: (() -> Unit)? = null
 
     init {
         // The app ended while WM rang with the phone's ringer muted: give the ringer back.
         if (ringState(ctx).getBoolean(RING_MUTED, false)) { ringMuted = true; muteRingStream(false) }
+        // Call audio (speaker, a headset) while this process is up. Cleared in stop().
+        CallAudio.onRoute = { route, address -> sendRoute(route, address) }
+        endFromPill = { hangupActive() }
     }
     /**
      * Calls dialled through the virtual modem (WM 6 / 6.1 / 6.1.4, core/src/board/modem.h) rather than
@@ -133,6 +147,10 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         private const val CALL_NOTE = 0x7C41
         /** EmulatorActivity opened from the full-screen call notification: show over the lock screen. */
         const val EXTRA_CALL = "jp.net.seventhreeseven.wmdroid.INCOMING_CALL"
+        private const val PILL_CHANNEL = "wm.call.live"
+        private const val PILL_NOTE = 0x7C42
+        /** Hang up from the status chip (CallPillReceiver). Set in init, cleared in stop(). */
+        var endFromPill: (() -> Unit)? = null
 
         fun enabled(ctx: Context) = Settings.global(ctx).getBoolean(PREF, false)
         fun setEnabled(ctx: Context, on: Boolean) =
@@ -193,6 +211,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         updateShowing()
         updateListening()
         updateFastPoll()
+        updatePill()
     }
 
     fun pause() {
@@ -201,30 +220,39 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         updateListening()
         updateFastPoll()
         updateWakeLock()
+        updatePill()
     }
 
     /**
-     * The app leaves the screen: Windows Mobile can no longer show its calls, so calls held through
-     * the dialer role go to the phone's dialer (without the role they are there already).
+     * The app left the screen. The session may keep running, so the call stays with Windows Mobile.
+     * The status chip is what shows it on Android until the session suspends or closes ([handOff]).
      */
     fun leave() {
         foreground = false
         updateShowing()
-        if (calls.values.any { it.owned } || ring?.token != null) {
-            Log.i(TAG, "leaving the screen during a call: handing it to the phone's dialer")
-            sendLink(Message.obtain(null, CallLink.HANDOFF))
-            handedOff()
-        }
+        updatePill()
+    }
+
+    /** The session is suspending, hibernating or closing: the phone's dialer takes the calls. */
+    fun handOff() {
+        cancelPill()
+        if (calls.values.none { it.owned } && ring?.token == null) return
+        Log.i(TAG, "handing the call to the phone's dialer")
+        sendLink(Message.obtain(null, CallLink.HANDOFF))
+        handedOff()
     }
 
     fun stop() {
-        leave()
+        CallAudio.onRoute = null
+        endFromPill = null
+        handOff()
         unbindLink()
         stopListening()
         updateWakeLock()
         ui.removeCallbacks(fastPoll)
         ui.removeCallbacks(ringTimeout)
         endRingerOverrides()
+        cancelPill()
     }
 
     // ---- From the guest ----
@@ -569,11 +597,38 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         else runCatching { audio.isMicrophoneMute = on }  // best effort without the role
     }
 
-    @Suppress("DEPRECATION")
+    /** A Windows Mobile call is on screen, so Call audio in the power menu can switch its output. */
+    fun inCall() = calls.isNotEmpty()
+
+    /** Earpiece, speaker, wired headset, or a connected Bluetooth device (CallAudio). */
+    fun pickOutput() {
+        val outs = CallAudio.outputs(ctx)
+        val names = outs.map { it.name }.toTypedArray()
+        val cur = outs.indexOfFirst { it.id == CallAudio.saved(ctx) }.coerceAtLeast(0)
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Call audio")
+            .setSingleChoiceItems(names, cur) { d, which ->
+                CallAudio.select(ctx, outs[which].id)
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun speaker(on: Boolean) {
         if (calls.isEmpty()) return
-        if (calls.values.any { it.owned }) sendLink(Message.obtain(null, CallLink.SPEAKER, if (on) 1 else 0, 0))
-        else runCatching { audio.isSpeakerphoneOn = on }  // best effort without the role
+        // WM's own Speaker button rarely fires (FakeRIL has no audio devices). When it does, route
+        // the phone the same way as Call audio in the power menu.
+        CallAudio.speaker(ctx, on)
+    }
+
+    /** True when WmInCallService owns the call and was told (CallAudio.onRoute). */
+    private fun sendRoute(route: Int, address: String?): Boolean {
+        if (link == null || (calls.values.none { it.owned } && ring?.token == null)) return false
+        sendLink(Message.obtain(null, CallLink.ROUTE, route, 0).apply {
+            if (address != null) data = Bundle().apply { putString(CallLink.KEY_ADDRESS, address) }
+        })
+        return true
     }
 
     /** Tells WM the real call's progress. */
@@ -592,7 +647,12 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
             guest.send("call state $id $s${if (cause.isNotEmpty()) " $cause" else ""}")
         }
         if (s != "ringing" && calls[id]?.incoming == true) { endRingerOverrides(); endRingUi(s == "active") }
-        if (s == "ended") { calls.remove(id); finishCalls() } else updateWakeLock()
+        if (s == "active" && was != "active") {
+            val call = calls[id]
+            if (call != null && call.connectedAt == 0L) call.connectedAt = System.currentTimeMillis()
+            CallAudio.applySaved(ctx)
+        }
+        if (s == "ended") { calls.remove(id); finishCalls() } else { updateWakeLock(); updatePill() }
     }
 
     private fun finishCalls() {
@@ -601,6 +661,72 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         updateListening()
         updateWakeLock()
         updateFastPoll()
+        cancelPill()
+        if (!foreground) onIdle?.invoke()
+    }
+
+    /** The status chip's Hang up: end the call Windows Mobile is showing. */
+    private fun hangupActive() {
+        val c = calls.values.firstOrNull { it.state == "active" }
+            ?: calls.values.firstOrNull { it.state == "dialing" || it.state == "held" }
+            ?: calls.values.firstOrNull()
+        if (c == null) {
+            ring?.token?.let { sendLink(Message.obtain(null, CallLink.REJECT).withToken(it)) }
+            return
+        }
+        if (c.owned) sendLink(Message.obtain(null, if (c.state == "ringing") CallLink.REJECT else CallLink.DISCONNECT).withToken(c.token))
+        else { endCallWithoutRole(); state(c.id, "ended") }
+    }
+
+    /**
+     * Android's ongoing-call chip (a promoted CallStyle notification). It shows while the call is
+     * up and this app is not in front. The chronometer is Telecom's connect time, the same moment
+     * Windows Mobile's timer started.
+     */
+    private fun updatePill() {
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+        val c = calls.values.firstOrNull { it.state == "dialing" || it.state == "active" || it.state == "held" }
+        val canPost = Build.VERSION.SDK_INT < 33 ||
+            ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        if (c == null || !canPost) { nm.cancel(PILL_NOTE); return }
+        if (nm.getNotificationChannel(PILL_CHANNEL) == null)
+            nm.createNotificationChannel(NotificationChannel(PILL_CHANNEL, "Ongoing call", NotificationManager.IMPORTANCE_LOW).apply {
+                setShowBadge(false)
+                description = "The status chip while a call stays on Windows Mobile"
+            })
+        val open = PendingIntent.getActivity(ctx, 5, Intent(ctx, activity.javaClass).putExtra(EXTRA_CALL, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val hangup = PendingIntent.getBroadcast(ctx, 4,
+            Intent(ctx, CallPillReceiver::class.java).setAction(CallPillReceiver.ACTION_HANGUP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val title = c.number.filter { it.isDigit() || it == '+' }.ifEmpty { "Ongoing call" }
+        val whenMs = if (c.state == "dialing" || c.connectedAt == 0L) System.currentTimeMillis() else c.connectedAt
+        val b = Notification.Builder(ctx, PILL_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_running)
+            .setContentTitle(title)
+            .setContentText(if (c.state == "held") "On hold" else "Windows Mobile")
+            .setCategory(Notification.CATEGORY_CALL)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(open)
+            .setWhen(whenMs)
+            .setUsesChronometer(c.state != "dialing")
+            .setShowWhen(true)
+        if (Build.VERSION.SDK_INT >= 31) {
+            val person = Person.Builder().setName(title).build()
+            b.setStyle(Notification.CallStyle.forOngoingCall(person, hangup))
+        } else {
+            b.addAction(Notification.Action.Builder(null, "Hang up", hangup).build())
+        }
+        // Promoted ongoing (the status-bar pill). The setter is newer than this compile SDK; the extra is the same flag.
+        b.extras.putBoolean("android.requestPromotedOngoing", true)
+        runCatching { if (Build.VERSION.SDK_INT >= 36) b.setShortCriticalText("Call") }
+        runCatching { nm.notify(PILL_NOTE, b.build()) }.onFailure { Log.w(TAG, "call pill", it) }
+    }
+
+    private fun cancelPill() {
+        ctx.getSystemService(NotificationManager::class.java)?.cancel(PILL_NOTE)
     }
 
     // ---- Link to the call process (dialer role) ----
@@ -621,6 +747,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
                         return
                     }
                     val c = calls.values.firstOrNull { it.token == token } ?: return
+                    val connect = m.data.getLong(CallLink.KEY_CONNECT, 0L)
+                    if (connect > 0L) c.connectedAt = connect
                     if (c.incoming && (s == "dialing" || s == "ringing")) return
                     if (s != c.state) state(c.id, s, m.data.getString(CallLink.KEY_CAUSE) ?: "")
                 }
@@ -810,5 +938,16 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
             .setPositiveButton("Restart") { _, _ -> guest.send("patch") }
             .setNegativeButton("Later", null)
             .show()
+    }
+}
+
+/** Hang up on the ongoing-call status chip (CallBridge.updatePill). */
+class CallPillReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == ACTION_HANGUP) CallBridge.endFromPill?.invoke()
+    }
+
+    companion object {
+        const val ACTION_HANGUP = "jp.net.seventhreeseven.wmdroid.CALL_HANGUP"
     }
 }

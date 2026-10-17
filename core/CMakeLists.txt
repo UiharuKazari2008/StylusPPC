@@ -24,6 +24,7 @@ add_library(wmcore STATIC
   src/board/pcmcia.cpp
   src/board/camera.cpp  # WMDroid camera bridge
   src/board/codepatch.cpp  # host fixes to driver code in guest RAM
+  src/board/motion.cpp  # accelerometer for the SEN0: driver
   src/net/usernet.cpp
   src/net/tlsproxy.cpp  # secure web proxy (HTTPS for WM's old TLS), BoringSSL below
   src/net/mwsgate.cpp  # Windows Live Mobile gateway for the built-in WM 6.x client (MSNP to Escargot)

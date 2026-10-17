@@ -53,6 +53,7 @@ object CallLink {
     const val KEEP = 11          // data: token (Windows Mobile rings for this incoming call)
     const val RELEASE = 12       // data: token (Windows Mobile cannot ring: the phone's dialer takes it)
     const val SHOWING = 13       // arg1: 1 while the emulator can ring and show incoming calls
+    const val ROUTE = 14         // arg1: CallAudioState route, data: Bluetooth address when it is one device
     // call -> main
     const val STATE = 101        // data: token, state, cause
     const val AUDIO = 102        // arg1: muted, arg2: CallAudioState route
@@ -63,6 +64,8 @@ object CallLink {
     const val KEY_STATE = "state"
     const val KEY_CAUSE = "cause"
     const val KEY_NUMBER = "number"
+    const val KEY_ADDRESS = "address"
+    const val KEY_CONNECT = "connect"   // connectTimeMillis, with an active or held call
 
     fun token(m: Message): String? = m.data?.getString(KEY_TOKEN)
 }
@@ -188,6 +191,7 @@ class WmInCallService : InCallService() {
                 putString(CallLink.KEY_TOKEN, token)
                 putString(CallLink.KEY_STATE, state)
                 putString(CallLink.KEY_CAUSE, cause)
+                if (state == "active" || state == "held") putLong(CallLink.KEY_CONNECT, call.details.connectTimeMillis)
             }
         })
     }
@@ -198,6 +202,7 @@ class WmInCallService : InCallService() {
             CallLink.DISCONNECT -> CallLink.token(m)?.let { owned[it] }?.disconnect()
             CallLink.MUTE -> setMuted(m.arg1 != 0)
             CallLink.SPEAKER -> setAudioRoute(if (m.arg1 != 0) CallAudioState.ROUTE_SPEAKER else CallAudioState.ROUTE_WIRED_OR_EARPIECE)
+            CallLink.ROUTE -> routeAudio(m.arg1, m.data?.getString(CallLink.KEY_ADDRESS))
             CallLink.HOLD -> CallLink.token(m)?.let { owned[it] }?.let { if (m.arg1 != 0) it.hold() else it.unhold() }
             CallLink.DTMF -> CallLink.token(m)?.let { owned[it] }?.let { it.playDtmfTone(m.arg1.toChar()); it.stopDtmfTone() }
             CallLink.HANDOFF -> handOff("asked by the emulator")
@@ -209,6 +214,19 @@ class WmInCallService : InCallService() {
             }
             CallLink.RELEASE -> if (CallLink.token(m)?.let { owned.containsKey(it) } == true) handOff("Windows Mobile cannot ring")
         }
+    }
+
+    /**
+     * Earpiece, speaker, wired headset, or one Bluetooth device (CallAudio). On Android 14 a
+     * specific device is requested after the route, so several connected headsets can be told apart.
+     */
+    private fun routeAudio(route: Int, address: String?) {
+        setAudioRoute(route)
+        if (route != CallAudioState.ROUTE_BLUETOOTH || address.isNullOrEmpty() || android.os.Build.VERSION.SDK_INT < 34) return
+        val dev = runCatching {
+            getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter?.getRemoteDevice(address)
+        }.getOrNull() ?: return
+        runCatching { requestBluetoothAudio(dev) }.onFailure { Log.w(TAG, "Bluetooth audio $address refused", it) }
     }
 
     /** The emulator went away while a Windows Mobile call is up. */
