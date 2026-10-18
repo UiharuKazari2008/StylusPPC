@@ -84,7 +84,11 @@ class PhoneStatus(private val ctx: Context) {
         val bars = if (Build.VERSION.SDK_INT >= 29) runCatching { tm.signalStrength?.let { bars(it) } }.getOrNull() ?: signalBars else signalBars
         val caps = cm.getNetworkCapabilities(cm.activeNetwork)
         val onWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        val wifiBars = if (onWifi) wifiLevel() else 0
+        val wifiBars = if (onWifi) stableWifi(wifiLevel()) else {
+            wifiShown = -1
+            wifiPendN = 0
+            0
+        }
         return Snapshot(
             service = inService,
             signal = if (inService) bars.coerceIn(0, 4) else 0,
@@ -161,6 +165,22 @@ class PhoneStatus(private val ctx: Context) {
         name = name.replace('\n', ' ').replace('\r', ' ').trim()
         if (name.isEmpty() || name == "<unknown ssid>" || name == "0x") return ""
         return if (name.length > 32) name.substring(0, 32) else name
+    }
+
+    // RSSI sits on a bar boundary and flips 3/4 every read. Report a new bar only after it holds.
+    private var wifiShown = -1
+    private var wifiPend = -1
+    private var wifiPendN = 0
+
+    private fun stableWifi(level: Int): Int {
+        if (wifiShown < 0 || level == wifiShown) {
+            if (wifiShown < 0) wifiShown = level
+            wifiPendN = 0
+            return wifiShown
+        }
+        if (level != wifiPend) { wifiPend = level; wifiPendN = 1 } else wifiPendN++
+        if (wifiPendN >= 3) { wifiShown = level; wifiPendN = 0 }
+        return wifiShown
     }
 
     private fun wifiLevel(): Int {

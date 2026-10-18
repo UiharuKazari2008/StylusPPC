@@ -140,6 +140,17 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         settings.migrate()
         CardDrop.start(this)  // PC drop window can put a CAB on the storage card
         guest = GuestBridge(this, settings, this)
+        // Status and the clipboard/keyboard watch are one line each and need no answer. They go on the
+        // link, not the mailbox, so a sleep or a flickering signal cannot fill it and cycle the card.
+        guest.command = { line ->
+            val h = handle
+            if (h == 0L) false else { NativeBridge.hostCmdSend(h, line); true }
+        }
+        guest.sideband = { line ->
+            val h = handle
+            if (h == 0L) false else { NativeBridge.hostStatSend(h, line); true }
+        }
+        guest.bulk = { data -> pushBulk(data) }
         secureProxy = SecureProxy(this, guest) { handle }
         bluetooth = BluetoothBridge(this, settings, guest, ui).apply { start() }
         calls = CallBridge(this, guest) { handle }
@@ -739,6 +750,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 updateGps()
                 checkHung()
                 guest.poll()  // first: what the helper said while we were away counts before checkHelper
+                if (handle != 0L) {
+                    while (true) {
+                        val chunk = NativeBridge.hostBulkTake(handle) ?: break
+                        pim.acceptChunk(chunk)
+                    }
+                    val cmds = NativeBridge.hostCmdTake(handle)
+                    if (cmds.isNotEmpty()) guest.ingest(cmds)
+                    val stats = NativeBridge.hostStatTake(handle)
+                    if (stats.isNotEmpty()) guest.ingest(stats)
+                }
                 checkHelper()
                 secureProxy.tick(guest.helperResponsive())  // certificate warnings to WM's dialog (SecureProxy)
                 updateDisplayOff()
@@ -760,14 +781,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 guest.syncTimeZone()
                 syncPlayback()
                 // Mirror the phone's radio/Wi-Fi state into the guest every few seconds (on change).
-                if (statusTicks++ % 3 == 0) {
-                    val snap = phone.read()
-                    if (settings.skinCarrier.isBlank()) skin.carrier = if (snap.service) snap.operator else ""
-                    val line = snap.encode()
-                    if (line != lastStatus) { lastStatus = line; guest.send(line) }
-                    // WM 6 / 6.1 / 6.1.4: the same state for the RIL, through the virtual modem on COM1.
-                    NativeBridge.modemNetwork(handle, snap.service, snap.signal, snap.roaming, snap.operator, snap.numeric, snap.data, myNumber)
-                }
+                if (statusTicks++ % 3 == 0) pushPhoneStatus(false)
                 if (booting && NativeBridge.bootComplete(handle)) {
                     booting = false
                     guest.setRunning(shouldRun())  // the helper can read now; commands were held until this
@@ -845,7 +859,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (audioKind != "media") releaseService()
         saveThread?.join()
         if (hibernated) wake()
-        if (handle != 0L) NativeBridge.setCpuLimit(handle, 100)
+        if (handle != 0L) {
+            NativeBridge.setCpuLimit(handle, 100)
+            NativeBridge.setPresenting(handle, true)
+        }
         layoutTracker.addWindowLayoutInfoListener(this, androidx.core.content.ContextCompat.getMainExecutor(this), layoutListener)
         // The guest itself starts in onResume, after any settings result (which may recreate).
     }
@@ -1075,6 +1092,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         bluetooth.stop()
         calls.stop()
         pim.stop()
+        guest.stopNet()
         sms.stop()
         unregisterReceiver(screenReceiver)
         if (BackgroundService.onSuspend === notificationSuspend) BackgroundService.onSuspend = null
@@ -1410,6 +1428,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
             val off = intent.action == Intent.ACTION_SCREEN_OFF
+            // Before anything else: a swap with the screen off blocks the guest until the phone wakes.
+            if (handle != 0L) NativeBridge.setPresenting(handle, !off)
             if (off && settings.lockOnScreenOff && shouldRun() && !musicPlaying()) sendLock()
             if (serviceOn && handle != 0L && !calls.inCall() && !musicPlaying())
                 NativeBridge.setCpuLimit(handle, backgroundCpu(off))
@@ -1562,62 +1582,54 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private var helperKickAt = 0L
     private var helperKicks = 0
     private var helperAsked = false
+    /** Last [NativeBridge.guestSlices] seen. Unchanged means the emulation thread is stuck presenting. */
+    private var guestSlices = -1L
+    private var guestStalled = false
 
     /**
-     * The helper stopped answering while commands wait for it (it died, e.g. during an update):
-     * take the storage card out and put it back. Windows Mobile runs the card's autorun on
-     * insertion, which starts the helper again. At most once a minute.
+     * The helper stopped answering while a real command waits. Pulling the card restarts autorun,
+     * but it closes every open file and Windows Mobile locks. The helper restarts itself when its
+     * own loop is wedged. If the process is gone, ask before restarting Windows Mobile.
      */
     private fun checkHelper() {
         val h = handle
         if (h == 0L || booting || userPaused || !NativeBridge.bootComplete(h) || NativeBridge.guestHung(h)) return
         if (sms.isFiling()) return  // pulling the card while texts are being filed locks Windows Mobile
         if (NativeBridge.guestAsleep(h)) { if (foreground) wakeGuestDisplay(); return }  // standby, not a dead helper
+        // The phone is asleep, or the emulation thread is blocked in a swap: the helper cannot
+        // answer, and pulling the card out from under it locks Windows Mobile.
+        val screenOff = getSystemService(PowerManager::class.java)?.isInteractive == false
+        val slices = NativeBridge.guestSlices(h)
+        if (screenOff || guestSlices < 0) { guestSlices = slices; return }
+        if (slices == guestSlices) { guestStalled = true; guestSlices = slices; return }
+        if (guestStalled) { guestStalled = false; guest.markAlive() }
+        guestSlices = slices
         val now = android.os.SystemClock.uptimeMillis()
         if (helperKicks > 0 && guest.lastHeard > helperKickAt) { helperKicks = 0; helperAsked = false }  // it came back
         // The helper's pulse is every 5 s of Windows Mobile time. A slowed guest (background speed)
         // stretches that on the phone's clock, so the wait stretches by the same amount.
-        val screenOff = getSystemService(PowerManager::class.java)?.isInteractive == false
-        val share = if (foreground || calls.inCall() || musicPlaying()) 100 else backgroundCpu(screenOff)
+        val share = if (foreground || calls.inCall() || musicPlaying()) 100 else backgroundCpu(false)
         val budget = (70_000L * 100 / share.coerceAtLeast(10)).coerceAtMost(8 * 60_000L)
-        if (guest.pendingCommands() == 0 || now - guest.lastHeard < budget || now - helperKickAt < 60_000) return
+        // An idle helper sends no pulse, so last-heard can be minutes old while it is healthy.
+        // Only a real command that has itself been waiting out the budget means it is gone.
+        val waiting = guest.pendingWaitMs()
+        if (waiting < budget || now - helperKickAt < 60_000) return
         helperKickAt = now
-        // (The helper restarts itself after 45 s stuck, so this is for a helper that is gone.)
-        // Second time in a row: the card trick didn't bring it back; a Windows Mobile restart will
-        // (the helper starts with the system). Ask first: open programs close.
-        if (helperKicks++ >= 1) {
-            if (helperAsked) return
-            helperAsked = true
-            com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                .setTitle("PocketStylus helper isn't running")
-                .setMessage("Windows Mobile's helper stopped, so the lock key, rotation, settings and sync can't reach " +
-                    "it. Restart Windows Mobile to start it again? Open programs close; your files and settings stay.")
-                .setPositiveButton("Restart") { _, _ ->
-                    if (handle != 0L) NativeBridge.softReset(handle)
-                    helperKicks = 0
-                    helperAsked = false
-                }
-                .setNegativeButton("Later", null)
-                .show()
-            return
-        }
-        Log.w(TAG, "guest helper silent with ${guest.pendingCommands()} commands waiting: re-inserting the card")
-        reinsertCard(h)
-    }
-
-    /**
-     * Takes the storage card out and puts it back 2.5 s later: WM runs the card's autorun again
-     * (starting a helper that is gone) and mounts it as \Storage Card again.
-     */
-    private fun reinsertCard(h: Long) {
-        NativeBridge.setShareMounts(h, arrayOf(), arrayOf())
-        ui.postDelayed({
-            if (handle != h) return@postDelayed
-            val mounts = StorageBridge.mounts(this, settings)
-            NativeBridge.setShareMounts(h, mounts.map { it.first }.toTypedArray(), mounts.map { it.second }.toTypedArray())
-            val o = guest.overlays()
-            NativeBridge.setShareOverlays(h, o.map { it.first }.toTypedArray(), o.map { it.second }.toTypedArray())
-        }, 2500)
+        helperKicks = 1
+        if (helperAsked) return
+        helperAsked = true
+        Log.w(TAG, "guest helper silent with ${guest.pendingCommands()} commands waiting")
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle("PocketStylus helper isn't running")
+            .setMessage("Windows Mobile's helper stopped, so the lock key, rotation, settings and sync can't reach " +
+                "it. Restart Windows Mobile to start it again? Open programs close; your files and settings stay.")
+            .setPositiveButton("Restart") { _, _ ->
+                if (handle != 0L) NativeBridge.softReset(handle)
+                helperKicks = 0
+                helperAsked = false
+            }
+            .setNegativeButton("Later", null)
+            .show()
     }
 
     /** Cold boot: no saved state at all; Windows Mobile boots from its ROM like a new device. */
@@ -1946,14 +1958,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onGuestTls(line: String) = secureProxy.onGuest(line)  // a certificate warning's answer
 
-    /** The helper runs, but on a card WM named \Storage Card2 (the name was taken): re-insert it. */
+    /** The helper found the card under another name. Leave it mounted; pulling it locks Windows Mobile. */
     override fun onGuestRemount() {
-        val h = handle
-        val now = android.os.SystemClock.uptimeMillis()
-        if (h == 0L || now - helperKickAt < 60_000) return
-        helperKickAt = now
-        Log.i(TAG, "guest card mounted under another name: re-inserting it")
-        reinsertCard(h)
+        if (handle == 0L) return
+        Log.i(TAG, "guest card mounted under another name; leaving it mounted")
     }
 
     /** Clipboard reads need window focus; the phone's keyboard shows only with it. */
@@ -1971,6 +1979,44 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             ownUi = false
             Toast.makeText(this, "Could not send $name over Bluetooth", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /** Contact/calendar bytes, 1792 at a time. Retries while 64 chunks are already waiting. */
+    private fun pushBulk(data: ByteArray): Boolean {
+        val h = handle
+        if (h == 0L) return false
+        var off = 0
+        val cap = 1792
+        do {
+            val n = minOf(cap, data.size - off)
+            val last = off + n >= data.size
+            val slice = data.copyOfRange(off, off + n)
+            var spins = 0
+            while (!NativeBridge.hostBulkPut(h, slice, last)) {
+                if (++spins > 250) return false
+                Thread.sleep(20)
+            }
+            off += n
+            if (data.isEmpty()) break
+        } while (off < data.size)
+        return true
+    }
+
+    /** Radio, Wi-Fi and the virtual modem. [force] resends even when the line has not changed. */
+    private fun pushPhoneStatus(force: Boolean) {
+        if (handle == 0L) return
+        val snap = phone.read()
+        if (settings.skinCarrier.isBlank()) skin.carrier = if (snap.service) snap.operator else ""
+        val line = snap.encode()
+        if (force || line != lastStatus) { lastStatus = line; guest.tell(line) }
+        // WM 6 / 6.1 / 6.1.4: the same state for the RIL, through the virtual modem on COM1.
+        NativeBridge.modemNetwork(handle, snap.service, snap.signal, snap.roaming, snap.operator, snap.numeric, snap.data, myNumber)
+    }
+
+    override fun onGuestSync() {
+        guest.syncTimeZone(force = true)
+        pushPhoneStatus(true)
+        guest.order("result sync")
     }
 
     override fun onGuestHello() {

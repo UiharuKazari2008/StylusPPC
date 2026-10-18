@@ -2,7 +2,7 @@
 
 **Native Pocket PC and Windows Mobile hypervisor for Android.**
 
-PocketStylus boots the original, unmodified Windows Mobile ROM images that Microsoft shipped for its Device Emulator: Windows Mobile 5.0, 6.1.4 and 6.5.3. It runs them full-screen on a modern Android phone, and your phone becomes the Windows Mobile device. Its battery, signal, carrier, Wi-Fi, GPS, camera, speaker, vibration motor, clipboard, keyboard, wallpaper, colour theme and phone line all show up inside Windows Mobile as that device's own hardware.
+PocketStylus boots the original, unmodified Windows Mobile ROM images that Microsoft shipped for its Device Emulator: Windows Mobile 5.0, 6.1.4, 6.5 and 6.5.3. It runs them full-screen on a modern Android phone, and your phone becomes the Windows Mobile device. Its battery, signal, carrier, Wi-Fi, GPS, camera, speaker, vibration motor, clipboard, keyboard, wallpaper, colour theme and phone line all show up inside Windows Mobile as that device's own hardware.
 
 It was built and tuned on a Galaxy Z Fold7. On a foldable, opening the phone turns it into an Xperia X1-style slider with a landscape screen above a hardware keyboard.
 
@@ -41,7 +41,7 @@ Microsoft's Device Emulator (DE) was a Windows-only x86 program, and it was neve
 - **A full ARM computer, written from scratch.** DE emulates a Samsung SMDK2410 development board: an ARM920T-class CPU, the S3C2410 system-on-chip (interrupt controller, timers, DMA, LCD, touch ADC, UARTs, GPIO, RTC, sleep logic), AMD CFI NOR flash, a PCMCIA bridge with an NE2000 network card, and a set of DE-only devices for battery, LEDs, audio and folder sharing. PocketStylus re-implements every one of them in portable C++ (about 11,000 lines in `core/` and the native app layer). Each register was rebuilt from documentation and from observing the guest. DE's own source code is under an academic, Windows-only licence, so not one line of it is used (see `docs/research-de-hardware.md`).
 - **A CPU fast enough to be pleasant.** A naive ARMv5TE interpreter gave about 21 MIPS; Windows Mobile 6.5 needs far more to feel like a phone. The core has an ARM64 JIT with a software TLB, block chaining and inlined fast paths. It runs at 380–420 MIPS under load and peaks around 800. A lockstep `--compare` mode checks it against the interpreter instruction by instruction. Cold boot to the home screen takes about 30 seconds. Resuming a saved session takes under one second.
 - **A phone battery is not a desktop PC.** Windows Mobile ticks its scheduler 1,000 times a second, and an emulator that faithfully wakes 1,000 times a second keeps a phone's CPU from ever sleeping. When Windows Mobile is halted, PocketStylus batches that tick into the 16 ms frame and replays the owed ticks, so a quiet screen does not wake the phone a thousand times a second. It presents only the screen rows that changed, reports real work to Android's performance hints, and steps down when nothing happens.
-- **An operating system that never knew Android existed.** To make Windows Mobile believe the phone's hardware is its own, PocketStylus runs a small agent inside the guest: a .NET Compact Framework 3.5 helper, plus a hand-built native ARM bootstrap that installs .NET CF 3.5 silently on releases that lack it. The agent and the app talk through a mailbox on an emulated storage card. To make everything feel native, the project had to reverse-engineer undocumented Windows Mobile behaviour:
+- **An operating system that never knew Android existed.** To make Windows Mobile believe the phone's hardware is its own, PocketStylus runs a small agent inside the guest: a .NET Compact Framework 3.5 helper, plus a hand-built native ARM bootstrap that installs .NET CF 3.5 silently on releases that lack it. The agent and the app talk through a sideband in the emulated machine and a TCP link on the virtual network. The storage-card mailbox remains for the helper while it is starting. To make everything feel native, the project had to reverse-engineer undocumented Windows Mobile behaviour:
   - how the title bar picks the G / E / 3G / H / 1X / Ev icon;
   - how Titanium caches wallpapers;
   - how the WM 5 colour engine recolours the shell;
@@ -60,15 +60,17 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 | Release | Image needed | Notes |
 |---|---|---|
 | **Windows Mobile 6.5.3 Professional** | `PPC_USA_GSM_FWVGA_VR.BIN` (optional: `PPC_USA_GSM_WVGA_VR.BIN`) | Main target. Titanium home screen, FakeRIL radio, everything below works. The optional WVGA image is what 480×800 boots, so the Start button does not stick and HTC games fit. |
+| **Windows Mobile 6.5 Professional** | `PPC_USA_GSM_WVGA_VR.BIN` (optional: VGA, WQVGA, square, QVGA) | Original 6.5 (build 5.2.21234), before 6.5.3. Titanium home screen at 480×800. Its radio is the virtual GSM modem, the same path as 6.1.4. .NET CF 3.5 is installed on first boot. The phone shape stays at 480×800 (a taller screen, such as 852 or 854, has no Titanium layout). |
 | **Windows Mobile 6.1.4 Professional** | `PPC_USA_GSM_480x800.BIN` | .NET CF 3.5 is installed automatically on first boot. Its radio is PocketStylus's virtual GSM modem. |
 | **Windows Mobile 5.0 Pocket PC Phone** | `PPC_USA_GSM_VGA_VR.BIN` | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM (the default). |
 | **Windows Mobile 6.5.3 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_WVGA_VR.bin`) | Keypad edition: soft keys, D-pad, Talk/End and digits on the skin or the phone's own keys. The WVGA image is sharper, but its call screen draws garbled. |
+| **Windows Mobile 6.5 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_320x320_VR.bin`) | Original 6.5 keypad edition. The QVGA image is landscape 320×240; the other is 320×320. Calls go through the virtual GSM modem. The home screen draws, then its items disappear and leave the wallpaper. |
 | **Windows Mobile 6.1.4 Standard** | `SP_USA_GSM_QVGA_VR.bin` | Calls through the virtual GSM modem. .NET CF 3.5 is installed automatically. |
 | **Windows Mobile 5.0 Smartphone** | `SP_USA_GSM_QVGA_VR.bin` | Runs at 240×400, 240×320 or 320×240. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM or more. |
 
 Each Professional release needs just one image: the board tells Windows Mobile its screen size at boot, so Device Settings → **Screen resolution** runs it at your phone's shape (default), 480×854, 480×800, 480×640 or 480×480. Standard releases offer their own sizes (240×320, 320×320, 320×240, and more where an image allows). Each release keeps its own saved sessions and device settings, so you can switch between them without losing anything.
 
-**Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by the keypad: the keypad skin, the phone's hardware keys (for example on an Android flip phone), or taps on the screen (soft-key bar taps press the soft keys, swipes move the D-pad, other taps press Action). Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family.
+**Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by the keypad: the keypad skin, the phone's hardware keys (for example on an Android flip phone), or taps on the screen (soft-key bar taps press the soft keys, swipes move the D-pad, other taps press Action). 6.5 is the original release (Titanium, virtual GSM modem); 6.5.3 is the later Developer Tool Kit (FakeRIL). Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family.
 
 ---
 
@@ -90,8 +92,8 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Microphone | ✅ | Opened only while WM records |
 | Notification LED, vibration | ✅ | DE LED device → skin light, phone vibrator |
 | Camera (stills, video) | ✅ | Camera device + `wmdcam.dll`, Camera2 |
-| GPS | ✅ | NMEA on COM1 |
-| Cellular radio: signal, carrier, data type | ✅ | FakeRIL (5.0, 6.5.3) / virtual GSM modem (6.1.4) |
+| GPS | ✅ | NMEA on COM1 (6.5.3, 5.0) or COM4 (6.1.4, original 6.5) |
+| Cellular radio: signal, carrier, data type | ✅ | FakeRIL (5.0, 6.5.3) / virtual GSM modem (6.1.4, 6.5) |
 | Phone calls in and out | ✅ | Through Android Telecom |
 | SMS in and out | ✅ | Modem `+CMT` / helper |
 | MMS | 🟡 | Receive pictures only; sending ❌ |
@@ -109,8 +111,8 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 
 | Feature | Status |
 |---|---|
-| Windows Mobile 6.5.3 Pro, 6.1.4 Pro, 5.0 Pocket PC Phone | ✅ |
-| Windows Mobile 6.5.3 / 6.1.4 Standard, 5.0 Smartphone (keypad only, [#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) | ✅ new in 1.0.4 (`docs/research-standard.md`) |
+| Windows Mobile 6.5.3 Pro, 6.5 Pro, 6.1.4 Pro, 5.0 Pocket PC Phone | ✅ 6.5 Pro is new in 1.0.7 |
+| Windows Mobile 6.5.3 / 6.5 / 6.1.4 Standard, 5.0 Smartphone (keypad only, [#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) | ✅ 6.5.3, 6.1.4 and 5.0 in 1.0.4; 6.5 Standard in 1.0.7 (`docs/research-standard.md`) |
 | WM 6.0 / 6.1, 2003 SE | ❌ (6.0/6.1 run but aren't offered; 2003 SE doesn't boot) |
 | Android 8.0 or newer ([#1](https://github.com/UiharuKazari2008/StylusPPC/issues/1)) | ✅ |
 | Snapshots, quick resume, Savepoint, warm reboot | ✅ |
@@ -123,7 +125,7 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Contacts and calendar sync | ✅ |
 | Tasks and notes sync | ❌ |
 | Launcher mode, Android Apps folder, app dock | ✅ |
-| .NET Compact Framework 3.5 (auto-installed on 5.0/6.1.4) | ✅ |
+| .NET Compact Framework 3.5 (auto-installed on 5.0, 6.1.4 and original 6.5) | ✅ |
 | Windows Live Messenger via Escargot: Messenger / Passport names to Escargot through the secure web proxy, for classic MSNP clients (`docs/research-escargot.md`) | 🟡 |
 | Built-in Windows Live (6.5.3, 6.1.4) on Escargot, through PocketStylus's own Windows Live Mobile gateway | 🟡 sign-in works; contacts and chat in progress |
 | Built-in Pocket MSN (5.0) on Escargot | ❌ |
@@ -137,9 +139,10 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 1. Install the latest APK from the [Download](#download) links above.
 2. **Get the ROM images.** They are Microsoft's and are not included in PocketStylus. Download the [Windows Mobile Emulation Images Archive](https://archive.org/details/windows-mobile-emulation-images-archive.-7z) from the Internet Archive and extract it with 7-Zip. The images PocketStylus uses are in each release's `Emulation Images` folder under `ARM-based/`:
    - `Windows Mobile 6.5.3 Professional/Emulation Images` (also copy `PPC_USA_GSM_WVGA_VR.BIN` from the Standard images if you want 480×800, including HTC games and "Resize screen for dock")
+   - `Windows Mobile 6.5 Professional/Emulation Images` (`PPC_USA_GSM_WVGA_VR.BIN` is the one a phone uses; the other sizes are optional)
    - `Windows Mobile 6.1.4 Professional/Emulation Images`
    - `Windows Mobile 5.0 (Pocket PC)/Emulation Images`
-   - for the keypad editions: `Windows Mobile 6.5.3 Standard`, `Windows Mobile 6.1.4 Standard` and `Windows Mobile 5.0 (Smartphone)`, each in its `Emulation Images` folder
+   - for the keypad editions: `Windows Mobile 6.5.3 Standard`, `Windows Mobile 6.5 Standard`, `Windows Mobile 6.1.4 Standard` and `Windows Mobile 5.0 (Smartphone)`, each in its `Emulation Images` folder
 
    (They originally shipped with the *Windows Mobile 6.5.3 Developer Tool Kit*, the *Windows Mobile 6 SDK* image packages and the *Windows Mobile 5.0 SDK*.)
 3. Open PocketStylus. In the OS list:
@@ -182,6 +185,7 @@ Each section below expands to show how the feature works.
 - **Idle coalescing:** while the guest is halted, the host sleeps to the end of the 16 ms slice instead of waking for every 1 ms tick, then delivers the owed PWM timer ticks one by one. Guest time stays exact.
 - Audio DMA keeps its own clock. The sleep never runs past the next audio event, so playback stays in time.
 - The OpenGL presenter uploads only the rows that changed since the last frame and asks for 60 Hz with `ANativeWindow_setFrameRate`.
+- With the phone's screen off, a frame swap gives up after 50 ms instead of waiting for the compositor. Windows Mobile keeps running until the screen comes back.
 - Android performance hints: a frame that fills 16 ms is on time, so the CPU can leave the top clock. A touch, rotation, or layout change reports past the target and the clock rises for the redraw. Nice 0 and no hints after a second of idling.
 - Background modes: keep running (music keeps playing at full speed), suspend, or hibernate to a save after a timer.
 </details>
@@ -189,7 +193,7 @@ Each section below expands to show how the feature works.
 <details>
 <summary><b>Display: phone-shaped screens, rotation and screen-off</b></summary>
 
-- Windows Mobile reads its screen size from the bootloader's arguments, which PocketStylus writes. Each release boots at your phone's own shape (for example 480×854) even when Microsoft only shipped 480×640 or 480×800 images.
+- Windows Mobile reads its screen size from the bootloader's arguments, which PocketStylus writes. Each release boots at your phone's own shape (for example 480×854) even when Microsoft only shipped 480×640 or 480×800 images. Original 6.5 Professional has no Titanium layout above 480×800, so the phone shape and an explicit 854 stay at 800.
 - **Auto-rotate** follows the accelerometer, with delay and sensitivity sliders. The helper turns Windows Mobile with `ChangeDisplaySettingsEx`, and the wallpaper stays put.
 - **Lock Android on screen off:** when Windows Mobile turns its display off, the phone locks too, using a device-admin lock. Opening the app or unlocking the phone wakes Windows Mobile again, with the power button if it was in standby.
 - Upscaling filters: smooth, sharp pixels or enhanced.
@@ -228,22 +232,22 @@ Each section below expands to show how the feature works.
 <details>
 <summary><b>Status bar: battery, signal, carrier, data type, Wi-Fi</b></summary>
 
-- **Your phone number:** on WM 5.0 and 6.5.3 the emulator core rewrites FakeRIL's built-in fake SIM number with yours before the radio starts; on 6.1.4 the virtual modem reports it. It shows in Phone → Menu → Options. It comes from the SIM, or from **My phone number** in the Phone calls settings, and a change shows after the next Windows Mobile restart.
+- **Your phone number:** on WM 5.0 and 6.5.3 the emulator core rewrites FakeRIL's built-in fake SIM number with yours before the radio starts; on 6.1.4 and the original 6.5 the virtual modem reports it. It shows in Phone → Menu → Options. It comes from the SIM, or from **My phone number** in the Phone calls settings, and a change shows after the next Windows Mobile restart.
 - **Battery:** DE's battery device reports the phone's real charge, charging state and temperature. In-memory patches fix the thresholds in Microsoft's `battdrvr.dll`, which otherwise warned "Main battery low" at 65%.
 - **Signal, carrier, roaming and data type:** written to `HKLM\System\State\Phone` from Android's telephony state.
 - **Network Indicator Type:** shows GSM letters (G / E / 3G / H) or CDMA letters (1X / Ev). A wired-network override that hid the letters is cleared by the helper.
-- The Wi-Fi icon and signal follow the phone's Wi-Fi.
+- The Wi-Fi icon and signal follow the phone's Wi-Fi. A new bar is shown only after it holds, so a reading that sits on a boundary does not flicker.
 - See `docs/research-status-indicators.md` for the title bar's full icon logic.
 </details>
 
 <details>
 <summary><b>Internet, storage card and GPS</b></summary>
 
-- **Internet:** an emulated NE2000 PCMCIA card on PocketStylus's own user-mode NAT (guest 10.0.2.15, gateway .2, DNS .3). The helper provisions Connection Manager so Internet Explorer and apps just work.
+- **Internet:** an emulated NE2000 PCMCIA card on PocketStylus's own user-mode NAT (guest 10.0.2.15, gateway .2, DNS .3). The helper provisions Connection Manager so Internet Explorer and apps just work. The card used to claim TCP checksum offload and then drop every segment that carried data. The helper turns that offload off, so pages and downloads get through. A session patched by an older helper restarts once so the stack reads the new setting.
 - **Storage card:** a DE folder-share device mounts a phone folder (or several chosen folders, overlaid into one card root) as `\Storage Card`. Folders are managed from the Storage Card page in Windows Mobile's settings, using a folder browser for the phone's storage.
 - **Modern HTTPS (Secure Web Proxy):** IE Mobile and other programs only speak SSL 3.0 / TLS 1.0, which today's sites refuse. With the setting on, PocketStylus installs its own certificate authority in Windows Mobile (made on the phone, never leaves it) and terminates the guest's old TLS, then connects onwards with modern TLS (BoringSSL) and checks the real site's certificate. A bad certificate shows a Windows Mobile "Security Warning" with Yes/No: Yes allows that site's exact certificate for the session. See `docs/research-tls-proxy.md`.
 - **Windows Live Messenger via Escargot:** Microsoft's Messenger and Passport names lead to [Escargot](https://escargot.chat) instead, for classic MSN Messenger clients. The built-in Windows Live client (6.5.3, 6.1.4) speaks Microsoft's mobile gateway protocol, so PocketStylus answers it with its own gateway, which signs in to Escargot over MSNP (sign-in works; contacts and chat are next). See `docs/research-escargot.md`.
-- **GPS:** the phone's location as an NMEA receiver on COM1 (GGA, GSA, GSV and RMC once a second), where Windows Mobile's GPS Intermediate Driver reads it. Location is used only while a program has the port open.
+- **GPS:** the phone's location as an NMEA receiver (GGA, GSA, GSV and RMC once a second). Windows Mobile 6.5.3 and 5.0 read it on COM1. On 6.1.4 and the original 6.5, COM1 is the radio, so the same sentences go to COM4. Location is used only while a program has that port open.
 - **CAB drop:** while Windows Mobile is open, `python tools/cab-drop.py` on a PC on the same network finds the phone and writes one cabinet onto `\Storage Card` (port 7377). PocketStylus does not install the cabinet; it only places the file.
 </details>
 
@@ -266,9 +270,9 @@ Each section below expands to show how the feature works.
 </details>
 
 <details>
-<summary><b>Virtual GSM modem (Windows Mobile 6.1.4)</b></summary>
+<summary><b>Virtual GSM modem (Windows Mobile 6.1.4 and 6.5)</b></summary>
 
-- WM 6.1.4 ships Microsoft's real GSM radio driver (`rilgsm.dll`), which expects a modem on the serial port. PocketStylus emulates that modem (`core/src/board/modem.cpp`) and speaks the AT dialect the driver uses. The helper points the driver at COM1 once.
+- WM 6.1.4 and the original WM 6.5 ship Microsoft's real GSM radio driver (`rilgsm.dll`), which expects a modem on the serial port. (6.5.3 replaced it with FakeRIL.) PocketStylus emulates that modem (`core/src/board/modem.cpp`) and speaks the AT dialect the driver uses. The helper points the driver at COM1 once, and moves GPS to COM4 so the radio can keep COM1.
 - The modem reports your phone's real signal bars, registration, roaming, operator name and own number. Calls dialled in Windows Mobile reach the modem as `ATD`, and the app places them through Android.
 - Your number comes from the SIM (permission "read phone numbers", asked only when calls are on), or from **My phone number** in the Phone calls settings. Windows Mobile reads it when the radio starts, and shows it in Phone → Menu → Options.
 </details>
@@ -276,7 +280,8 @@ Each section below expands to show how the feature works.
 <details>
 <summary><b>Phone calls from Windows Mobile's own dialer</b></summary>
 
-- Turning calls on lets WM 6.5's FakeRIL load. The helper becomes a second RIL client, sees each call the Phone app dials, and the app places the real call through Android Telecom.
+- On 6.5.3, turning calls on lets FakeRIL load. The helper becomes a second RIL client, sees each call the Phone app dials, and the app places the real call through Android Telecom. The original 6.5 dials through the virtual modem instead, the same way 6.1.4 does.
+- On a taller screen the phone keypad stays its own size. Only the portrait background behind the call list stretches.
 - A small in-memory patch holds FakeRIL's dial thread, so Windows Mobile's call screen goes Dialing → Connected exactly when the real call does. Ending, holding or muting on either side is mirrored to the other.
 - With **Use Windows Mobile's call screen** (the default-phone-app role), calls stay entirely inside Windows Mobile. Without it, Android's call screen opens and PocketStylus comes back to the front.
 - **Incoming calls** ring on Windows Mobile's own Phone screen: Answer, Ignore and End there act on the real call, and answering or ending on Android stops the ring. **Use Phone's Ringer** (Settings → Phone calls) chooses whether Windows Mobile plays its ringtone (through Android's ringtone volume) or stays quiet while Android rings as usual.
@@ -288,7 +293,7 @@ Each section below expands to show how the feature works.
 <summary><b>Text messages (SMS/MMS), contacts and calendar</b></summary>
 
 - **SMS both ways:** texts the phone receives land in Windows Mobile's own inbox, with its sound and notification, and texts sent from Windows Mobile go out through the phone.
-  - WM 6.1.4 and earlier 6.x: through the virtual modem, as real `+CMT` SMS.
+  - WM 6.1.4 and the original 6.5: through the virtual modem, as real `+CMT` SMS.
   - WM 6.5.3: through the helper and WM's messaging API.
   - Long messages are split and joined correctly.
   - **Defer Incoming SMS Messages** holds texts while Windows Mobile isn't in front.
@@ -373,12 +378,12 @@ Installing stages that package onto the storage card and the helper copies it in
 <details>
 <summary><b>Inside Windows Mobile: the helper, its settings app and self-repair</b></summary>
 
-- `guest/Helper` is a .NET CF 3.5 program, `WMDroid.exe`, started from the storage card's autorun. It installs itself, adds a StartUp entry, and serves the app's mailbox (`\Storage Card\.wmdroid\in` and `out`).
+- `guest/Helper` is a .NET CF 3.5 program, `WMDroid.exe`, started from the storage card's autorun. It installs itself and adds a StartUp entry. Short lines (phone status, commands) go through a sideband page in the emulated machine. Clipboard text, keyboard typing, and contacts and calendar go over a TCP link to the phone (the guest is 10.0.2.15; the phone is 10.0.2.2, port 7378). The storage-card mailbox remains for the helper that is still starting, and for one `update` line. Those transfers no longer go through the card, so a sleep or a flickering signal does not cycle it. If the helper process is gone, PocketStylus asks before restarting Windows Mobile. It does not pull the card out, which closed open files and locked Windows Mobile.
 - **PocketStylus settings inside Windows Mobile** (Settings → System → PocketStylus) are generated from the same catalogue as the Android Device Settings page and apply live.
 - **Self-update:** each build carries a hash. An outdated helper hands over to the new one, which ends any leftovers.
 - **Watchdog:** if a step of the helper's loop blocks for 45 seconds, it logs where it stuck and restarts itself.
 - **Auto-standby** is switched off inside Windows Mobile, because Android decides when the phone sleeps.
-- **.NET CF 3.5 bootstrap** (`guest/Autorun`): a 6.6 KB native ARM program, built with the Android NDK's clang and wrapped as a Windows CE executable. On releases without .NET CF 3.5 (WM 5–6.1.4) it installs Microsoft's redistributable silently with `wceload /noui`, then starts the helper.
+- **.NET CF 3.5 bootstrap** (`guest/Autorun`): a 6.6 KB native ARM program, built with the Android NDK's clang and wrapped as a Windows CE executable. On releases without .NET CF 3.5 (WM 5, 6.1.4 and the original 6.5) it installs Microsoft's redistributable silently with `wceload /noui`, then starts the helper.
 </details>
 
 ---

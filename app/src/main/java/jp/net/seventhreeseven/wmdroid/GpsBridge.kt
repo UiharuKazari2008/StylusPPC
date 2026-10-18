@@ -15,8 +15,9 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * The phone's GPS as an NMEA receiver. Windows Mobile 6.5 reads it on COM1. On 6 / 6.1 / 6.1.4
- * COM1 is the radio, so the same sentences go to COM4 (UART1), which GPS programs open directly.
+ * The phone's GPS as an NMEA receiver. Windows Mobile 6.5.3 reads it on COM1. On 6 / 6.1 / 6.1.4
+ * and the original 6.5, COM1 is the radio, so the same sentences go to COM4 (UART1), which GPS
+ * programs open directly.
  * The radio is switched on only for a short while after the port opens. After that, sentences
  * keep going out from the last fix, so a port GPSID leaves open does not hold location on.
  * Sentences are $GP GGA/GSA/GSV/RMC once a second; GPSID only understands the GPS talker.

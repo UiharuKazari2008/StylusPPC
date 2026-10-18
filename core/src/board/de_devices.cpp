@@ -4,15 +4,191 @@
 namespace wm {
 
 // ---------------------------------------------------------------------------------------------
-// SPI1 keyboard
+// Host link: ACKless lines on Sideband's page. See HostLink in de_devices.h.
 
-// Codes are queued even while the driver has the port out of interrupt mode (it switches modes
-// while servicing a key); dropping them there loses key releases and leaves keys stuck down.
-//
-// EINT1 is level-triggered while codes are waiting: the driver reads one code per interrupt and then
-// clears SRCPND, so an edge raised during the read would be wiped and the rest of a multi-code
-// sequence (Fn + key + Fn up) would sit in the queue until the next key event.
+std::string HostLink::verbOf(const std::string &line) {
+    auto sp = line.find(' ');
+    return sp == std::string::npos ? line : line.substr(0, sp);
+}
+
+void HostLink::send(const std::string &line) {
+    std::string clean;
+    clean.reserve(line.size());
+    for (unsigned char c : line) {
+        if (c == '\n' || c == '\r') continue;
+        clean.push_back((char)c);
+    }
+    if (clean.size() > 240) {
+        clean.resize(240);
+        while (!clean.empty() && ((unsigned char)clean.back() & 0xC0) == 0x80) clean.pop_back();
+    }
+    if (clean.empty()) return;
+    std::lock_guard<std::mutex> lk(mu);
+    const std::string verb = verbOf(clean);
+    // The latched front line is the one the guest is copying. Leave it alone.
+    const size_t start = (rxLatched && !rx.empty()) ? 1 : 0;
+    for (size_t i = start; i < rx.size(); i++) {
+        if (verbOf(rx[i]) == verb) { rx[i] = clean; return; }
+    }
+    if (rx.size() >= 16) {
+        if (start < rx.size()) rx.erase(rx.begin() + (long)start);
+        else return;
+    }
+    rx.push_back(clean);
+}
+
+std::string HostLink::take() {
+    std::lock_guard<std::mutex> lk(mu);
+    auto nl = tx.rfind('\n');
+    if (nl == std::string::npos) return {};
+    std::string out = tx.substr(0, nl);
+    tx.erase(0, nl + 1);
+    return out;
+}
+
+uint32_t HostLink::read(uint32_t off) {
+    std::lock_guard<std::mutex> lk(mu);
+    // Marshal.ReadInt32 on CF is four byte loads, or'd back together. A byte load is handed
+    // the whole register shifted down to that byte, so the four pieces or back to the word.
+    uint32_t shift = (off & 3) * 8;
+    off &= ~3u;
+    uint32_t w = 0;
+    if (off == 0x00) w = id;
+    else if (off == 0x04) {
+        if (!rx.empty()) {
+            rxLatched = true;
+            w = (uint32_t)rx.front().size();
+        }
+    } else if (off == 0x0C) w = (uint32_t)tx.size();
+    else if (off >= 0x20 && off < 0x20 + 240 && !rx.empty()) {
+        const std::string &s = rx.front();
+        uint32_t i = off - 0x20;
+        for (int b = 0; b < 4; b++) if (i + b < s.size()) w |= (uint32_t)(uint8_t)s[i + b] << (8 * b);
+    }
+    return w >> shift;
+}
+
+void HostLink::write(uint32_t off, uint32_t v, int size) {
+    if (size < 1) size = 1;
+    if (size > 4) size = 4;
+    std::lock_guard<std::mutex> lk(mu);
+    for (int b = 0; b < size; b++) {
+        uint32_t o = off + (uint32_t)b;
+        uint8_t byte = (uint8_t)(v >> (8 * b));
+        if (o == 0x04) {
+            if (byte == 0 && rxLatched && !rx.empty()) rx.pop_front();
+            rxLatched = false;
+            continue;
+        }
+        if (o == 0x08) {
+            if (tx.size() > 8192) {
+                auto nl = tx.find('\n');
+                if (nl == std::string::npos) tx.clear();
+                else tx.erase(0, nl + 1);
+            }
+            tx.push_back((char)byte);
+        }
+    }
+}
+
+bool BulkPipe::put(const uint8_t *p, size_t n, bool last) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (rx.size() >= 64 || n > CAP) return false;
+    Chunk c;
+    c.last = last;
+    c.data.assign(p, p + n);
+    rx.push_back(std::move(c));
+    return true;
+}
+
+bool BulkPipe::take(std::vector<uint8_t> &out, bool &last) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (tx.empty()) return false;
+    out = std::move(tx.front().data);
+    last = tx.front().last;
+    tx.pop_front();
+    return true;
+}
+
+uint32_t BulkPipe::read(uint32_t off) {
+    std::lock_guard<std::mutex> lk(mu);
+    uint32_t shift = (off & 3) * 8;
+    off &= ~3u;
+    uint32_t w = 0;
+    if (off == 0x00) w = ID;
+    else if (off == 0x04) {
+        if (!rx.empty()) {
+            rxLatched = true;
+            w = 1u | (rx.front().last ? 2u : 0u);
+        }
+    } else if (off == 0x08) w = rx.empty() ? 0u : (uint32_t)rx.front().data.size();
+    else if (off == 0x10) w = (uint32_t)tx.size();
+    else if (off >= 0x20 && off < 0x20 + CAP && !rx.empty()) {
+        const std::vector<uint8_t> &d = rx.front().data;
+        uint32_t i = off - 0x20;
+        for (int b = 0; b < 4; b++) if (i + b < d.size()) w |= (uint32_t)d[i + b] << (8 * b);
+    }
+    return w >> shift;
+}
+
+void BulkPipe::write(uint32_t off, uint32_t v, int size) {
+    if (size < 1) size = 1;
+    if (size > 4) size = 4;
+    std::lock_guard<std::mutex> lk(mu);
+    for (int b = 0; b < size; b++) {
+        uint32_t o = off + (uint32_t)b;
+        uint8_t byte = (uint8_t)(v >> (8 * b));
+        if (o == 0x04) {
+            if (byte == 0 && rxLatched && !rx.empty()) rx.pop_front();
+            rxLatched = false;
+            continue;
+        }
+        if (o >= 0x0C && o < 0x10) {
+            unsigned sh = (o & 3) * 8;
+            commitAcc = (commitAcc & ~(0xFFu << sh)) | ((uint32_t)byte << sh);
+            if ((o & 3) == 3) {
+                if (tx.size() < 64) {
+                    size_t n = commitAcc & 0xFFFF;
+                    if (n > stage.size()) n = stage.size();
+                    if (n > CAP) n = CAP;
+                    Chunk c;
+                    c.last = (commitAcc & 0x80000000u) != 0;
+                    c.data.assign(stage.begin(), stage.begin() + (std::ptrdiff_t)n);
+                    tx.push_back(std::move(c));
+                    stage.clear();
+                }
+                commitAcc = 0;
+            }
+            continue;
+        }
+        if (o >= 0x20 && o < 0x20 + CAP) {
+            if (stage.size() < CAP) stage.resize(CAP);
+            stage[o - 0x20] = byte;
+        }
+    }
+}
+
+uint32_t Sideband::read(uint32_t pa, int) {
+    uint32_t off = pa & 0xFFF;
+    if (off < 0x400) return cmd.read(off);
+    if (off < 0x800) return sta.read(off - 0x400);
+    return bulk.read(off - 0x800);
+}
+
+void Sideband::write(uint32_t pa, uint32_t v, int size) {
+    uint32_t off = pa & 0xFFF;
+    if (off < 0x400) cmd.write(off, v, size);
+    else if (off < 0x800) sta.write(off - 0x400, v, size);
+    else bulk.write(off - 0x800, v, size);
+}
+
 void SpiKeyboard::push(uint8_t code) {
+    // Codes are queued even while the driver has the port out of interrupt mode (it switches modes
+    // while servicing a key); dropping them there loses key releases and leaves keys stuck down.
+    //
+    // EINT1 is level-triggered while codes are waiting: the driver reads one code per interrupt and then
+    // clears SRCPND, so an edge raised during the read would be wiped and the rest of a multi-code
+    // sequence (Fn + key + Fn up) would sit in the queue until the next key event.
     if (q.size() >= 64) return;
     q.push_back(code);
     updateLevel();

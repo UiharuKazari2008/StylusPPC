@@ -73,6 +73,9 @@ object GuestStates {
             if (a > 1.0 && Math.abs(Math.log((variant.height.toDouble() / variant.width) / a)) > 0.02)
                 h = (Math.round(w * a).toInt() / 2 * 2).coerceIn(w, w * 2)
         }
+        // A release with no layout above its cap (original 6.5: 800) stays there. The phone shape
+        // on a tall cover is 852, and 854 is the same empty Today page.
+        if (profile.maxHeight > 0 && h > profile.maxHeight) h = profile.maxHeight
         // "Resize screen for dock": the tall 480-wide screen (the phone's 852, or 854) gives up
         // the bottom strip and Windows Mobile boots at 480×800, which is where the dock sits.
         if (settings.dockResizeScreen && w == 480 && h > 800) h = 800

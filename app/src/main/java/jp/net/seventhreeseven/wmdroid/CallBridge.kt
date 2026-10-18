@@ -428,7 +428,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         ring = Ring(n, token)
         // The phone's ringer keeps the call: WM's ring stays quiet from its first note.
         if (!wmRinger(ctx)) hushGuest(true)
-        // WM 6 / 6.1 / 6.1.4: the virtual modem rings (RING, +CLIP); WM 6.5.3: the helper has FakeRIL ring.
+        // WM 6 / 6.1 / 6.1.4 / 6.5: the virtual modem rings (RING, +CLIP); WM 6.5.3: the helper has FakeRIL ring.
         val h = handle()
         if (NativeBridge.modemActive(h)) NativeBridge.modemRing(h, n) else guest.send("call ring $n")
         ui.removeCallbacks(ringTimeout)

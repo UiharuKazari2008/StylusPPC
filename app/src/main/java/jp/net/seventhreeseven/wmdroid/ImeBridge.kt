@@ -86,7 +86,7 @@ class ImeBridge(
         watchMailbox(on)
         if (watching != on) {
             watching = on
-            guest.send("ime watch ${if (on) 1 else 0}")
+            guest.order("ime watch ${if (on) 1 else 0}")
         }
     }
 
@@ -158,10 +158,8 @@ class ImeBridge(
         }
     }
 
-    // ---- Typing: tokens to type\<seq>.txt for the helper ----
+    // ---- Typing: tokens over TCP, one blob per burst ----
 
-    private val typeDir = guest.boxFile("type")
-    private var seq = System.currentTimeMillis()
     private val pending = StringBuilder()
     private val flushNow = Runnable { flush() }
 
@@ -180,13 +178,7 @@ class ImeBridge(
         if (pending.isEmpty()) return
         val text = pending.toString()
         pending.setLength(0)
-        runCatching {
-            typeDir.mkdirs()
-            val f = File(typeDir, "%015d.txt".format(seq++))
-            val tmp = File(typeDir, "${f.name}.tmp")
-            tmp.writeText(text)
-            tmp.renameTo(f)
-        }
+        guest.sendBlob("type", text.toByteArray(Charsets.UTF_8))
     }
 
     // ---- Quick reaction to the helper's messages while on ----

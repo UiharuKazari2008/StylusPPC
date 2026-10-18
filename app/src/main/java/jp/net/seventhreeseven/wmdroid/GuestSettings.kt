@@ -285,7 +285,13 @@ object GuestSettings {
             choice(e.page, e.key, e.label, ram, { s -> s.memMB.toString().takeIf { v -> ram.any { it.first == v } } ?: "0" },
                 { s, v -> s.memMB = v.toInt() }, restart = true)
         }
-        if (profile.touch) return liveEntries(settings, entries.map { if (it.key == "ram") ramEntry(it) else it })
+        if (profile.touch) return liveEntries(settings, entries.map { e ->
+            when {
+                e.key == "ram" -> ramEntry(e)
+                e.key == "res" && profile.maxHeight > 0 -> resCapped(e, profile.maxHeight)
+                else -> e
+            }
+        })
         val res = listOf(Settings.SCREEN_AUTO to "Phone shape (auto)") + profile.screens.map { it.id to it.label }
         return entries.filter { it.key !in TOUCH_ONLY }.map { e ->
             when (e.key) {
@@ -321,6 +327,16 @@ object GuestSettings {
     fun batteryExempt(ctx: android.content.Context): Boolean {
         val pm = ctx.getSystemService(android.os.PowerManager::class.java) ?: return true
         return pm.isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+
+    /** Screen sizes at or under [maxHeight]. Taller choices (854, and the phone's 852) are not offered. */
+    private fun resCapped(e: Entry, maxHeight: Int): Entry {
+        val opts = e.options.filter { (id, _) ->
+            id == Settings.SCREEN_AUTO || (id.substringAfter('x').toIntOrNull() ?: 0) <= maxHeight
+        }
+        return choice(e.page, e.key, e.label, opts,
+            { s -> s.screenRes.takeIf { r -> opts.any { it.first == r } } ?: Settings.SCREEN_AUTO },
+            { s, v -> s.screenRes = v }, restart = true)
     }
 
     /** Memory choices: the release's default and the sizes it runs with (OsProfile.memSizes). */

@@ -114,6 +114,11 @@ void GlRenderer::applyPending() {
         using SetFrameRate = int32_t (*)(ANativeWindow *, float, int8_t);
         static auto setRate = (SetFrameRate)dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate");
         if (setRate) setRate(window, 60.f, 0 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT */);
+        // Give up a swap after 50 ms. With the screen off the compositor stops taking buffers and
+        // eglSwapBuffers otherwise waits until the phone wakes, which freezes the guest.
+        using SetDequeueTimeout = int32_t (*)(ANativeWindow *, int64_t);
+        static auto setTimeout = (SetDequeueTimeout)dlsym(RTLD_DEFAULT, "ANativeWindow_setDequeueTimeout");
+        if (setTimeout) setTimeout(window, 50000000);
     }
     cv.notify_all();
 }
@@ -172,7 +177,8 @@ void GlRenderer::draw(const uint8_t *pixels, int w, int h, int bpp) {
         std::lock_guard<std::mutex> lk(mu);
         applyPending();
     }
-    if (!window) return;
+    // Phone asleep, or the window is gone: do not swap. The guest keeps running.
+    if (!window || !presenting.load()) return;
     // Which rows changed since the last upload (cheap next to a full upload and swap).
     size_t row = (size_t)w * (bpp / 8), bytes = row * h;
     // A resized window (same surface) needs the whole frame drawn again at the new size.
@@ -227,7 +233,15 @@ void GlRenderer::draw(const uint8_t *pixels, int w, int h, int bpp) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    eglSwapBuffers(display, surface);
+    if (!presenting.load()) return;
+    if (!eglSwapBuffers(display, surface)) {
+        EGLint err = eglGetError();
+        // Timed out or the window was taken down (screen off). Drop this surface and try again
+        // next frame; the context stays.
+        if (err == EGL_BAD_SURFACE || err == EGL_BAD_NATIVE_WINDOW) destroySurface();
+        redraw = true;
+        return;
+    }
     presented++;
 }
 

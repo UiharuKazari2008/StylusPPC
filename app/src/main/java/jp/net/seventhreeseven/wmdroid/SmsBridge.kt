@@ -28,7 +28,7 @@ import java.io.File
  *
  * Incoming: SmsReceiver (manifest, works with the app closed) puts each message into a first-in
  * first-out queue (one file per OS). Whenever Windows Mobile can take messages the queue is handed
- * over in order: WM 6 / 6.1 / 6.1.4 through the virtual modem as real SMS (+CMT, so WM's own inbox,
+ * over in order: WM 6 / 6.1 / 6.1.4 / 6.5 through the virtual modem as real SMS (+CMT, so WM's own inbox,
  * sound and notification), WM 6.5.3 through the helper (guest/Helper/Sms.cs, WM's messaging API).
  * With "Defer Incoming SMS Messages", messages that arrive while Windows Mobile is not in front
  * stay queued and show as Android notifications with a quick reply; they reach WM when it is

@@ -41,8 +41,24 @@ object NativeBridge {
     external fun setCpuLimit(handle: Long, percent: Int)
     /** Output gain applied to the guest's sound (1 = as is). */
     external fun setAudioGain(handle: Long, gain: Float)
-    /** True while a guest driver has COM1 open (receive interrupts enabled). */
+    /** True while a program has the GPS COM port open (FIFO on, that port's interrupt unmasked, and it is reading). */
     external fun serialOpen(handle: Long): Boolean
+    /** Emulation-loop turns finished. Stops advancing while a frame swap is blocked. */
+    external fun guestSlices(handle: Long): Long
+    /** False while the phone's screen is off, so a swap cannot freeze the guest for the whole sleep. */
+    external fun setPresenting(handle: Long, on: Boolean)
+    /** Command pipe. Latest line per verb. Not COM1 or COM4. */
+    external fun hostCmdSend(handle: Long, line: String)
+    /** Lines the helper wrote on the command pipe, separated by '\n'. Empty if none. */
+    external fun hostCmdTake(handle: Long): String
+    /** Status pipe. Phone status in, pulses out. Does not share a queue with commands. */
+    external fun hostStatSend(handle: Long, line: String)
+    /** Lines the helper wrote on the status pipe, separated by '\n'. Empty if none. */
+    external fun hostStatTake(handle: Long): String
+    /** One chunk of a contact/calendar transfer, at most 1792 bytes. False when 64 chunks are already waiting. */
+    external fun hostBulkPut(handle: Long, data: ByteArray, last: Boolean): Boolean
+    /** One chunk from the helper. First byte is 1 on the last chunk. Null when none is waiting. */
+    external fun hostBulkTake(handle: Long): ByteArray?
     external fun screenSize(handle: Long): IntArray
     external fun status(handle: Long): String
     /** Battery: plugged in, charge 0-100, temperature in tenths of a degree C. */

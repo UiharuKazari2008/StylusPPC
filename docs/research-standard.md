@@ -106,7 +106,7 @@ Guest program changes (`guest/Helper`, edition test `Edition.Smartphone` in Sett
 
 ## 5. App changes
 
-- `OsProfiles.kt`: `wm653std` (QVGA + WVGA images), `wm614std`, `wm5sp` (QVGA), `touch = false`,
+- `OsProfiles.kt`: `wm653std` (QVGA + WVGA images), `wm65std` (landscape QVGA + square), `wm614std`, `wm5sp` (QVGA), `touch = false`,
   `screens`. Images are imported like the others (Select ROM folder... on each release's
   `Emulation Images`), or `python tools/push-images.py wm653std`.
 - Keypad skin: `SkinSpec` "standard" layout (also accepted as "keypad"); the built-in skin
@@ -134,7 +134,8 @@ Guest program changes (`guest/Helper`, edition test `Edition.Smartphone` in Sett
 - Standard's own Settings has no PocketStylus entry (Pro's ControlPanel key is a Pocket PC thing):
   the settings app is in Start > All Programs > PocketStylus; on the phone, hold Menu or use the lock
   button's power menu.
-- 6.5 / 6.1 / 6.0 Standard and the 176x220 images: not offered.
+- 6.1 / 6.0 Standard and the 176x220 images: not offered. 6.5 Standard is offered
+  (`wm65std`: landscape QVGA and square only; those are the two images in the SDK).
 
 ## 7. Test commands
 

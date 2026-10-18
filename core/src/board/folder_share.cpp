@@ -190,6 +190,13 @@ const FolderShare::Snap &FolderShare::snapshot(const std::string &dir) {
 void FolderShare::setMounts(const std::vector<Mount> &m, bool announce) {
     std::lock_guard<std::mutex> lk(mu);
     bool wasEnabled = !mounts.empty();
+    if (m.size() == mounts.size()) {
+        bool same = true;
+        for (size_t i = 0; i < m.size(); i++)
+            if (m[i].name != mounts[i].name || m[i].path != mounts[i].path) { same = false; break; }
+        // Same card again would close every open file and Windows Mobile treats that as a removal.
+        if (same) return;
+    }
     if (traceCalls) {  // what the guest still has open on the card
         for (Handle &h : handles)
             if (h.used) LOGI("folder share: open handle %s (mode %x)", h.guest.c_str(), h.mode);

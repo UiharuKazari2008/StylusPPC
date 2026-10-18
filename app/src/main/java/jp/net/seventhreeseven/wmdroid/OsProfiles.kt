@@ -40,6 +40,12 @@ data class OsProfile(
      * Empty = any size from the one image (Professional).
      */
     val screens: List<GuestScreen> = emptyList(),
+    /**
+     * Tallest screen a Professional release boots at. 0 means the phone shape and the resolution
+     * list are unlimited. Original 6.5 has no Titanium layout above 480×800, so the phone shape
+     * (852 on a tall cover) and an explicit 854 stay at 800.
+     */
+    val maxHeight: Int = 0,
 ) {
     /** The memory a stored Memory setting boots with: 0 (or a size no longer offered) = the default. */
     fun memFor(setting: Int) = if (setting >= minMemMB) setting.coerceAtMost(OsProfiles.MEM_SIZES.last()) else defaultMemMB
@@ -78,6 +84,23 @@ object OsProfiles {
             minMemMB = 128,  // at 96 MB only ~3 MB program memory is left with a few programs open
         ),
         OsProfile(
+            "wm65pro", "Windows Mobile 6.5 Professional", "Original 6.5 · Pocket PC phone", true,
+            "Windows Mobile 6.5 Professional",
+            listOf(
+                // WVGA first: a full folder import boots this one. Heights above 800 stay at 800
+                // (maxHeight). An exact size below uses the image built for it when that file
+                // was imported too (GuestStates.resolve).
+                ImageVariant("wvga", "WVGA 480×800", "PPC_USA_GSM_WVGA_VR.BIN", 480, 800),
+                ImageVariant("vga", "VGA 480×640", "PPC_USA_GSM_VGA_VR.BIN", 480, 640),
+                ImageVariant("wqvga", "WQVGA 240×400", "PPC_USA_GSM_WQVGA_VR.BIN", 240, 400),
+                ImageVariant("square", "Square 320×320", "PPC_USA_GSM_320x320_VR.BIN", 320, 320),
+                ImageVariant("qvga", "QVGA 240×320", "PPC_USA_GSM_VR.BIN", 240, 320),
+            ),
+            // Titanium, like 6.5.3: 96 MB leaves almost no program memory.
+            minMemMB = 128,
+            maxHeight = 800,
+        ),
+        OsProfile(
             "wm614pro", "Windows Mobile 6.1.4 Professional", "Latest 6.1 · Pocket PC phone", true,
             "Windows Mobile 6.1.4 Professional",
             listOf(
@@ -114,6 +137,20 @@ object OsProfiles {
                 GuestScreen(480, 640, "wvga", "480×640 (WVGA image, sharper; call screen glitches)"),
                 GuestScreen(320, 320, "qvga", "320×320 (square)"),
                 GuestScreen(320, 240, "qvga", "320×240 (landscape)"),
+            ),
+        ),
+        OsProfile(
+            "wm65std", "Windows Mobile 6.5 Standard", "Original 6.5 · Smartphone · keypad", false,
+            "Windows Mobile 6.5 Standard",
+            listOf(
+                // The SDK ships these two only: landscape QVGA, and a square image. Each home
+                // layout covers its own size (docs/research-standard.md), so they are not stretched.
+                ImageVariant("qvga", "Landscape QVGA 320×240", "SP_USA_GSM_QVGA_VR.bin", 320, 240),
+                ImageVariant("square", "Square 320×320", "SP_USA_GSM_320x320_VR.bin", 320, 320),
+            ),
+            screens = listOf(
+                GuestScreen(320, 240, "qvga", "320×240 (landscape QVGA)"),
+                GuestScreen(320, 320, "square", "320×320 (square)"),
             ),
         ),
         OsProfile(

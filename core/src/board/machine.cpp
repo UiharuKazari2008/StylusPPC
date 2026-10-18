@@ -142,6 +142,7 @@ Machine::Machine(const MachineConfig &c)
     uart2.txLevel = true;  // the IR driver writes whole frames: level TX interrupt (s3c2410.h)
     codePatch.reset(new CodePatcher(cpu, bus));
     motion.reset(new Motion());
+    sideband.reset(new Sideband());  // command, status and bulk pipes (mapped in load())
     cpu.codeScanCtx = codePatch.get();
     cpu.codeScan = [](void *ctx, uint32_t pa) { static_cast<CodePatcher *>(ctx)->scanPage(pa); };
 }
@@ -251,6 +252,7 @@ bool Machine::load(std::string &err) {
     bus.mapDevice(Camera::BASE, 0x100000, camera.get());  // WMDroid camera bridge (no snapshot state)
     bus.mapDevice(CodePatcher::BASE, 0x100000, codePatch.get());  // host code fixes (no snapshot state)
     bus.mapDevice(Motion::BASE, 0x100000, motion.get());  // accelerometer (no snapshot state)
+    bus.mapDevice(Sideband::BASE, 0x100000, sideband.get());  // command/status/bulk pipes (no snapshot state)
 
     hardReset();
     return true;

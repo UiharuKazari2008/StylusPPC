@@ -710,7 +710,11 @@ static class Helper
                 int stuck = Environment.TickCount - beat;
                 // Only while work is actually slow: an idle helper already answers, and a pulse
                 // every 5 s would fill the mailbox when the app is not reading it.
-                if (stage.StartsWith("cmd ") || stuck >= 15000) Send("alive");
+                if (stage.StartsWith("cmd ") || stuck >= 15000)
+                {
+                    // A pulse on the link. A mailbox file here fills up while the app is not reading.
+                    if (!Link.PostStat("alive")) Send("alive");
+                }
                 // A command may run for minutes when the guest itself is slowed. Between commands,
                 // 45 s still means the loop is wedged.
                 int limit = stage.StartsWith("cmd ") ? 180000 : 45000;
@@ -733,6 +737,7 @@ static class Helper
         dog.IsBackground = true;
         dog.Start();
         try { Patch.NoNetPrompt(); } catch (Exception e) { Log("net " + e.Message); }  // answer netui's network card question first (Patch.cs)
+        NetLink.Start();  // 10.0.2.2:7378, for anything the sideband page does not carry (NetLink.cs)
         Send(Hello());
         try { Camera.Install(); } catch (Exception e) { Log("camera " + e.Message); }  // camera passthrough (Camera.cs)
         try { InputSync.RemoveBlank(); } catch (Exception e) { Log("ime " + e.Message); }  // the blank keyboard is gone (InputSync.cs)
@@ -743,27 +748,20 @@ static class Helper
         bool patchChecked = false;
         while (!quit)
         {
+            // A clock step (the phone's time changed, or the guest was frozen while the RTC moved)
+            // asks the app for a fresh status snapshot. The ask is a command; the snapshot is status.
+            WatchClock();
+            Step("cmd");
+            try { DrainCmd(); }
+            catch (Exception e) { Log("cmd " + e.Message); }
+            Step("status");
+            try { Link.Pump(); DrainStatus(); }
+            catch (Exception e) { Log("status " + e.Message); }
             Step("card");
             CheckCard();
-            Step("mailbox");
-            try
-            {
-                string dir = Path.Combine(Box, "in");
-                if (Directory.Exists(dir))
-                {
-                    string[] cmds = Directory.GetFiles(dir, "*.cmd");
-                    Array.Sort(cmds);
-                    foreach (string f in cmds)
-                    {
-                        string text;
-                        using (var r = new StreamReader(f)) text = r.ReadToEnd().Trim();
-                        File.Delete(f);
-                        Step("cmd " + Path.GetFileNameWithoutExtension(f) + " " + (text.Length > 40 ? text.Substring(0, 40) : text));
-                        Send("result " + Path.GetFileNameWithoutExtension(f) + " " + Execute(text));
-                    }
-                }
-            }
-            catch (Exception e) { Log("serve " + e.Message); }
+            Step("net");
+            try { DrainNet(); }
+            catch (Exception e) { Log("net " + e.Message); }
             Step("patch");
             if (!patchChecked && !quit)
             {
@@ -792,6 +790,75 @@ static class Helper
         }
         Calls.Stop();  // close the RIL client, or this process (and its mutex) outlives the update
         InputSync.Stop();  // clipboard/keyboard window's message loop (InputSync.cs)
+        NetLink.Stop();
+    }
+
+    static long wall0;
+    static int tick0;
+    static bool clockSet;
+
+    // Wall clock against the tick count. The RTC follows the phone; the tick count does not move
+    // while the guest is frozen. Forward needs 15 s so a slow guest (the loop still finishes)
+    // is not a jump. Backward is always a clock set.
+    static void WatchClock()
+    {
+        long wall = DateTime.UtcNow.Ticks;
+        int tick = Environment.TickCount;
+        if (!clockSet) { wall0 = wall; tick0 = tick; clockSet = true; return; }
+        long step = wall - wall0 - (long)unchecked(tick - tick0) * 10000L;
+        wall0 = wall;
+        tick0 = tick;
+        if (step > 150000000L || step < -20000000L)
+        {
+            Log("time jump " + (step / 10000000L) + " s");
+            if (!Link.PostCmd("sync")) Send("sync");
+        }
+    }
+
+    // Command pipe. "result ..." is the app answering; everything else runs, and the short answer
+    // goes back on the same pipe.
+    static void DrainCmd()
+    {
+        foreach (string line in Link.TakeCmd())
+        {
+            if (line == null || line.Length == 0 || line.StartsWith("result ")) continue;
+            Step("cmd " + (line.Length > 40 ? line.Substring(0, 40) : line));
+            string answer;
+            try { answer = Execute(line); }
+            catch (Exception e) { Log("cmd " + e.Message); continue; }
+            int sp = line.IndexOf(' ');
+            string verb = sp > 0 ? line.Substring(0, sp) : line;
+            Send("result " + verb + " " + answer);
+        }
+    }
+
+    // TCP link. Status lines are applied and not answered. A blob is already queued ahead of its line.
+    static void DrainNet()
+    {
+        foreach (string line in NetLink.TakeLines())
+        {
+            if (line == null || line.Length == 0 || line.StartsWith("result ")) continue;
+            if (line.StartsWith("status ")) { Execute(line); continue; }
+            Step("cmd " + (line.Length > 40 ? line.Substring(0, 40) : line));
+            string answer;
+            try { answer = Execute(line); }
+            catch (Exception e) { Log("cmd " + e.Message); continue; }
+            int sp = line.IndexOf(' ');
+            string verb = sp > 0 ? line.Substring(0, sp) : line;
+            Send("result " + verb + " " + answer);
+        }
+    }
+
+    // Status pipe. Applied, not answered, so a stream of signal updates cannot fill the command pipe.
+    static void DrainStatus()
+    {
+        foreach (string line in Link.TakeStat())
+        {
+            if (line == null || line.Length == 0) continue;
+            Step("status " + (line.Length > 40 ? line.Substring(0, 40) : line));
+            try { Execute(line); }
+            catch (Exception e) { Log("status " + e.Message); }
+        }
     }
 
     // Commands from the app.
@@ -941,26 +1008,13 @@ static class Helper
         return parts.ToArray();
     }
 
-    // Messages to the app. The mailbox loop and the watchdog both send.
-    static object sendLock = new object();
-    static int sendSeq;
-
+    // Messages to the app. The serve loop and the watchdog both send.
     public static void Send(string msg)
     {
-        try
-        {
-            if (!IsMounted(Card)) return;  // no card: nobody to tell (see CheckCard)
-            lock (sendLock)
-            {
-                string dir = Path.Combine(Box, "out");
-                Directory.CreateDirectory(dir);
-                string name = DateTime.Now.Ticks.ToString("x16") + "-" + (sendSeq++).ToString("x");
-                string tmp = Path.Combine(dir, name + ".tmp");
-                using (var w = new StreamWriter(tmp, false, new UTF8Encoding(false))) w.Write(msg);
-                File.Move(tmp, Path.Combine(dir, name + ".msg"));
-            }
-        }
-        catch (Exception e) { Log("send " + e.Message); }
+        if (msg == null || msg.Length == 0) return;
+        // Short lines go on the sideband. TCP is the path when that page is not answering.
+        if (msg.Length <= 200 && Link.PostCmd(msg)) return;
+        if (!NetLink.SendLine(msg)) Log("send waiting for the link");
     }
 
     // Current settings, written by the app as key=value lines.

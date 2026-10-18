@@ -10,7 +10,7 @@ using Microsoft.Win32;
 static class Patch
 {
     // Bump when Apply() changes; images patched with an older version are patched again.
-    public const int Version = 10;  // v10: modem images expose the GPS as COM4 (UART1); COM1 is the radio
+    public const int Version = 11;  // v11: the emulated NE2000 must not offload TCP checksums
 
     // Patches below this version changed driver settings and need a restart to take effect.
     // (v4: states booted before the PCMCIA network card existed need their drivers reloaded.)
@@ -96,6 +96,7 @@ static class Patch
         });
         Step("apps", InstallApps);
         Step("net", EnsureInternet);
+        Step("offload", NoTcpOffload);
         Step("ethman", NoWiredUi);
         Step("gps", delegate
         {
@@ -250,6 +251,21 @@ static class Patch
                 if (st.GetValue("EthmanFlags") == null) st.SetValue("EthmanFlags", flags);
             k.SetValue("Flags", flags | 0x4);
             needRestart = true;
+        }
+    }
+
+    // The Device Emulator NE2000 claims TCP checksum offload and then drops every
+    // segment that carries data. UDP and the handshake still pass. The stack has
+    // to check the checksums itself; the key is read when the stack starts.
+    static void NoTcpOffload()
+    {
+        using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"Comm\Tcpip\Parms"))
+        {
+            object v = k.GetValue("DisableTaskOffload");
+            if (v is int && (int)v == 1) return;
+            k.SetValue("DisableTaskOffload", 1);
+            needRestart = true;
+            Helper.Log("net: checksum offload off");
         }
     }
 

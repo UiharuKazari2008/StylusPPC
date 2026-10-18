@@ -85,17 +85,21 @@ static class Pim
     static void Dump(OutlookSession s)
     {
         int t0 = Environment.TickCount, nc = 0, na = 0;
-        string path = Path.Combine(Helper.Box, "pim-dump.txt"), tmp = path + ".tmp";
-        using (StreamWriter w = new StreamWriter(tmp, false, new UTF8Encoding(false)))
+        byte[] body;
+        var ms = new MemoryStream();
+        using (StreamWriter w = new StreamWriter(ms, new UTF8Encoding(false)))
         {
             w.Write("gen=" + Gen + "\n");
             foreach (Contact c in s.Contacts.Items) { WriteRecord(w, "#contact", c, ContactFields); nc++; }
             foreach (Appointment a in s.Appointments.Items) { WriteRecord(w, "#appointment", a, AppointmentFields); na++; }
+            w.Flush();
+            body = ms.ToArray();
         }
-        if (File.Exists(path)) File.Delete(path);
-        File.Move(tmp, path);
         Helper.Log("pim: dumped " + nc + " contacts, " + na + " appointments in " + (Environment.TickCount - t0) + " ms");
-        Helper.Send("pim dumped gen=" + Gen + " contacts=" + nc + " appointments=" + na);
+        string note = "pim dumped gen=" + Gen + " contacts=" + nc + " appointments=" + na;
+        // The bytes go out before the line, on the same TCP connection, so the app has them when the line arrives.
+        if (!NetLink.SendBlob("pim-dump", body) || !NetLink.SendLine(note))
+            Helper.Log("pim: dump waiting for the link");
     }
 
     static void WriteRecord(StreamWriter w, string head, PimItem item, string[] fields)
@@ -123,13 +127,17 @@ static class Pim
     static void Apply(OutlookSession s)
     {
         int t0 = Environment.TickCount;
-        string path = Path.Combine(Helper.Box, "pim-apply.txt");
         int gen = -1;
         List<Op> ops = new List<Op>();
         Op cur = null;
-        // Read the bytes ourselves. CF's UTF-8 reader throws ArgumentException on an emoji
-        // (a 4-byte sequence), and that aborted the whole sync.
-        foreach (string line in ReadLines(path))
+        byte[] incoming = null;
+        for (int i = 0; i < 150 && incoming == null; i++)
+        {
+            incoming = NetLink.TakeBlob("pim-apply");
+            if (incoming == null) System.Threading.Thread.Sleep(20);
+        }
+        if (incoming == null) { Helper.Log("pim: no apply bytes"); Helper.Send("pim error apply no bytes"); return; }
+        foreach (string line in ReadLines(incoming))
         {
             if (line.StartsWith("#"))
             {
@@ -151,8 +159,9 @@ static class Pim
         foreach (Appointment a in s.Appointments.Items) Index(a, "appointment", byKey, byOid);
 
         int ok = 0, failed = 0;
-        string resPath = Path.Combine(Helper.Box, "pim-result.txt"), tmp = resPath + ".tmp";
-        using (StreamWriter w = new StreamWriter(tmp, false, new UTF8Encoding(false)))
+        byte[] body = new byte[0];
+        var result = new MemoryStream();
+        using (StreamWriter w = new StreamWriter(result, new UTF8Encoding(false)))
         {
             foreach (Op op in ops)
             {
@@ -212,12 +221,14 @@ static class Pim
                     w.Write("error=" + Escape(e.GetType().Name + " " + e.Message) + "\n");
                 }
             }
+            w.Flush();
+            body = result.ToArray();
         }
-        if (File.Exists(resPath)) File.Delete(resPath);
-        File.Move(tmp, resPath);
         if (gen >= 0) Gen = gen;
         Helper.Log("pim: applied " + ok + " (" + failed + " failed) in " + (Environment.TickCount - t0) + " ms");
-        Helper.Send("pim applied gen=" + Gen + " ok=" + ok + " failed=" + failed);
+        string note = "pim applied gen=" + Gen + " ok=" + ok + " failed=" + failed;
+        if (!NetLink.SendBlob("pim-result", body) || !NetLink.SendLine(note))
+            Helper.Log("pim: result waiting for the link");
     }
 
     static void Index(PimItem item, string kind, Dictionary<string, PimItem> byKey, Dictionary<string, PimItem> byOid)
@@ -403,7 +414,6 @@ static class Pim
         return new DateTime(d.Ticks, DateTimeKind.Utc).ToLocalTime();
     }
 
-    /** UTF-8 lines. A 4-byte sequence (an emoji) is skipped: the reader in this runtime throws on it. */
     static List<string> ReadLines(string path)
     {
         byte[] b;
@@ -413,6 +423,12 @@ static class Pim
             int n = 0;
             while (n < b.Length) { int g = fs.Read(b, n, b.Length - n); if (g <= 0) break; n += g; }
         }
+        return ReadLines(b);
+    }
+
+    /** UTF-8 lines. A 4-byte sequence (an emoji) is skipped: the reader in this runtime throws on it. */
+    static List<string> ReadLines(byte[] b)
+    {
         List<string> lines = new List<string>();
         StringBuilder sb = new StringBuilder();
         int i = 0;

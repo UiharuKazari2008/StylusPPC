@@ -105,9 +105,24 @@ public:
     const char *name() const override { return "uart"; }
     uint32_t read(uint32_t pa, int size) override;
     void write(uint32_t pa, uint32_t v, int size) override;
-    void feed(uint8_t c) { rx.push_back(c); updateRx(); }
+    void feed(uint8_t c) {
+        // An app that is not reading must not grow this without bound (a phone sleep that
+        // stalls the guest, with NMEA still arriving, otherwise wakes into an interrupt storm).
+        if (rx.size() >= 2048) return;
+        rx.push_back(c);
+        updateRx();
+    }
     /** The guest has receive interrupts on, i.e. a driver has the port open. */
     bool rxEnabled() const { return rxIntEnabled(); }
+    /**
+     * A program has this port open. The serial driver turns RX interrupt mode on when it loads;
+     * opening a handle is what enables the FIFO and unmasks this port's interrupt. A mask of zero
+     * (every source unmasked, as after a bad wake) or a queue nobody is draining is not an open port.
+     */
+    bool appOpen(uint32_t intmsk, uint32_t intsubmsk, int irq, int sub) const {
+        if (intmsk == 0 || intsubmsk == 0 || (ufcon & 1) == 0 || rx.size() > 1024) return false;
+        return rxIntEnabled() && !(intsubmsk & (1u << sub)) && !(intmsk & (1u << irq));
+    }
     /** Bytes waiting in the receive queue (the IrDA bridge paces its frames by it, irda.h). */
     size_t rxQueued() const { return rx.size(); }
     /**

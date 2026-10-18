@@ -166,17 +166,15 @@ static class InputSync
         clipHash = h;
         clipKnown = true;
         if (t.Length == 0) return;  // emptied: keep the phone's clipboard
-        string path = Path.Combine(Helper.Box, "clip_out.txt"), tmp = path + ".tmp";
-        using (var w = new StreamWriter(tmp, false, new UTF8Encoding(false))) w.Write(t.Replace("\r\n", "\n"));
-        if (File.Exists(path)) File.Delete(path);
-        File.Move(tmp, path);
-        Helper.Send("clip");
+        byte[] raw = Encoding.UTF8.GetBytes(t.Replace("\r\n", "\n"));
+        if (!NetLink.SendBlob("clip_out", raw) || !NetLink.SendLine("clip")) Helper.Log("clip waiting for the link");
     }
 
     static string SetFromApp()
     {
-        string text;
-        using (var r = new StreamReader(Path.Combine(Helper.Box, "clip_in.txt"), Encoding.UTF8)) text = r.ReadToEnd();
+        byte[] raw = NetLink.TakeBlob("clip_in");
+        if (raw == null) return "no clip";
+        string text = Encoding.UTF8.GetString(raw, 0, raw.Length);
         if (text.Length > MaxClip) text = text.Substring(0, MaxClip);
         // Windows line ends for WM's edit boxes.
         text = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
@@ -393,18 +391,9 @@ static class InputSync
     // while the phone's keyboard is open (the mailbox's in\ is only read twice a second).
     static void TypePoll()
     {
-        string dir = Path.Combine(Helper.Box, "type");
-        if (!Directory.Exists(dir)) return;
-        string[] files = Directory.GetFiles(dir, "*.txt");
-        if (files.Length == 0) return;
-        Array.Sort(files);
-        foreach (string f in files)
-        {
-            string text;
-            using (var r = new StreamReader(f)) text = r.ReadToEnd();
-            File.Delete(f);
-            Type(text);
-        }
+        byte[] raw;
+        while ((raw = NetLink.TakeBlob("type")) != null)
+            Type(Encoding.UTF8.GetString(raw, 0, raw.Length));
     }
 
     const uint KeyStateDownFlag = 0x0080, KeyStatePrevDownFlag = 0x0040, KeyShiftNoCharacterFlag = 0x00010000;

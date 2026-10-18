@@ -60,6 +60,8 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestIme(what: String) {}
         /** The helper found the card mounted under another name (\Storage Card2): put it back. */
         fun onGuestRemount() {}
+        /** The guest clock jumped. Resend the current phone status so it can catch up. */
+        fun onGuestSync() {}
         /** The helper reported WM's Buttons assignments (now in Settings.hwButtonMap). */
         fun onGuestButtons() {}
         /** "android ..." from a launcher in WM's Android Apps folder, without the prefix (LauncherBridge). */
@@ -76,6 +78,11 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
     private val inDir = File(box, "in")
     private val outDir = File(box, "out")
     private var seq = 0
+    private val stashes = HashMap<String, ArrayDeque<ByteArray>>()
+    private val net = GuestNet(
+        onLine = { ingest(it) },
+        onBlob = { name, data -> stash(name, data) },
+    ).also { it.start() }
     private var lastTzOffset = Int.MIN_VALUE
     private var helperSum = ""
 
@@ -164,7 +171,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
     private val held = ArrayDeque<String>()
     private var running = false
 
-    /** The guest is up and its helper can read the mailbox. Queued commands go out in order. */
+    /** The guest is up. Queued commands go out on the sideband, or on TCP. */
     fun setRunning(on: Boolean) {
         val queued = ArrayList<String>()
         synchronized(held) {
@@ -174,16 +181,77 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             queued.addAll(held)
             held.clear()
         }
-        queued.forEach { writeCmd(it) }
+        queued.forEach { send(it) }
     }
+
+    fun stopNet() { net.stop() }
+
+    /** A blob that arrived on the TCP link, ahead of the line that names it. */
+    fun stash(name: String, data: ByteArray) {
+        synchronized(stashes) { stashes.getOrPut(name) { ArrayDeque() }.addLast(data) }
+    }
+
+    fun takeStash(name: String): ByteArray? = synchronized(stashes) {
+        val q = stashes[name] ?: return null
+        if (q.isEmpty()) null else q.removeFirst()
+    }
+
+    /** Large bytes, then a line, both on the TCP link so the line cannot overtake the bytes. */
+    fun sendBlob(name: String, data: ByteArray) = net.sendBlob(name, data)
+    fun sendOnNet(line: String) = net.sendLine(line)
 
     fun send(command: String) {
         synchronized(held) {
             if (!running) { held.addLast(command); return }
         }
-        writeCmd(command)
+        // "update" is the one line the helper already in \Windows still reads from the card,
+        // and only when the sideband did not take it.
+        if (command == "update") {
+            if (!deliver(command)) writeCmd(command)
+            return
+        }
+        if (!deliver(command)) net.sendLine(command)
     }
 
+    /** Sideband when the line is short and the page is up, otherwise a live TCP write. */
+    private fun deliver(line: String): Boolean {
+        if (line.length <= 220) {
+            val pipe = if (line.startsWith("status ")) sideband else command
+            if (pipe != null && pipe(line)) return true
+        }
+        return net.trySendLine(line)
+    }
+
+    /**
+     * Command pipe (clip watch, ime watch, replies). False when the page is not answering;
+     * the line then goes over TCP, not the storage card.
+     */
+    var command: ((String) -> Boolean)? = null
+
+    /** Status pipe (the phone's radio and Wi-Fi line). A burst here cannot block [command]. */
+    var sideband: ((String) -> Boolean)? = null
+
+    /** Contact and calendar bytes, 1792 at a time. False when the bulk window is not up. */
+    var bulk: ((ByteArray) -> Boolean)? = null
+
+    fun pushBulk(data: ByteArray): Boolean = bulk?.invoke(data) == true
+
+    /** One command on the command pipe, or on TCP when the page is not answering. */
+    fun order(line: String) {
+        if (!deliver(line)) net.sendLine(line)
+    }
+
+    /** One status line on the status pipe, or on TCP when the page is not answering. */
+    fun tell(line: String) {
+        if (!deliver(line)) net.sendLine(line)
+    }
+
+    /** Lines the helper wrote on the link. Same text as a mailbox message, no file. */
+    fun ingest(text: String) {
+        text.lineSequence().forEach { handle(it.trim()) }
+    }
+
+    /** The helper already running from \Windows still reads this one command off the card. */
     private fun writeCmd(command: String) {
         val name = synchronized(held) { "%08d".format(seq++) }
         val tmp = File(inDir, "$name.tmp")
@@ -198,7 +266,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         if (!force && offsetMin == lastTzOffset) return
         lastTzOffset = offsetMin
         // Windows bias: UTC = local + bias.
-        send("tz ${-offsetMin} 0 ${tz.getDisplayName(tz.inDaylightTime(java.util.Date()), TimeZone.SHORT)}")
+        order("tz ${-offsetMin} 0 ${tz.getDisplayName(tz.inDaylightTime(java.util.Date()), TimeZone.SHORT)}")
     }
 
     /** Handles messages from the guest; call periodically. */
@@ -222,6 +290,24 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
      */
     fun markAlive() { lastHeard = android.os.SystemClock.uptimeMillis() }
     fun pendingCommands(): Int = inDir.list()?.count { it.endsWith(".cmd") } ?: 0
+
+    /**
+     * How long the oldest command the helper must answer has been waiting, or -1 when none is.
+     * Status and the clipboard/keyboard watch are host chatter. An idle helper sends no pulse, so
+     * silence since the last message is not a dead helper; only a command left unread is.
+     */
+    fun pendingWaitMs(): Long {
+        val files = inDir.listFiles { it.name.endsWith(".cmd") } ?: return -1
+        var oldest = Long.MAX_VALUE
+        for (f in files) {
+            val t = runCatching { f.readText() }.getOrNull() ?: continue
+            if (t.startsWith("status ") || t.startsWith("clip watch ") || t.startsWith("ime watch ")) continue
+            val modified = f.lastModified()
+            if (modified < oldest) oldest = modified
+        }
+        if (oldest == Long.MAX_VALUE) return -1
+        return System.currentTimeMillis() - oldest
+    }
 
     /** A current helper said hello this session (cleared by [prepare]). */
     private var helloSeen = false
@@ -257,6 +343,8 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         if (line.isEmpty()) return
         lastHeard = android.os.SystemClock.uptimeMillis()
         if (line == "alive") return  // watchdog pulse while a command is slow; not a command result
+        if (line.startsWith("result ")) return  // command-pipe reply; the helper already did the work
+        if (line == "sync") { listener.onGuestSync(); return }
         Log.i(TAG, "guest: $line")
         when {
             line.startsWith("hello") -> {

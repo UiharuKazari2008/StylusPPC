@@ -16,6 +16,7 @@ class Touch;
 class SpiKeyboard;
 class EmulServ;
 class DePage;
+class Sideband;
 class Watchdog;
 class AudioIis;
 class AudioDma;
@@ -89,6 +90,7 @@ public:
     std::unique_ptr<SpiKeyboard> kbd;
     std::unique_ptr<EmulServ> emulServ;
     std::unique_ptr<DePage> dePage;
+    std::unique_ptr<Sideband> sideband;  // command, status and bulk pipes (de_devices.h), at Sideband::BASE
     std::unique_ptr<AudioIis> iis;
     std::unique_ptr<AudioDma> dma;
     std::unique_ptr<FolderShare> folderShare;

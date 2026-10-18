@@ -19,6 +19,9 @@ public:
     // previous window (required when the surface is being destroyed).
     void setWindow(ANativeWindow *win, bool emuRunning);
     void setFilter(int f) { filter = f; redraw = true; }
+    // False while the phone's screen is off. Swapping then blocks in the buffer queue and the
+    // emulation thread (the guest) does not run again until the screen is back.
+    void setPresenting(bool on) { presenting = on; }
     // Shows the frame turned by quarter turns clockwise (0 upright, 1 = 90 degrees, 3 = 270),
     // e.g. a landscape Windows Mobile on a phone whose window is landscape too.
     void setRotation(int q) { rotation = q; redraw = true; }
@@ -44,6 +47,7 @@ private:
     int texW = 0, texH = 0, texBpp = 0;
     int filter = SHARP;
     std::atomic<bool> redraw{true};
+    std::atomic<bool> presenting{true};
     std::atomic<int> rotation{0};
     std::vector<uint8_t> shadow;  // the frame last uploaded
     int surfW = 0, surfH = 0;

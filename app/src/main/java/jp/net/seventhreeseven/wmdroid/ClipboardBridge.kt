@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
-import java.io.File
 
 /**
  * "Sync Clipboard": the phone's clipboard and Windows Mobile's, both ways (text only).
@@ -67,7 +66,7 @@ class ClipboardBridge(private val ctx: Context, private val settings: Settings, 
     private fun tell(on: Boolean) {
         if (watching == on) return
         watching = on
-        guest.send("clip watch ${if (on) 1 else 0}")
+        guest.order("clip watch ${if (on) 1 else 0}")
     }
 
     /** The phone's clip to Windows Mobile, if it is new text. */
@@ -81,14 +80,15 @@ class ClipboardBridge(private val ctx: Context, private val settings: Settings, 
         val text = runCatching { cm.primaryClip?.getItemAt(0)?.text?.toString() }.getOrNull() ?: return
         if (text.isEmpty() || text == lastText) return
         lastText = text
-        write(guest.boxFile(CLIP_IN), text.take(MAX_CHARS))
-        guest.send("clip")
+        val body = text.take(MAX_CHARS).toByteArray(Charsets.UTF_8)
+        guest.sendBlob("clip_in", body)
+        guest.sendOnNet("clip")
     }
 
     /** "clip" from the helper: Windows Mobile's new clipboard text is in clip_out.txt. */
     fun fromGuest() {
         if (!settings.syncClipboard) return
-        val text = runCatching { guest.boxFile(CLIP_OUT).readText() }.getOrNull()?.removePrefix("﻿") ?: return
+        val text = guest.takeStash("clip_out")?.toString(Charsets.UTF_8)?.removePrefix("\uFEFF") ?: return
         if (text.isEmpty() || text == lastText) return
         lastText = text
         val cm = cm ?: return
@@ -98,16 +98,8 @@ class ClipboardBridge(private val ctx: Context, private val settings: Settings, 
         if (focused) runCatching { cm.primaryClipDescription?.timestamp }.getOrNull()?.let { lastStamp = it }
     }
 
-    private fun write(f: File, text: String) {
-        val tmp = File(f.path + ".tmp")
-        tmp.writeText(text)
-        tmp.renameTo(f)
-    }
-
     companion object {
         const val TAG = "WMDroidClip"
-        const val CLIP_IN = "clip_in.txt"
-        const val CLIP_OUT = "clip_out.txt"
         const val MAX_CHARS = 256 * 1024
     }
 }

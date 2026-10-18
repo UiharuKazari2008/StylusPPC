@@ -106,6 +106,7 @@ struct Session {
     // spinning in an exception loop; a sleeping or idle one is idle).
     uint64_t heartbeatReads = 0, heartbeatNs = 0;
     std::atomic<bool> hung{false};    // last sound sent to the speaker (see the CPU share below)
+    std::atomic<uint64_t> slices{0};  // loop turns finished (stuck in a swap: this stops moving)
     HostAudio audio;
     std::string serial;
 
@@ -167,7 +168,10 @@ struct Session {
                 // COM1 is the radio once the guest's RIL talks to the virtual modem. GPS is COM4
                 // (UART1) on those images, and COM1 (UART0) otherwise.
                 Uart &gpsUart = m->modem->claimed() ? m->uart1 : m->uart0;
-                for (uint8_t b : serialIn) gpsUart.feed(b);
+                for (uint8_t b : serialIn) {
+                    if (gpsUart.rxQueued() >= 2048) break;  // nothing is reading this port
+                    gpsUart.feed(b);
+                }
                 serialIn.clear();
                 if (powerPress) { m->gpio.powerButton(); powerPress = false; }
                 pumpNet();
@@ -176,6 +180,7 @@ struct Session {
             uint64_t idle0 = m->idleNs, t0 = m->nowNs();
             m->runFor(16000000);
             render();
+            slices.fetch_add(1, std::memory_order_relaxed);
             uint64_t span = m->nowNs() - t0, idleSpan = m->idleNs - idle0;
             uint64_t busy = span > idleSpan ? span - idleSpan : 0;
             if (boostNow.exchange(false)) hint.loadUp();
@@ -344,12 +349,87 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setAudio
 JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_serialOpen(JNIEnv *, jobject, jlong h) {
     Session *s = S(h);
     if (!s) return false;
-    // The serial driver turns RX interrupts on at boot; only opening the port unmasks them.
-    // 6.5: COM1 (UART0), and only while the modem has not claimed it. 6 / 6.1 / 6.1.4: COM4 (UART1).
+    // 6.5.3: COM1 (UART0), and only while the modem has not claimed it.
+    // 6 / 6.1 / 6.1.4 / 6.5: the modem owns COM1, so GPS is COM4 (UART1).
     const IntController &ic = s->m->intc;
-    bool com1 = s->m->uart0.rxEnabled() && !(ic.intsubmsk & (1u << SUB_RXD0)) && !(ic.intmsk & (1u << IRQ_UART0));
-    bool com4 = s->m->uart1.rxEnabled() && !(ic.intsubmsk & (1u << SUB_RXD1)) && !(ic.intmsk & (1u << IRQ_UART1));
-    return s->m->modem->claimed() ? com4 : com1;
+    if (s->m->modem->claimed()) return s->m->uart1.appOpen(ic.intmsk, ic.intsubmsk, IRQ_UART1, SUB_RXD1);
+    return s->m->uart0.appOpen(ic.intmsk, ic.intsubmsk, IRQ_UART0, SUB_RXD0);
+}
+
+// Loop turns the emulation thread has finished. Flat while it is blocked presenting a frame.
+JNIEXPORT jlong JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_guestSlices(JNIEnv *, jobject, jlong h) {
+    Session *s = S(h);
+    return s ? (jlong)s->slices.load(std::memory_order_relaxed) : 0;
+}
+
+// Phone asleep: do not swap. A swap then blocks in the buffer queue until the screen is back,
+// and the guest (and its helper) freeze for the whole sleep.
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setPresenting(JNIEnv *, jobject, jlong h,
+                                                                                       jboolean on) {
+    Session *s = S(h);
+    if (s) s->gl.setPresenting(on);
+}
+
+static void pipeSend(JNIEnv *env, jlong h, jstring line, void (Sideband::*fn)(const std::string &)) {
+    Session *s = S(h);
+    if (!s || !line || !s->m->sideband) return;
+    const char *c = env->GetStringUTFChars(line, nullptr);
+    if (!c) return;
+    (s->m->sideband.get()->*fn)(c);
+    env->ReleaseStringUTFChars(line, c);
+}
+
+static jstring pipeTake(JNIEnv *env, jlong h, std::string (Sideband::*fn)()) {
+    Session *s = S(h);
+    if (!s || !s->m->sideband) return env->NewStringUTF("");
+    std::string t = (s->m->sideband.get()->*fn)();
+    return env->NewStringUTF(t.c_str());
+}
+
+// Command pipe: clip/ime watch, and the reply to the helper's "sync".
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hostCmdSend(JNIEnv *env, jobject, jlong h,
+                                                                                     jstring line) {
+    pipeSend(env, h, line, &Sideband::cmdSend);
+}
+
+JNIEXPORT jstring JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hostCmdTake(JNIEnv *env, jobject, jlong h) {
+    return pipeTake(env, h, &Sideband::cmdTake);
+}
+
+// Status pipe: phone status in, watchdog pulses out. Separate so it cannot stall a command.
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hostStatSend(JNIEnv *env, jobject, jlong h,
+                                                                                      jstring line) {
+    pipeSend(env, h, line, &Sideband::statSend);
+}
+
+JNIEXPORT jstring JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hostStatTake(JNIEnv *env, jobject, jlong h) {
+    return pipeTake(env, h, &Sideband::statTake);
+}
+
+// Contact/calendar bytes. A full queue returns false so the caller waits and retries.
+JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hostBulkPut(JNIEnv *env, jobject, jlong h,
+                                                                                         jbyteArray data, jboolean last) {
+    Session *s = S(h);
+    if (!s || !s->m->sideband || !data) return false;
+    jsize n = env->GetArrayLength(data);
+    std::vector<uint8_t> buf((size_t)n);
+    if (n > 0) env->GetByteArrayRegion(data, 0, n, reinterpret_cast<jbyte *>(buf.data()));
+    return s->m->sideband->bulkPut(buf.empty() ? nullptr : buf.data(), buf.size(), last);
+}
+
+// One guest→host chunk. First byte is 1 on the last chunk of a transfer. Null when none is waiting.
+JNIEXPORT jbyteArray JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hostBulkTake(JNIEnv *env, jobject, jlong h) {
+    Session *s = S(h);
+    if (!s || !s->m->sideband) return nullptr;
+    std::vector<uint8_t> out;
+    bool last = false;
+    if (!s->m->sideband->bulkTake(out, last)) return nullptr;
+    jbyteArray a = env->NewByteArray((jsize)out.size() + 1);
+    if (!a) return nullptr;
+    jbyte flag = last ? 1 : 0;
+    env->SetByteArrayRegion(a, 0, 1, &flag);
+    if (!out.empty()) env->SetByteArrayRegion(a, 1, (jsize)out.size(), reinterpret_cast<const jbyte *>(out.data()));
+    return a;
 }
 
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_serialWrite(JNIEnv *env, jobject, jlong h,
@@ -606,7 +686,7 @@ JNIEXPORT jint JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_ledState
     return (jint)s->m->dePage->nled.state();
 }
 
-// ---- Virtual GSM modem (core/src/board/modem.h): rilgsm images (WM 6 / 6.1 / 6.1.4) ----
+// ---- Virtual GSM modem (core/src/board/modem.h): rilgsm images (WM 6 / 6.1 / 6.1.4 / 6.5) ----
 
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_modemNetwork(
     JNIEnv *env, jobject, jlong h, jboolean service, jint signal, jboolean roaming, jstring op, jstring numeric,

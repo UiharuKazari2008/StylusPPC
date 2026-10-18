@@ -110,12 +110,43 @@ class PimSync(private val ctx: Context, private val guest: GuestBridge) {
         Log.i(TAG, "sync: asking the helper for its contacts and appointments")
         guest.boxFile("pim-dump.txt").delete()
         setPhase(Phase.DUMPING)
-        guest.send("pim dump")
+        guest.order("pim dump")
+    }
+
+    private val inbound = java.io.ByteArrayOutputStream()
+    private var inboundDone = false
+    private var pending: String? = null
+
+    /** One bulk chunk. The first byte is 1 on the last chunk of a dump or a result. */
+    fun acceptChunk(raw: ByteArray) {
+        if (raw.isEmpty()) return
+        val last = raw[0].toInt() and 0xFF != 0
+        if (raw.size > 1) inbound.write(raw, 1, raw.size - 1)
+        if (!last) return
+        inboundDone = true
+        val line = pending ?: return
+        pending = null
+        onGuest(line)
+    }
+
+    private fun takeBlob(): ByteArray? {
+        if (!inboundDone) return null
+        val b = inbound.toByteArray()
+        inbound.reset()
+        inboundDone = false
+        return b
     }
 
     /** A "pim ..." line from the helper, without the prefix. */
     fun onGuest(line: String) {
         val p = line.split(' ')
+        if (p[0] == "dumped" || p[0] == "applied") {
+            val stashName = if (p[0] == "dumped") "pim-dump" else "pim-result"
+            val blob = guest.takeStash(stashName) ?: takeBlob()
+            val name = if (p[0] == "dumped") "pim-dump.txt" else "pim-result.txt"
+            if (blob != null) guest.boxFile(name).writeBytes(blob)
+            else if (!guest.boxFile(name).exists()) { pending = line; return }
+        }
         when (p[0]) {
             "dumped" -> if (phase == Phase.DUMPING) {
                 setPhase(Phase.PLANNING)
@@ -126,7 +157,9 @@ class PimSync(private val ctx: Context, private val guest: GuestBridge) {
                             if (pl == null) { finish("nothing to do"); return@onSuccess }
                             plan = pl
                             setPhase(Phase.APPLYING)
-                            guest.send("pim apply")
+                            val bytes = guest.boxFile("pim-apply.txt").readBytes()
+                            guest.sendBlob("pim-apply", bytes)
+                            guest.sendOnNet("pim apply")
                         }.onFailure { Log.w(TAG, "sync failed", it); fail(it.message ?: it.javaClass.simpleName) }
                     }
                 }
