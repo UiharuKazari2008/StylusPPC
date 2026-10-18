@@ -153,6 +153,32 @@ static const SigWord kGate653[] = {
     {   68, CTX,  0xE2843C1E, 0xFFFFFFFF, 0x00000000},  // +86C add r3, r4, #0x1e00
 };
 
+// cprog.exe, WM 6.1.4, the skin bitmap blit (the draw method at VA 0x3958c). Both axes
+// used the bitmap's own size as the placement size and as StretchBlt's destination
+// (sb = bmWidth, r8 = bmHeight). The control rectangle is already in the registers:
+// fp = left edge's opposite (right), r8 = left, and later r2 = bottom, r1 = top.
+// A Win32 RECT's far edge is exclusive, so right-left and bottom-top are the dest size.
+// wSrc/hSrc are reloaded from the BITMAP GetObject left on the stack, so the source
+// stays the real bitmap and a larger control scales. The second `mov r4, #0` repeats
+// the one at +80, so that slot is free. 6.5.3 cprog does not have this sequence.
+static const SigWord kDialer614[] = {
+    {   -8, CTX,  0xE595300C, 0xFFFFFFFF, 0x00000000},  // +628 ldr r3, [r5, #0xc]   (bmpFlags)
+    {   -4, CTX,  0xE28DE04C, 0xFFFFFFFF, 0x00000000},  // +62C add lr, sp, #0x4c
+    {    0, PATCH, 0xE59D9058, 0xFFFFFFFF, 0xE04B9008}, // +630 ldr sb, [sp, #0x58] -> sub sb, fp, r8
+    {    4, CTX,  0xE1A0200B, 0xFFFFFFFF, 0x00000000},  // +634 mov r2, fp            (right)
+    {    8, CTX,  0xE58DE00C, 0xFFFFFFFF, 0x00000000},  // +638 str lr, [sp, #0xc]
+    {  0x2C, CTX,  0xE1A01008, 0xFFFFFFFF, 0x00000000},  // +65C mov r1, r8           (left, still)
+    {  0x30, CTX,  0xE59D805C, 0xFFFFFFFF, 0x00000000},  // +660 ldr r8, [sp, #0x5c]  (bmHeight, source)
+    {  0x44, CTX,  0xE58D9004, 0xFFFFFFFF, 0x00000000},  // +674 str sb, [sp, #4]     (X placement size)
+    {  0x7C, CTX,  0xE59D2024, 0xFFFFFFFF, 0x00000000},  // +6AC ldr r2, [sp, #0x24]  (bottom)
+    {  0x80, CTX,  0xE3A04000, 0xFFFFFFFF, 0x00000000},  // +6B0 mov r4, #0
+    {  0x90, CTX,  0xE59D1028, 0xFFFFFFFF, 0x00000000},  // +6C0 ldr r1, [sp, #0x28]  (top)
+    {  0x94, CTX,  0xE58D4050, 0xFFFFFFFF, 0x00000000},  // +6C4 str r4, [sp, #0x50]
+    {  0x98, PATCH, 0xE3A04000, 0xFFFFFFFF, 0xE0428001}, // +6C8 mov r4, #0 -> sub r8, r2, r1
+    {  0x9C, CTX,  0xE58D4048, 0xFFFFFFFF, 0x00000000},  // +6CC str r4, [sp, #0x48]
+    {  0xA0, CTX,  0xE58D8004, 0xFFFFFFFF, 0x00000000},  // +6D0 str r8, [sp, #4]     (Y placement size)
+};
+
 struct PatchDef {
     const char *name;
     uint32_t bit;
@@ -166,6 +192,7 @@ const PatchDef kPatches[] = {
     PATCH_DEF("nleddrvr 6.5.3 (accept MetaCycleOff blinks)", CodePatcher::ST_NLED, kNled653),
     PATCH_DEF("nleddrvr 6.1.4 (accept MetaCycleOff blinks)", CodePatcher::ST_NLED, kNled614),
     PATCH_DEF("fakeril 6.5.3 (connect gate)", CodePatcher::ST_GATE, kGate653),
+    PATCH_DEF("cprog 6.1.4 (phone skin fills the client)", CodePatcher::ST_DIALER, kDialer614),
 };
 constexpr int kNumPatches = (int)(sizeof kPatches / sizeof kPatches[0]);
 constexpr size_t kMaxSites = 32;

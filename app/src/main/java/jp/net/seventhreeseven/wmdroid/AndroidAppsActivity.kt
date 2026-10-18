@@ -67,24 +67,55 @@ class AndroidAppsActivity : SettingsPage() {
         val size = settings.dockSize
         title("Dock apps")
         section("Up to $size apps")
-        note("The dock shows the ticked apps in the order you tick them. Its position and size are in " +
-            "Settings > Dock.")
+        note("Tick the apps the dock shows. Up and Down change their order. Position and size are in Settings > Dock.")
         val order = settings.dockApps.toMutableList()
         val apps = AndroidApps.apps(this)
         // The dock's current apps first, in their order, then the rest.
         val sorted = order.mapNotNull { k -> apps.firstOrNull { it.key == k } } + apps.filter { it.key !in order }
-        for (a in sorted) appRow(a, a.key in order) { box, on ->
-            if (on && a.key !in order) {
-                if (order.size >= size) {
-                    box.isChecked = false
-                    Toast.makeText(this, "The dock holds $size apps: untick one first", Toast.LENGTH_SHORT).show()
-                    return@appRow
-                }
-                order += a.key
-            } else if (!on) order -= a.key
-            settings.dockApps = order
+        for (a in sorted) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(52) }
+            val icon = ImageView(this)
+            row.addView(icon, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(12) })
+            val box = CheckBox(this).apply { text = a.label; isChecked = a.key in order }
+            box.setOnCheckedChangeListener { b, on ->
+                if (on && a.key !in order) {
+                    if (order.size >= size) {
+                        b.isChecked = false
+                        Toast.makeText(this, "The dock holds $size apps: untick one first", Toast.LENGTH_SHORT).show()
+                        return@setOnCheckedChangeListener
+                    }
+                    order += a.key
+                } else if (!on) order -= a.key
+                settings.dockApps = order
+                recreate()
+            }
+            row.addView(box, LinearLayout.LayoutParams(0, -2, 1f))
+            val up = buttonSlot("Up")
+            val down = buttonSlot("Down")
+            val at = order.indexOf(a.key)
+            up.isEnabled = at > 0
+            down.isEnabled = at >= 0 && at < order.lastIndex
+            if (at < 0) { up.visibility = android.view.View.GONE; down.visibility = android.view.View.GONE }
+            up.setOnClickListener {
+                val i = order.indexOf(a.key)
+                if (i > 0) { val swap = order[i - 1]; order[i - 1] = order[i]; order[i] = swap; settings.dockApps = order; recreate() }
+            }
+            down.setOnClickListener {
+                val i = order.indexOf(a.key)
+                if (i >= 0 && i < order.lastIndex) { val swap = order[i + 1]; order[i + 1] = order[i]; order[i] = swap; settings.dockApps = order; recreate() }
+            }
+            row.addView(up)
+            row.addView(down)
+            card.addView(row, LinearLayout.LayoutParams(-1, -2))
+            icons += icon to a
         }
         loadIcons()
+    }
+
+    private fun buttonSlot(label: String) = android.widget.Button(this).apply {
+        text = label
+        minimumWidth = dp(48)
+        minimumHeight = dp(40)
     }
 
     private fun pins() {

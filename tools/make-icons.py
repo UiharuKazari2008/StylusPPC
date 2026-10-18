@@ -91,6 +91,19 @@ def send(s):
     return img
 
 
+def lobby(s):
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    glossy_tile(img, s, (210, 120, 70), (120, 48, 36))
+    d = ImageDraw.Draw(img)
+    def person(cx, cy, scale, fill):
+        r = s * 0.07 * scale
+        d.ellipse([cx - r, cy - r * 2.4, cx + r, cy - r * 0.3], fill=fill)
+        d.pieslice([cx - r * 2.1, cy - r * 0.2, cx + r * 2.1, cy + r * 2.6], 200, 340, fill=fill)
+    person(s * 0.38, s * 0.58, 1.15, (255, 244, 230, 255))
+    person(s * 0.62, s * 0.60, 0.92, (255, 220, 190, 255))
+    return img
+
+
 def write_ico(path, draw):
     images = []
     for size in SIZES:
@@ -134,3 +147,5 @@ if __name__ == "__main__":
     write_ico(os.path.join(ROOT, "guest", "GpsTest", "app.ico"), globe)
     os.makedirs(os.path.join(ROOT, "guest", "SendBluetooth"), exist_ok=True)
     write_ico(os.path.join(ROOT, "guest", "SendBluetooth", "app.ico"), send)
+    os.makedirs(os.path.join(ROOT, "guest", "InfraLobby"), exist_ok=True)
+    write_ico(os.path.join(ROOT, "guest", "InfraLobby", "app.ico"), lobby)

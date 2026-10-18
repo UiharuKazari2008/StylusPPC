@@ -109,6 +109,7 @@ private:
     friend uint32_t jitRead(Cpu *, uint32_t, uint32_t);
     friend void jitWrite(Cpu *, uint32_t, uint32_t, uint32_t);
     friend uint32_t jitInterp(Cpu *, uint32_t, uint32_t);
+    friend uint32_t jitInterpThumb(Cpu *, uint32_t, uint32_t);
     Bus &bus;
     // CPSR split for speed.
     uint32_t fN, fZ, fC, fV;   // each 0 or 1

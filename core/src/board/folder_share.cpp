@@ -148,6 +148,43 @@ void FolderShare::closeAll() {
         h = Handle();
     }
     for (Find &f : finds) f = Find();
+    dirCache.clear();
+    spaceOk = false;
+}
+
+void FolderShare::dropCache(const std::string &path) {
+    dirCache.erase(parentOf(path));
+    dirCache.erase(path);
+    spaceOk = false;
+}
+
+const FolderShare::Snap &FolderShare::snapshot(const std::string &dir) {
+    if (dirCache.size() > 48) dirCache.clear();
+    Snap &s = dirCache[dir];
+    auto now = std::chrono::steady_clock::now();
+    if (s.valid && now - s.at < std::chrono::milliseconds(1500)) return s;
+    s.items.clear();
+    DIR *d = opendir(dir.c_str());
+    if (d) {
+        while (struct dirent *e = readdir(d)) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            Meta m;
+            m.name = e->d_name;
+            struct stat st;
+            if (stat((dir + "/" + m.name).c_str(), &st) == 0) {
+                m.dir = S_ISDIR(st.st_mode);
+                m.size = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+                m.mtime = st.st_mtime;
+                m.ctime = st.st_ctime;
+                m.mode = st.st_mode;
+            }
+            s.items.push_back(std::move(m));
+        }
+        closedir(d);
+    }
+    s.valid = true;
+    s.at = now;
+    return s;
 }
 
 void FolderShare::setMounts(const std::vector<Mount> &m, bool announce) {
@@ -188,15 +225,10 @@ uint8_t *FolderShare::ram(uint32_t pa, uint32_t len) {
 }
 
 std::string FolderShare::matchCase(const std::string &dir, const std::string &name) {
-    if (exists(dir + "/" + name)) return name;
-    DIR *d = opendir(dir.c_str());
-    if (!d) return name;
-    std::string found = name;
-    while (struct dirent *e = readdir(d)) {
-        if (!strcasecmp(e->d_name, name.c_str())) { found = e->d_name; break; }
-    }
-    closedir(d);
-    return found;
+    const Snap &s = snapshot(dir);
+    for (const Meta &m : s.items)
+        if (!strcasecmp(m.name.c_str(), name.c_str())) return m.name;
+    return name;
 }
 
 uint32_t FolderShare::resolve(const std::u16string &guest, std::string &host, bool &virtualRoot, bool allowWild) {
@@ -284,6 +316,24 @@ void FolderShare::fillInfo(uint8_t *pb, const std::string &host, bool isVirtualD
     put32(pb, PB_CTIME, toDos(st.st_ctime));
 }
 
+void FolderShare::fillInfo(uint8_t *pb, const Entry &e, bool isVirtualDir) {
+    if (isVirtualDir || !e.have) {
+        put16(pb, PB_ATTR, A_DIR);
+        put32(pb, PB_FSIZE, 0);
+        put32(pb, PB_TIME, 0);
+        put32(pb, PB_CTIME, 0);
+        return;
+    }
+    uint16_t attr = e.dir ? A_DIR : A_ARCHIVE;
+    if (!(e.mode & S_IWUSR)) attr |= A_RO;
+    for (const Mount &o : overlays)
+        if (e.host == o.path && (o.name[0] == '.' || o.name == "2577")) attr |= A_HIDDEN;
+    put16(pb, PB_ATTR, attr);
+    put32(pb, PB_FSIZE, e.dir ? 0 : (e.size >= 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)e.size));
+    put32(pb, PB_TIME, toDos(e.mtime));
+    put32(pb, PB_CTIME, toDos(e.ctime));
+}
+
 void FolderShare::listDir(const std::string &host, bool virtualRoot, const std::string &pattern, std::vector<Entry> &out) {
     out.clear();
     bool isRoot = virtualRoot || (mounts.size() == 1 && mounts[0].name.empty() && host == mounts[0].path);
@@ -293,26 +343,48 @@ void FolderShare::listDir(const std::string &host, bool virtualRoot, const std::
             if (!strcasecmp(o.name.c_str(), name)) return true;
         return false;
     };
+    auto pushMount = [&](const Mount &m) {
+        Entry e;
+        e.name = m.name;
+        e.host = m.path;
+        struct stat st;
+        if (stat(m.path.c_str(), &st) == 0) {
+            e.have = true;
+            e.dir = S_ISDIR(st.st_mode);
+            e.size = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+            e.mtime = st.st_mtime;
+            e.ctime = st.st_ctime;
+            e.mode = st.st_mode;
+        }
+        out.push_back(std::move(e));
+    };
     if (isRoot)
         for (const Mount &o : overlays)
-            if (wildMatch(pattern.c_str(), o.name.c_str())) out.push_back({o.name, o.path});
+            if (wildMatch(pattern.c_str(), o.name.c_str())) pushMount(o);
     if (virtualRoot) {
         for (const Mount &m : mounts)
-            if (!shadowed(m.name.c_str()) && wildMatch(pattern.c_str(), m.name.c_str())) out.push_back({m.name, m.path});
+            if (!shadowed(m.name.c_str()) && wildMatch(pattern.c_str(), m.name.c_str())) pushMount(m);
         return;
     }
-    DIR *d = opendir(host.c_str());
-    if (!d) return;
-    while (struct dirent *e = readdir(d)) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || shadowed(e->d_name)) continue;
-        if (wildMatch(pattern.c_str(), e->d_name)) out.push_back({e->d_name, host + "/" + e->d_name});
+    for (const Meta &m : snapshot(host).items) {
+        if (shadowed(m.name.c_str()) || !wildMatch(pattern.c_str(), m.name.c_str())) continue;
+        Entry e;
+        e.name = m.name;
+        e.host = host + "/" + m.name;
+        e.have = true;
+        e.dir = m.dir;
+        e.size = m.size;
+        e.mtime = m.mtime;
+        e.ctime = m.ctime;
+        e.mode = m.mode;
+        out.push_back(std::move(e));
     }
-    closedir(d);
 }
 
 void FolderShare::setOverlays(const std::vector<Mount> &o) {
     std::lock_guard<std::mutex> lk(mu);
     overlays = o;
+    dirCache.clear();
 }
 
 uint32_t FolderShare::call(uint32_t code, uint32_t pbPa) {
@@ -326,6 +398,7 @@ uint32_t FolderShare::call(uint32_t code, uint32_t pbPa) {
     if (!pb || get16(pb, PB_SIZE) != PB_BYTES) return E_GENERAL;
     uint32_t r = dispatch(code, pb);
     if (traceCalls) LOGI("folder share: op %02x %s -> %x", code, toUtf8(pbName(pb, PB_NAMELEN, PB_NAME)).c_str(), r);
+    if (code != 0 && code != 4 && code != 0x15) ops.fetch_add(1, std::memory_order_relaxed);
     return r;
 }
 
@@ -357,6 +430,7 @@ uint32_t FolderShare::opCreate(uint8_t *pb) {
     int fd = open(host.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0666);
     if (fd < 0) return errnoToCode(errno, exists(parentOf(host)));
     close(fd);
+    dropCache(host);
     return E_OK;
 }
 
@@ -425,6 +499,7 @@ uint32_t FolderShare::opWrite(uint8_t *pb) {
     if (n < 0) return errno == ENOSPC ? E_GENERAL : errnoToCode(errno);
     lseek(h.fd, (off_t)pos + n, SEEK_SET);
     put32(pb, PB_FSIZE, (uint32_t)n);
+    dropCache(h.host);
     return E_OK;
 }
 
@@ -436,6 +511,7 @@ uint32_t FolderShare::opSetEof(uint8_t *pb) {
     uint32_t pos = get32(pb, PB_POS);
     if (ftruncate(h.fd, (off_t)pos) != 0) return errnoToCode(errno);
     lseek(h.fd, (off_t)pos, SEEK_SET);
+    dropCache(h.host);
     return E_OK;
 }
 
@@ -448,14 +524,20 @@ uint32_t FolderShare::opClose(uint8_t *pb) {
 }
 
 uint32_t FolderShare::opGetSpace(uint8_t *pb) {
-    struct statvfs vs;
-    if (statvfs(mounts[0].path.c_str(), &vs) != 0) return errnoToCode(errno);
-    // The phone's own storage figures, in 32 KB units. DE clamps the byte counts to 4 GiB first;
-    // we don't, so a modern phone shows its real size (units fit 32 bits up to 128 TiB).
-    uint64_t freeB = (uint64_t)vs.f_bavail * vs.f_frsize, total = (uint64_t)vs.f_blocks * vs.f_frsize;
-    uint64_t freeU = freeB / 32768, totalU = total / 32768;
-    put32(pb, PB_FSIZE, (uint32_t)(freeU > 0xFFFFFFFFull ? 0xFFFFFFFFull : freeU));
-    put32(pb, PB_POS, (uint32_t)(totalU > 0xFFFFFFFFull ? 0xFFFFFFFFull : totalU));
+    auto now = std::chrono::steady_clock::now();
+    if (!spaceOk || now - spaceAt > std::chrono::seconds(2)) {
+        struct statvfs vs;
+        if (statvfs(mounts[0].path.c_str(), &vs) != 0) return errnoToCode(errno);
+        // The phone's own storage figures, in 32 KB units. DE clamps the byte counts to 4 GiB first;
+        // we don't, so a modern phone shows its real size (units fit 32 bits up to 128 TiB).
+        uint64_t freeB = (uint64_t)vs.f_bavail * vs.f_frsize, total = (uint64_t)vs.f_blocks * vs.f_frsize;
+        spaceFree = freeB / 32768;
+        spaceTotal = total / 32768;
+        spaceAt = now;
+        spaceOk = true;
+    }
+    put32(pb, PB_FSIZE, (uint32_t)(spaceFree > 0xFFFFFFFFull ? 0xFFFFFFFFull : spaceFree));
+    put32(pb, PB_POS, (uint32_t)(spaceTotal > 0xFFFFFFFFull ? 0xFFFFFFFFull : spaceTotal));
     return E_OK;
 }
 
@@ -465,6 +547,7 @@ uint32_t FolderShare::opMkDir(uint8_t *pb) {
     if (uint32_t r = resolve(pbName(pb, PB_NAMELEN, PB_NAME), host, vroot)) return r;
     if (vroot) return E_GENERAL;
     if (mkdir(host.c_str(), 0777) != 0) return errno == EEXIST ? E_GENERAL : errnoToCode(errno, false);
+    dropCache(host);
     return E_OK;
 }
 
@@ -478,6 +561,7 @@ uint32_t FolderShare::opRmDir(uint8_t *pb) {
         if (errno == ENOTDIR) return E_ACCESS;
         return errnoToCode(errno, exists(parentOf(host)));
     }
+    dropCache(host);
     return E_OK;
 }
 
@@ -505,6 +589,7 @@ uint32_t FolderShare::opSetAttributes(uint8_t *pb) {
         ts[1].tv_nsec = 0;
         if (utimensat(AT_FDCWD, host.c_str(), ts, 0) != 0) return errnoToCode(errno);
     }
+    dropCache(host);
     return E_OK;
 }
 
@@ -519,6 +604,8 @@ uint32_t FolderShare::opRename(uint8_t *pb) {
     for (const Handle &h : handles)
         if (h.used && (h.host == from || h.host.compare(0, from.size() + 1, from + "/") == 0)) return E_SHARING;
     if (rename(from.c_str(), to.c_str()) != 0) return errno == EXDEV ? E_GENERAL : errnoToCode(errno, false);
+    dropCache(from);
+    dropCache(to);
     return E_OK;
 }
 
@@ -533,6 +620,7 @@ uint32_t FolderShare::opDelete(uint8_t *pb) {
     for (const Handle &h : handles)
         if (h.used && h.host == host) return E_SHARING;
     if (unlink(host.c_str()) != 0) return errnoToCode(errno);
+    dropCache(host);
     return E_OK;
 }
 
@@ -565,7 +653,7 @@ uint32_t FolderShare::opGetInfo(uint8_t *pb) {
         listDir(host, vroot, "*", all);
         listDir(host, vroot, pattern, matches);
         if (matches.empty()) return all.empty() ? E_NOMORE : E_NOFILE;
-        fillInfo(pb, matches[0].host, false);
+        fillInfo(pb, matches[0], false);
         if (tid != 0xFFFFFFFFu) {
             putName(pb, matches[0].name);
             Find &f = finds[tid];
@@ -583,7 +671,7 @@ uint32_t FolderShare::opGetInfo(uint8_t *pb) {
         return E_NOMORE;
     }
     const Entry &e = f.entries[f.next++];
-    fillInfo(pb, e.host, false);
+    fillInfo(pb, e, false);
     putName(pb, e.name);
     return E_OK;
 }

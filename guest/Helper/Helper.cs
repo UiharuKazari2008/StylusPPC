@@ -163,6 +163,32 @@ static class Helper
         }
     }
 
+    // Ends every process with this file name, except this one.
+    static void EndNamed(string file)
+    {
+        int self = Process.GetCurrentProcess().Id;
+        IntPtr snap = CreateToolhelp32Snapshot(2 /* TH32CS_SNAPPROCESS */ | 0x40000000 /* SNAPNOHEAPS */, 0);
+        if (snap == new IntPtr(-1)) return;
+        try
+        {
+            byte[] pe = new byte[564];
+            BitConverter.GetBytes(pe.Length).CopyTo(pe, 0);
+            for (bool ok = Process32First(snap, pe); ok; ok = Process32Next(snap, pe))
+            {
+                int pid = BitConverter.ToInt32(pe, 8);
+                string exe = Encoding.Unicode.GetString(pe, 36, 520);
+                int nul = exe.IndexOf((char)0);
+                if (nul >= 0) exe = exe.Substring(0, nul);
+                if (pid == self || string.Compare(Path.GetFileName(exe), file, true) != 0) continue;
+                IntPtr h = OpenProcess(1 /* PROCESS_TERMINATE */, false, pid);
+                if (h == IntPtr.Zero) continue;
+                TerminateProcess(h, 0);
+                CloseHandle(h);
+            }
+        }
+        finally { CloseToolhelp32Snapshot(snap); }
+    }
+
     // Ends every other process running the installed helper's file (a stuck or lingering helper).
     static void EndOtherHelpers()
     {
@@ -245,39 +271,319 @@ static class Helper
             File.Copy(src, dst, true);
             return dst;
         }
-        catch (Exception) { return File.Exists(dst) ? dst : null; }  // in use: keep the old one
+        catch (Exception)
+        {
+            // A loaded DLL (the shell holds WmpHook) cannot be overwritten. Move it aside so the
+            // next load of this path gets the new file; the process that has it mapped keeps the old image.
+            try
+            {
+                string old = dst + ".old";
+                try { if (File.Exists(old)) File.Delete(old); } catch (Exception) { }
+                File.Move(dst, old);
+                File.Copy(src, dst, true);
+                return dst;
+            }
+            catch (Exception) { return File.Exists(dst) ? dst : null; }
+        }
     }
 
     static void Install()
     {
-        if (string.Compare(Self, InstalledExe, true) != 0)
+        bool copied = string.Compare(Self, InstalledExe, true) == 0;
+        if (!copied)
         {
-            try { File.Copy(Self, InstalledExe, true); }
-            catch (IOException) { } // already running from there
+            try { File.Copy(Self, InstalledExe, true); copied = true; }
+            catch (IOException)
+            {
+                Log("helper: Windows copy is in use");
+            }
         }
         try { File.Copy(Self, UiExe, true); }
         catch (Exception) { }  // a settings page is open: it keeps the old copy until next time
-        string ui = File.Exists(UiExe) ? UiExe : InstalledExe;
+        string ui = File.Exists(UiExe) ? UiExe : (copied ? InstalledExe : Self);
         Shortcut(@"\Windows\Start Menu\Programs\PocketStylus.lnk", "\"" + ui + "\"");
-        Shortcut(@"\Windows\StartUp\PocketStylus.lnk", "\"" + InstalledExe + "\" serve");
+        // If Windows still has the previous helper, start this copy after the reboot. That copy
+        // replaces the Windows one once the old process is gone.
+        Shortcut(@"\Windows\StartUp\PocketStylus.lnk", "\"" + (copied ? InstalledExe : Self) + "\" serve");
         // The other programs come with every helper update (new icons and fixes reach them too).
         string send = CopyProgram("SendBluetooth.exe");
         CopyProgram("GpsTest.exe", true);
+        string lobby = CopyProgram("InfraLobby.exe");
+        if (lobby != null) Shortcut(@"\Windows\Start Menu\Programs\InfraLobby.lnk", "\"" + lobby + "\"");
+        try { DropLeftover(); } catch (Exception) { }
+        // Today items are not installed or replaced here. Settings > Today (the "widget" command)
+        // is the only way one is added. Copies that were injected before that button existed are
+        // removed once, and a later helper start leaves whatever the user installed.
+        bool stripped = false;
+        try { stripped = ClearInjectedWidgets(); } catch (Exception e) { Log("today " + e.Message); }
+        if (stripped)
+        {
+            EndNamed("shell32.exe");
+            try { EnsureShell(); } catch (Exception) { }
+        }
         // Text messages on WM 6.5.3 (Sms.cs): MAPIdotnet's native half and its stream types.
         CopyProgram("MAPIlib.dll");
         CopyProgram("OpenNETCF.dll");
+        AudioClass.RemoveHook();  // WmpHook.dll did not drive the player (AudioClass.cs)
         Shortcut(Bluetooth.StartMenuLink, send != null ? "\"" + send + "\"" : "\"" + ui + "\" send");
-        // Settings > System entry (WM shows ControlPanel items that redirect to a program).
         // (Renamed WMDroid -> PocketStylus: the old entry and shortcuts go.)
-        try { Registry.LocalMachine.DeleteSubKey(@"ControlPanel\WMDroid"); } catch (Exception) { }
         foreach (string old in new string[] { @"\Windows\Start Menu\Programs\WMDroid.lnk", @"\Windows\StartUp\WMDroid.lnk" })
             try { if (File.Exists(old)) File.Delete(old); } catch (Exception) { }
+        SettingsEntry(ui);
+    }
+
+    // Retired Today plugins (notes, pins, search, and the old weather DLLs).
+    // SkyToday.dll and InfraToday4.dll are the optional widgets. DropLeftover does not touch them;
+    // ClearInjectedWidgets removes the copies that were injected before the install buttons existed.
+    static bool TrashDllName(string path)
+    {
+        string n = Path.GetFileName(path).ToLower();
+        if (n == "infratoday4.dll") return false;
+        if (n.EndsWith(".old")) n = n.Substring(0, n.Length - 4);
+        if (!n.EndsWith(".dll")) return false;
+        foreach (string p in new string[] {
+            "psnotes", "pssearch", "psweather", "pspins",
+            "wmdnotes", "wmdsearch", "wmdweather", "wmdpins", "infratoday" })
+            if (n.StartsWith(p)) return true;
+        return false;
+    }
+
+    static bool DeleteKey(string path)
+    {
+        string[] subs;
+        using (RegistryKey k = Registry.LocalMachine.OpenSubKey(path))
+        {
+            if (k == null) return false;
+            subs = k.GetSubKeyNames();
+        }
+        foreach (string sub in subs) DeleteKey(path + "\\" + sub);
+        try { Registry.LocalMachine.DeleteSubKey(path, false); return true; }
+        catch (Exception) { return false; }
+    }
+
+    static bool DropTodayKeys()
+    {
+        bool changed = false;
+        const string root = @"Software\Microsoft\Today\Items";
+        foreach (string name in new string[] { "Notifications", "Programs", "Search" })
+            if (DeleteKey(root + "\\" + name)) changed = true;
+        try
+        {
+            string[] names;
+            using (RegistryKey items = Registry.LocalMachine.OpenSubKey(root))
+            {
+                if (items == null) return changed;
+                names = items.GetSubKeyNames();
+            }
+            foreach (string name in names)
+            {
+                if (string.Compare(name, "InfraWAN", true) == 0) continue;
+                string dll = null;
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(root + "\\" + name))
+                    if (k != null) dll = k.GetValue("DLL") as string;
+                if (dll != null && TrashDllName(dll) && DeleteKey(root + "\\" + name)) changed = true;
+            }
+        }
+        catch (Exception) { }
+        return changed;
+    }
+
+    static int DropPluginFiles()
+    {
+        int n = 0;
+        foreach (string pattern in new string[] {
+            "PsNotes*.dll", "PsNotes*.old", "PsSearch*.dll", "PsSearch*.old",
+            "PsWeather*.dll", "PsWeather*.old", "PsPins*.dll", "PsPins*.old",
+            "WmdNotes*.dll", "WmdNotes*.old", "WmdSearch*.dll", "WmdSearch*.old",
+            "WmdWeather*.dll", "WmdWeather*.old", "WmdPins*.dll", "WmdPins*.old",
+            "InfraToday*.dll", "InfraToday*.old" })
+        {
+            string[] found;
+            try { found = Directory.GetFiles(@"\Windows", pattern); }
+            catch (Exception) { continue; }
+            foreach (string path in found)
+            {
+                if (!TrashDllName(path)) continue;
+                try { File.Delete(path); n++; }
+                catch (Exception) { }
+            }
+        }
+        foreach (string path in new string[] {
+            @"\Storage Card\.wmdroid\notes.txt", @"\Storage Card\.wmdroid\weather.bmp",
+            @"\Storage Card2\.wmdroid\notes.txt", @"\Storage Card2\.wmdroid\weather.bmp" })
+        {
+            try { if (File.Exists(path)) { File.Delete(path); n++; } }
+            catch (Exception) { }
+        }
+        return n;
+    }
+
+    // Removes the retired Today plugins. The shell is left running: ending it here kept Today from
+    // coming back. InfraWAN and Weather are handled by ClearInjectedWidgets, once.
+    static void DropLeftover()
+    {
+        bool keys = DropTodayKeys();
+        int files = DropPluginFiles();
+        try
+        {
+            using (RegistryKey live = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Today\Items\Windows Live Search", true))
+            {
+                object on = live == null ? null : live.GetValue("Enabled");
+                if (live != null && !(on is int && (int)on == 1)) live.SetValue("Enabled", 1);
+            }
+        }
+        catch (Exception) { }
+        if (keys || files > 0)
+        {
+            Log("today: removed leftover items");
+            RegFlushKey(HKLM);
+        }
+    }
+
+    static readonly UIntPtr HKCU = new UIntPtr(0x80000001u);
+
+    static bool WidgetsOptIn()
+    {
+        try
+        {
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\WMDroid"))
+            {
+                object v = k == null ? null : k.GetValue("TodayOptIn");
+                return v is int && (int)v == 1;
+            }
+        }
+        catch (Exception) { return false; }
+    }
+
+    // The Weather and InfraWAN items shipped before there was an install button. Today still lists
+    // them, and their DLLs (and the .old copies a replace leaves behind) are what breaks the screen.
+    // Once, remove the items and the files. After this, only the settings button adds one.
+    static bool ClearInjectedWidgets()
+    {
+        if (WidgetsOptIn()) return false;
+        bool removed = false;
+        if (DeleteKey(@"Software\Microsoft\Today\Items\Weather")) removed = true;
+        if (DeleteKey(@"Software\Microsoft\Today\Items\InfraWAN")) removed = true;
+        foreach (string path in new string[] {
+            @"\Windows\SkyToday.dll", @"\Windows\SkyToday.dll.old", @"\Windows\SkyToday.dll.dead",
+            @"\Windows\InfraToday.dll", @"\Windows\InfraToday.dll.old",
+            @"\Windows\InfraToday4.dll", @"\Windows\InfraToday4.dll.old", @"\Windows\InfraToday4.dll.dead" })
+        {
+            if (RemoveTodayFile(path)) removed = true;
+        }
+        bool gone = true;
+        foreach (string path in new string[] {
+            @"\Windows\SkyToday.dll", @"\Windows\InfraToday.dll", @"\Windows\InfraToday4.dll" })
+            if (File.Exists(path)) gone = false;
+        using (RegistryKey w = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Today\Items\Weather"))
+            if (w != null) gone = false;
+        using (RegistryKey i = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Today\Items\InfraWAN"))
+            if (i != null) gone = false;
+        if (gone)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"Software\WMDroid"))
+                    if (k != null) k.SetValue("TodayOptIn", 1, RegistryValueKind.DWord);
+                RegFlushKey(HKCU);
+            }
+            catch (Exception e) { Log("today opt-in " + e.Message); }
+        }
+        if (removed)
+        {
+            Log("today: removed the injected widgets");
+            RegFlushKey(HKLM);
+        }
+        return removed;
+    }
+
+    static bool RemoveTodayFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            File.Delete(path);
+            return true;
+        }
+        catch (Exception)
+        {
+            try
+            {
+                string dead = path + ".away";
+                if (File.Exists(dead)) File.Delete(dead);
+                File.Move(path, dead);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+    }
+
+    static bool ProcessNamed(string file)
+    {
+        IntPtr snap = CreateToolhelp32Snapshot(2 /* TH32CS_SNAPPROCESS */ | 0x40000000 /* SNAPNOHEAPS */, 0);
+        if (snap == new IntPtr(-1)) return false;
+        try
+        {
+            byte[] pe = new byte[564];
+            BitConverter.GetBytes(pe.Length).CopyTo(pe, 0);
+            for (bool ok = Process32First(snap, pe); ok; ok = Process32Next(snap, pe))
+            {
+                string exe = Encoding.Unicode.GetString(pe, 36, 520);
+                int nul = exe.IndexOf((char)0);
+                if (nul >= 0) exe = exe.Substring(0, nul);
+                if (string.Compare(Path.GetFileName(exe), file, true) == 0) return true;
+            }
+        }
+        finally { CloseToolhelp32Snapshot(snap); }
+        return false;
+    }
+
+    // The cleanup used to end the shell, and Today then never came back. Start it if it is gone.
+    static void EnsureShell()
+    {
+        if (ProcessNamed("shell32.exe")) return;
+        try
+        {
+            Process.Start(@"\Windows\shell32.exe", "");
+            Log("today: shell was not running");
+        }
+        catch (Exception e) { Log("today: shell " + e.Message); }
+    }
+
+    static readonly UIntPtr HKLM = new UIntPtr(0x80000002u);
+    [DllImport("coredll.dll")] static extern int RegFlushKey(UIntPtr hKey);
+
+    // Settings > System. Group is the category: 0 Personal, 1 System, 2 Connections.
+    /** "widget weather" / "widget infrawan": the settings button. Does not run on its own. */
+    public static string InstallWidget(string which)
+    {
+        which = which == null ? "" : which.Trim().ToLower();
+        bool changed;
+        string name;
+        if (which == "weather") { changed = Weather.Install(); name = "Weather"; }
+        else if (which == "infrawan") { changed = Today.Install(); name = "InfraWAN"; }
+        else return "bad args";
+        if (changed) EndNamed("shell32.exe");
+        return changed ? "installed " + name : "same " + name;
+    }
+
+    public static void SettingsEntry(string exe)
+    {
+        try { Registry.LocalMachine.DeleteSubKey(@"ControlPanel\WMDroid"); } catch (Exception) { }
         using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"ControlPanel\PocketStylus"))
         {
-            k.SetValue("Group", 2);
-            k.SetValue("Redirect", ui);
-            k.SetValue("Icon", ui + ",0");
+            k.SetValue("", "PocketStylus");
+            k.SetValue("Group", 1);
+            k.SetValue("Redirect", exe);
+            k.SetValue("Icon", exe + ",0");
         }
+        try
+        {
+            string dir = @"\Windows\Start Menu\Settings\System";
+            Directory.CreateDirectory(dir);
+            Shortcut(dir + @"\PocketStylus.lnk", "\"" + exe + "\"");
+        }
+        catch (Exception e) { Log("settings link " + e.Message); }
     }
 
     public static void Shortcut(string path, string target)
@@ -298,6 +604,10 @@ static class Helper
     static volatile int beat = Environment.TickCount;
 
     static void Step(string what) { stage = what; beat = Environment.TickCount; }
+
+    // A long command (filing a lot of texts) is still moving: the watchdog restarts a helper that
+    // has not stepped for 45 s, and that restart pulls the storage card out from under it.
+    internal static void Beat() { beat = Environment.TickCount; }
 
     // ---------------------------------------------------------------------------------------
     // The card. The app takes it out and puts it back (e.g. to restart a silent helper), and the
@@ -385,17 +695,32 @@ static class Helper
             if (Marshal.GetLastWin32Error() == 183) { Log("takeover: the old helper still runs"); return; }
         }
         if (takeover) Log("serving (took over)");
-        // Watchdog: if one step of the loop blocks (a driver call, a window that stopped answering),
-        // the app's commands would wait forever. Log where it stuck, start a fresh helper and end
-        // this one; the stuck command was already taken out of the mailbox, so it isn't repeated.
+        // Watchdog: a step that never returns (a driver call, a window that stopped answering) would
+        // leave the app's commands waiting. A slow command is given three minutes and a pulse, so a
+        // slowed guest is not restarted and the storage card stays in. A wedged loop still restarts
+        // after 45 s. The stuck command was already taken out of the mailbox, so it isn't repeated.
         Step("start");
         var dog = new Thread(delegate ()
         {
+            bool slowLogged = false;
             while (!quit)
             {
                 Thread.Sleep(5000);
+                if (quit) break;
                 int stuck = Environment.TickCount - beat;
-                if (quit || stuck < 45000) continue;
+                // Only while work is actually slow: an idle helper already answers, and a pulse
+                // every 5 s would fill the mailbox when the app is not reading it.
+                if (stage.StartsWith("cmd ") || stuck >= 15000) Send("alive");
+                // A command may run for minutes when the guest itself is slowed. Between commands,
+                // 45 s still means the loop is wedged.
+                int limit = stage.StartsWith("cmd ") ? 180000 : 45000;
+                if (stuck < 45000) slowLogged = false;
+                else if (stuck < limit && !slowLogged)
+                {
+                    slowLogged = true;
+                    Log("slow " + (stuck / 1000) + " s at " + stage);
+                }
+                if (stuck < limit) continue;
                 Log("stuck " + stuck / 1000 + " s at " + stage + "; restarting");
                 Send("stuck " + stage);
                 // Through the card's copy, the same way as an update: this file is running (one
@@ -410,6 +735,10 @@ static class Helper
         try { Patch.NoNetPrompt(); } catch (Exception e) { Log("net " + e.Message); }  // answer netui's network card question first (Patch.cs)
         Send(Hello());
         try { Camera.Install(); } catch (Exception e) { Log("camera " + e.Message); }  // camera passthrough (Camera.cs)
+        try { InputSync.RemoveBlank(); } catch (Exception e) { Log("ime " + e.Message); }  // the blank keyboard is gone (InputSync.cs)
+        try { HtcCompat.Install(); } catch (Exception e) { Log("htc " + e.Message); }  // G-sensor driver + DirectDraw shim for HTC apps (HtcCompat.cs)
+        try { DropLeftover(); } catch (Exception) { }
+        try { EnsureShell(); } catch (Exception) { }
         Standby.Disable();  // WM's own auto-off would stop everything, mailbox included (Standby.cs)
         bool patchChecked = false;
         while (!quit)
@@ -458,6 +787,7 @@ static class Helper
             Step("camera");
             try { Camera.Poll(); } catch (Exception e) { Log("camera " + e.Message); }  // portrait sensor: registry in step (Camera.cs)
             Step("idle");
+            try { Weather.Tick(); } catch (Exception) { }  // today's forecast, while the Today item is on (Weather.cs)
             Thread.Sleep(IsMounted(Card) ? 500 : 3000);
         }
         Calls.Stop();  // close the RIL client, or this process (and its mutex) outlives the update
@@ -481,6 +811,20 @@ static class Helper
                 try { File.Delete(rest); return "ok"; }
                 catch (Exception e) { return e.GetType().Name + " " + e.Message + " attr=" + (File.Exists(rest) ? new FileInfo(rest).Attributes.ToString() : "missing"); }
             case "ls": return string.Join(" | ", Directory.GetFiles(rest.Length > 0 ? rest : Box));
+            case "pull":
+            {
+                // pull <guest path> <name>: copy one file out of Windows onto the storage card.
+                string[] a = SplitN(rest, 2);
+                if (a.Length < 2 || a[1].IndexOf('\\') >= 0 || a[1].IndexOf('/') >= 0) return "bad args";
+                string dest = Path.Combine(Box, a[1]);
+                try
+                {
+                    if (File.Exists(dest)) File.Delete(dest);
+                    File.Copy(a[0], dest);
+                    return "ok " + new FileInfo(dest).Length;
+                }
+                catch (Exception e) { return e.GetType().Name + " " + e.Message; }
+            }
             case "df":
             {
                 // df <path>: free / total bytes as Windows Mobile sees them (diagnostics)
@@ -517,9 +861,14 @@ static class Helper
             case "tlsask": return TlsAsk.Command(rest);  // the proxy's certificate warning dialog (TlsAsk.cs)
             case "received": return Bluetooth.Received(rest);
             case "irda": return Irda.Command(rest);  // infrared transport choice (Irda.cs)
+            case "widget": return InstallWidget(rest);  // Today item the user asked for (Today.cs, Weather.cs)
             case "clip": case "ime": case "type": return InputSync.Command(verb.ToLower(), rest);  // clipboard sync, phone keyboard (InputSync.cs)
+            case "media": return AudioClass.Command(rest);  // play / pause / next / prev / stop (AudioClass.cs)
+            case "vol": return AudioClass.SetVolumes(rest);  // phone media / ringtone / notification volume (AudioClass.cs)
             case "rotate": return Wallpaper.Rotate(Box, rest);
             case "button": case "buttons": return Buttons.Command(verb.ToLower(), rest);  // hardware Buttons 1-4 (Buttons.cs)
+            case "htcinstall": return HtcCompat.InstallStaged();  // apps the app staged from an HTC ROM (HtcCompat.cs)
+            case "htcuninstall": return HtcCompat.UninstallStaged();  // undo them on an OS that should not have them
             case "android": case "home": return AndroidApps.Command(verb.ToLower(), rest);  // Android apps in Start, Home key (AndroidApps.cs)
             case "run":
             {
@@ -592,18 +941,24 @@ static class Helper
         return parts.ToArray();
     }
 
-    // Messages to the app.
+    // Messages to the app. The mailbox loop and the watchdog both send.
+    static object sendLock = new object();
+    static int sendSeq;
+
     public static void Send(string msg)
     {
         try
         {
             if (!IsMounted(Card)) return;  // no card: nobody to tell (see CheckCard)
-            string dir = Path.Combine(Box, "out");
-            Directory.CreateDirectory(dir);
-            string name = DateTime.Now.Ticks.ToString("x16") + "-" + Environment.TickCount.ToString("x8");
-            string tmp = Path.Combine(dir, name + ".tmp");
-            using (var w = new StreamWriter(tmp, false, new UTF8Encoding(false))) w.Write(msg);
-            File.Move(tmp, Path.Combine(dir, name + ".msg"));
+            lock (sendLock)
+            {
+                string dir = Path.Combine(Box, "out");
+                Directory.CreateDirectory(dir);
+                string name = DateTime.Now.Ticks.ToString("x16") + "-" + (sendSeq++).ToString("x");
+                string tmp = Path.Combine(dir, name + ".tmp");
+                using (var w = new StreamWriter(tmp, false, new UTF8Encoding(false))) w.Write(msg);
+                File.Move(tmp, Path.Combine(dir, name + ".msg"));
+            }
         }
         catch (Exception e) { Log("send " + e.Message); }
     }

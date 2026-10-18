@@ -55,7 +55,7 @@ bool Motion::wanted() const {
 
 void Motion::setAccel(float ax, float ay, float az) {
     x = htc(ax);
-    y = htc(ay);
+    y = htc(-ay);   // HTC's y runs toward the bottom of the screen (verified with Teeter)
     z = htc(az);
     host = true;
     seq++;

@@ -2,6 +2,7 @@ package jp.net.seventhreeseven.wmdroid
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
@@ -25,6 +26,7 @@ import android.view.RoundedCorner
 import android.view.View
 import android.view.WindowInsets
 import android.widget.FrameLayout
+import android.util.Base64
 import kotlin.random.Random
 
 /**
@@ -100,6 +102,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     /** Lock button at the top left, partly off the window's edge; [lockTouch] is its touch area. */
     private val lockKey = Key(0, KIND_LOCK)
     private val lockTouch = RectF()
+    /** Notification light placed by a skin "led" item. Empty means the automatic corner. */
+    private val ledRect = RectF()
 
     /** Tapping the lock button. */
     var onLock: (() -> Unit)? = null
@@ -118,33 +122,58 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     val lockRect: RectF get() = lockKey.rect
 
     /**
-     * Windows Mobile's notification light, drawn as a dot in the top corner opposite the lock
-     * button: 0 off, [NativeBridge.LED_LIGHT] on, with [NativeBridge.LED_BLINK] flashing (WM's
-     * pattern is a short flash about every two seconds).
+     * Windows Mobile's notification light: 0 off, [NativeBridge.LED_LIGHT] on, with
+     * [NativeBridge.LED_BLINK] flashing (WM's pattern is a short flash about every two seconds).
+     * A skin "led" item sets its place and size; otherwise it sits opposite the lock button.
      */
     var alertLight = 0
-        set(v) { if (field != v) { field = v; keysView.invalidate() } }
+        set(v) {
+            val blink = v and NativeBridge.LED_BLINK != 0
+            if (blink && field and NativeBridge.LED_BLINK == 0) blinkStart = android.os.SystemClock.uptimeMillis()
+            if (field != v) { field = v; keysView.invalidate() }
+        }
+    /** How long each blink stays lit, ms. 0: Windows Mobile's own short flash (about 60 ms). */
+    var ledOnMs = 0
+    private var blinkStart = 0L
+
+    /** Keeps a blink animating. The light bit often does not change between polls, so the setter would not redraw. */
+    fun pulseLed() {
+        if (alertLight and NativeBridge.LED_BLINK != 0) keysView.invalidate()
+    }
 
     private fun drawAlertLight(c: Canvas) {
-        if (lockKey.rect.isEmpty) return
         val d = resources.displayMetrics.density
-        val r = 4.5f * d
-        var cx = width - maxOf(lockKey.rect.left, 0f) - r
-        var cy = (maxOf(lockKey.rect.top, 0f) + lockKey.rect.bottom) / 2
-        if (foldCrease != null) {
+        val cx: Float
+        val cy: Float
+        val r: Float
+        if (!ledRect.isEmpty) {
+            cx = ledRect.centerX()
+            cy = ledRect.centerY()
+            r = minOf(ledRect.width(), ledRect.height()) / 2f
+        } else if (lockKey.rect.isEmpty) {
+            return
+        } else if (foldCrease != null) {
             // Open fold: the display runs edge to edge across the top, so the light sits just
             // below it at the right edge (where the lock's mirror image would be on the display).
-            val dr = displayRect()
+            r = 4.5f * d
             cx = width - r * 3f
-            cy = dr.bottom + r * 2.6f
+            cy = displayRect().bottom + r * 2.6f
+        } else {
+            r = 4.5f * d
+            cx = width - maxOf(lockKey.rect.left, 0f) - r
+            cy = (maxOf(lockKey.rect.top, 0f) + lockKey.rect.bottom) / 2
         }
         val on = alertLight and NativeBridge.LED_LIGHT != 0
         val blink = alertLight and NativeBridge.LED_BLINK != 0
-        val lit = on && (!blink || android.os.SystemClock.uptimeMillis() % 2000 < 180)
+        // Phase starts when blinking starts, not from the phone's uptime, so the gap between flashes stays even.
+        val period = 2000L
+        val onMs = (if (ledOnMs > 0) ledOnMs else 62).toLong()
+        val phase = if (blinkStart == 0L) 0L else (android.os.SystemClock.uptimeMillis() - blinkStart) % period
+        val lit = on && (!blink || phase < onMs)
         // Unlit: a dark lens with a faint rim, so the light's place is visible.
         paint.shader = null
         paint.style = Paint.Style.FILL
-        paint.color = if (light) 0x40000000 else 0xFF15171A.toInt()
+        paint.color = if (lit) 0x40000000 else 0xFF15171A.toInt()
         c.drawCircle(cx, cy, r, paint)
         if (lit) {
             paint.shader = RadialGradient(cx, cy, r * 3.2f, intArrayOf(0xC040FF70.toInt(), 0x4040FF70, 0x0040FF70),
@@ -156,30 +185,34 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         }
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = maxOf(1f, 0.8f * d)
-        paint.color = if (light) 0x60000000 else 0x50FFFFFF
+        paint.color = if (lit) 0x60000000 else 0x50FFFFFF
         c.drawCircle(cx, cy, r, paint)
         paint.style = Paint.Style.FILL
-        // Blinking: redraw at the next flash edge only.
+        // Blinking: redraw at the next edge of this flash, measured from when it started.
         if (on && blink) {
-            val t = android.os.SystemClock.uptimeMillis() % 2000
-            keysView.postInvalidateDelayed(if (t < 180) 180 - t else 2000 - t)
+            val wait = if (phase < onMs) onMs - phase else period - phase
+            keysView.postInvalidateDelayed(wait.coerceAtLeast(16))
         }
     }
 
     // ---- Dock: a row of Android apps (LauncherBridge) ----
-    // It only sits in space the skin is not already using (under the keys, between the display and
-    // the keyboard, or above the display). It never takes a band out of the display, so the screen
-    // stays edge to edge. If nowhere fits, the dock is left off.
+    // It sits in space the skin is not already using (under the keys, between the display and
+    // the keyboard, or above the display). Resize-for-dock pins the guest to the top of its place
+    // at its own aspect and gives this row the strip that opens underneath. If nowhere fits, the
+    // dock is left off.
 
     /**
-     * The guest is 480×800 for the dock: draw it in the screen's whole edge-to-edge place, instead
-     * of letterboxing the shorter picture inside that place.
+     * Resize screen for dock. The guest keeps its own aspect and is pinned to the top of its
+     * place, so the strip below can hold the dock. The picture is not stretched to fill that place.
      */
     var fillDisplay = false
         set(v) { if (field != v) { field = v; requestLayout(); keysView.invalidate() } }
 
-    /** Settings.DOCK_OFF / DOCK_AUTO / DOCK_TOP / DOCK_BOTTOM. */
+    /** Settings.DOCK_OFF / DOCK_AUTO / DOCK_TOP / DOCK_BOTTOM / DOCK_FLOOR. */
     var dockPos = Settings.DOCK_OFF
+        set(v) { if (field != v) { field = v; requestLayout(); keysView.invalidate() } }
+    /** While the phone is unfolded, leave the dock off (the cover screen still shows it). */
+    var dockHideUnfolded = false
         set(v) { if (field != v) { field = v; requestLayout(); keysView.invalidate() } }
     /** Slots in the row (4-8); slots past [dockIcons] are empty. */
     var dockSlots = 5
@@ -204,6 +237,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     var onDockTap: ((Int) -> Unit)? = null
     var onDockLong: ((Int) -> Unit)? = null
     private val dockRect = RectF()
+    /** A skin "dock" item: the bar is this rectangle. Empty means the automatic free-space placement. */
+    private val dockArea = RectF()
     private var dockIcon = 0f
     private var dockPressed = -1
     private var dockDown = false
@@ -217,10 +252,13 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         onDockLong?.invoke(slot)
     }
 
-    /** Places the dock in free space. The display's rectangle is left as the layout set it. */
+    /** Places the dock in the skin's dock rectangle, or in free space. Resize-for-dock may shorten the display first so a row fits under it. */
     private fun carveDock(pw: Int, ph: Int) {
         dockRect.setEmpty()
         if (dockPos == Settings.DOCK_OFF || screenRect.isEmpty) return
+        if (dockHideUnfolded && foldCrease != null) return
+        if (!dockArea.isEmpty) { placeDockIn(dockArea); return }
+        if (dockPos == Settings.DOCK_FLOOR) { placeDockOnFloor(pw, ph); return }
         val d = resources.displayMetrics.density
         val pad = dockPadDp * d
         val m = maxOf(pw * KEY_MARGIN, cornerRadius * 0.3f)
@@ -229,34 +267,155 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         val icon = minOf(dockIconDp * d, span / dockSlots * 0.8f)
         val need = icon + 2 * pad
         val floor = ph - maxOf(4 * d, cornerRadius * 0.3f)
+        // The next control under the display (keys, D-pad, keyboard), else the bottom of the window.
+        fun obstacleBelow(): Float {
+            var next = floor
+            val kb = foldSkin.keyboard
+            if (!kb.isEmpty && kb.top >= screenRect.bottom) next = minOf(next, kb.top - 4 * d)
+            for (k in specKeys) if (!k.rect.isEmpty && k.rect.top >= screenRect.bottom - 1) next = minOf(next, k.rect.top - 4 * d)
+            for (k in softKeys) if (!k.rect.isEmpty && k.rect.top >= screenRect.bottom - 1) next = minOf(next, k.rect.top - 4 * d)
+            if (!dpad.isEmpty && dpad.top >= screenRect.bottom - 1) next = minOf(next, dpad.top - 4 * d)
+            return next
+        }
         // Gaps the skin is not using: above the display, between it and the next control, and
         // under everything. Added in that order, so the last one under the display is the lowest.
-        val gaps = ArrayList<RectF>()
-        fun consider(top: Float, bottom: Float) {
-            if (bottom - top >= need) gaps.add(RectF(m, top, pw - m, bottom))
+        fun gaps(): ArrayList<RectF> {
+            val out = ArrayList<RectF>()
+            fun consider(top: Float, bottom: Float) {
+                if (bottom - top >= need) out.add(RectF(m, top, pw - m, bottom))
+            }
+            val aboveTop = maxOf(cutoutBottom.toFloat(), if (lockKey.rect.isEmpty) 0f else lockKey.rect.bottom, 4 * d)
+            consider(aboveTop, screenRect.top.toFloat())
+            consider(screenRect.bottom + 4 * d, obstacleBelow())
+            var used = screenRect.bottom.toFloat()
+            val kb = foldSkin.keyboard
+            if (!kb.isEmpty) used = maxOf(used, kb.bottom.toFloat())
+            for (k in specKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
+            for (k in softKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
+            if (!dpad.isEmpty) used = maxOf(used, dpad.bottom)
+            consider(used + 4 * d, floor)
+            return out
         }
-        val aboveTop = maxOf(cutoutBottom.toFloat(), if (lockKey.rect.isEmpty) 0f else lockKey.rect.bottom, 4 * d)
-        consider(aboveTop, screenRect.top.toFloat())
-        var next = floor
-        val kb = foldSkin.keyboard
-        if (!kb.isEmpty && kb.top >= screenRect.bottom) next = minOf(next, kb.top - 4 * d)
-        for (k in specKeys) if (!k.rect.isEmpty && k.rect.top >= screenRect.bottom - 1) next = minOf(next, k.rect.top - 4 * d)
-        for (k in softKeys) if (!k.rect.isEmpty && k.rect.top >= screenRect.bottom - 1) next = minOf(next, k.rect.top - 4 * d)
-        if (!dpad.isEmpty && dpad.top >= screenRect.bottom - 1) next = minOf(next, dpad.top - 4 * d)
-        consider(screenRect.bottom + 4 * d, next)
-        var used = screenRect.bottom.toFloat()
-        if (!kb.isEmpty) used = maxOf(used, kb.bottom.toFloat())
-        for (k in specKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
-        for (k in softKeys) if (!k.rect.isEmpty) used = maxOf(used, k.rect.bottom)
-        if (!dpad.isEmpty) used = maxOf(used, dpad.bottom)
-        consider(used + 4 * d, floor)
-        val gap = when (dockPos) {
+        fun pick(gaps: List<RectF>) = when (dockPos) {
             Settings.DOCK_TOP -> gaps.firstOrNull { it.bottom <= screenRect.top + 1 }
             else -> gaps.lastOrNull { it.top >= screenRect.bottom - 1 }  // Auto and Bottom: the lowest space under the display
-        } ?: return
-        val y = gap.top + (gap.height() - need) / 2
-        dockRect.set(gap.left, y, gap.right, y + need)
+        }
+        var gap = pick(gaps())
+        // Nothing under the picture is tall enough: shorten it, still at its own aspect and still
+        // pinned to the top, until one dock row fits between it and the next control.
+        // A maximized screen already uses the space on purpose: don't shorten it to invent a dock row.
+        if (gap == null && fillDisplay && !foldMax && dockPos != Settings.DOCK_TOP) {
+            val next = obstacleBelow()
+            val maxBottom = next - 4 * d - need
+            val newH = maxBottom - screenRect.top
+            if (newH > 0f && newH < screenRect.height()) {
+                val aspect = screenRect.height().toFloat() / screenRect.width().coerceAtLeast(1)
+                val newW = newH / aspect
+                val cx = (screenRect.left + screenRect.right) / 2f
+                screenRect.set((cx - newW / 2).toInt(), screenRect.top, (cx + newW / 2).toInt(), maxBottom.toInt())
+                gap = pick(gaps())
+            }
+        }
+        val placed = gap ?: return
+        val slack = placed.height() - need
+        // A tall free strip: the row sits on its bottom edge (under the display) or its top edge
+        // (above the display), rather than floating in the middle of the strip.
+        val y = when {
+            slack > need && dockPos == Settings.DOCK_TOP -> placed.top
+            slack > need -> placed.bottom - need
+            else -> placed.top + slack / 2
+        }
+        dockRect.set(placed.left, y, placed.right, y + need)
         dockIcon = icon
+    }
+
+    /** The dock sits on the bottom edge of the phone. Keys and the D-pad move up so they stay above it. */
+    private fun placeDockOnFloor(pw: Int, ph: Int) {
+        val d = resources.displayMetrics.density
+        val pad = dockPadDp * d
+        val m = maxOf(pw * KEY_MARGIN, cornerRadius * 0.3f)
+        val span = pw - 2 * m
+        if (span <= 0f) return
+        val icon = minOf(dockIconDp * d, span / dockSlots * 0.8f)
+        val need = icon + 2 * pad
+        val floor = ph - maxOf(4 * d, cornerRadius * 0.3f)
+        val y = floor - need
+        dockRect.set(m, y, pw - m, floor)
+        dockIcon = icon
+        val limit = y - 4 * d
+        var lowest = 0f
+        fun consider(b: Float) { if (b > lowest) lowest = b }
+        for (k in specKeys) if (!k.rect.isEmpty) consider(k.rect.bottom)
+        for (k in softKeys) if (!k.rect.isEmpty) consider(k.rect.bottom)
+        if (!dpad.isEmpty) consider(dpad.bottom)
+        val overlap = lowest - limit
+        if (overlap <= 0f) return
+        fun lift(r: RectF) { if (!r.isEmpty) r.offset(0f, -overlap) }
+        for (k in specKeys) lift(k.rect)
+        for (k in softKeys) lift(k.rect)
+        for (k in dpadKeys) lift(k.rect)
+        lift(dpad)
+        lift(dpadCentre)
+    }
+
+    /**
+     * The skin named this rectangle as the dock. Icons fit inside it. If it cuts the display, the
+     * display shortens (same aspect, pinned away from the dock) so the dock never covers the touch area.
+     */
+    private fun placeDockIn(area: RectF) {
+        val d = resources.displayMetrics.density
+        val span = area.width()
+        if (span <= 0f || area.height() <= 0f) return
+        val icon = minOf(dockIconDp * d, span / dockSlots * 0.8f, area.height() * 0.72f)
+        if (icon < 12 * d) return
+        val screen = RectF(screenRect)
+        if (RectF.intersects(screen, area)) {
+            val bar = area.width() >= screen.width() * 0.5f
+            if (bar && area.centerY() >= screen.centerY()) shrinkScreenBottom(area.top - 4 * d)
+            else if (bar) shrinkScreenTop(area.bottom + 4 * d)
+            else if (area.centerX() >= screen.centerX()) shrinkScreenRight(area.left - 4 * d)
+            else shrinkScreenLeft(area.right + 4 * d)
+        }
+        dockRect.set(area)
+        dockIcon = icon
+    }
+
+    /** Shorten the display from the bottom, keeping its aspect and its top edge. */
+    private fun shrinkScreenBottom(maxBottom: Float) {
+        val newH = maxBottom - screenRect.top
+        if (newH < screenRect.height() * 0.4f || newH >= screenRect.height()) return
+        val aspect = screenRect.height().toFloat() / screenRect.width().coerceAtLeast(1)
+        val newW = newH / aspect
+        val cx = (screenRect.left + screenRect.right) / 2f
+        screenRect.set((cx - newW / 2).toInt(), screenRect.top, (cx + newW / 2).toInt(), maxBottom.toInt())
+    }
+
+    /** Shorten the display from the top, keeping its aspect and its bottom edge. */
+    private fun shrinkScreenTop(minTop: Float) {
+        val newH = screenRect.bottom - minTop
+        if (newH < screenRect.height() * 0.4f || newH >= screenRect.height()) return
+        val aspect = screenRect.height().toFloat() / screenRect.width().coerceAtLeast(1)
+        val newW = newH / aspect
+        val cx = (screenRect.left + screenRect.right) / 2f
+        screenRect.set((cx - newW / 2).toInt(), minTop.toInt(), (cx + newW / 2).toInt(), screenRect.bottom)
+    }
+
+    /** Shorten the display from the right, keeping its aspect and its left edge. */
+    private fun shrinkScreenRight(maxRight: Float) {
+        val newW = maxRight - screenRect.left
+        if (newW < screenRect.width() * 0.4f || newW >= screenRect.width()) return
+        val aspect = screenRect.height().toFloat() / screenRect.width().coerceAtLeast(1)
+        val newH = newW * aspect
+        screenRect.set(screenRect.left, screenRect.top, maxRight.toInt(), (screenRect.top + newH).toInt())
+    }
+
+    /** Shorten the display from the left, keeping its aspect and its right edge. */
+    private fun shrinkScreenLeft(minLeft: Float) {
+        val newW = screenRect.right - minLeft
+        if (newW < screenRect.width() * 0.4f || newW >= screenRect.width()) return
+        val aspect = screenRect.height().toFloat() / screenRect.width().coerceAtLeast(1)
+        val newH = newW * aspect
+        screenRect.set(minLeft.toInt(), screenRect.top, screenRect.right, (screenRect.top + newH).toInt())
     }
 
     private fun dockFrostLayer(): Bitmap? {
@@ -301,7 +460,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         // Glass at Dock Opacity: a dark tint, a faint gloss and a light rim.
         val a = (dockOpacity.coerceIn(0f, 1f) * 255).toInt()
         if (a > 0 || frost != null) {
-            p.color = ((a * (if (light) 0.45f else 0.8f)).toInt() shl 24)
+            val tint = if (frost != null) 0.35f else if (light) 0.45f else 0.8f
+            p.color = ((a * tint).toInt() shl 24)
             c.drawRoundRect(bar, rad, rad, p)
             p.shader = LinearGradient(0f, bar.top, 0f, bar.bottom, ((a * 0.25f).toInt() shl 24) or 0xFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
             c.drawRoundRect(bar, rad, rad, p)
@@ -408,7 +568,14 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     private fun specLayout(): SkinSpec.Layout? {
         val s = spec ?: return null
         return when {
-            foldCrease != null -> if (foldKeyboard.useIme) s.foldableIme ?: s.foldable else s.foldable
+            foldCrease != null -> {
+                val ime = foldKeyboard.useIme
+                if (foldMax) {
+                    if (ime) s.foldableMaxIme ?: s.foldableMax ?: s.foldableIme ?: s.foldable
+                    else s.foldableMax ?: s.foldable
+                } else if (ime) s.foldableIme ?: s.foldable
+                else s.foldable
+            }
             !keysOn -> null
             keypad -> s.standard ?: s.frontDpad ?: s.front
             dpadOn -> s.frontDpad ?: s.front
@@ -420,6 +587,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     private fun layoutSpec(l: SkinSpec.Layout, pw: Int, ph: Int) {
         val fold = foldCrease != null
         specKeys.clear()
+        ledRect.setEmpty()
         keys.forEach { it.rect.setEmpty() }
         topBar.setEmpty()
         dpad.setEmpty()
@@ -433,10 +601,9 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         for (it in l.items) {
             val r = RectF(it.x * pw, it.y * ph, (it.x + it.w) * pw, (it.y + it.h) * ph)
             when (it.type) {
-                "screen" -> if (fillDisplay) {
-                    // The whole place the skin gave the display, so a 480×800 picture stays edge to edge.
-                    screenRect.set(Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom))
-                } else {
+                "screen" -> {
+                    // Guest aspect, pinned to the top of the skin's screen place. The unused
+                    // bottom of that place is the dock's row; the picture is not stretched to fill it.
                     var w = r.width()
                     var h = w * ratio
                     if (h > r.height() * 1.02f) { h = r.height(); w = h / ratio }
@@ -449,13 +616,18 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
                     lockTouch.set(r.left - p, 0f, r.right + p, r.bottom + p)
                 }
                 "dpad" -> if (!skipDpad) {
-                    val s = minOf(r.width(), r.height())
-                    dpad.set(r.centerX() - s / 2, r.centerY() - s / 2, r.centerX() + s / 2, r.centerY() + s / 2)
-                    val c = s * DPAD_CENTRE / 2
+                    dpad.set(r)
+                    val c = minOf(r.width(), r.height()) * DPAD_CENTRE / 2
                     dpadCentre.set(dpad.centerX() - c, dpad.centerY() - c, dpad.centerX() + c, dpad.centerY() + c)
                     for (k in dpadKeys) k.rect.set(dpad)
                 }
+                "rect", "image" -> {
+                    val rad = minOf(r.width(), r.height()) * it.radius
+                    decor += Decor(RectF(r), rad, it.color, if (it.type == "image") decorBitmap(it.image) else null)
+                }
                 "keyboard" -> foldSkin.keyboard.set(r.left.toInt(), r.top.toInt(), r.right.toInt(), r.bottom.toInt())
+                "dock" -> if (dockArea.isEmpty) dockArea.set(r)
+                "led" -> if (ledRect.isEmpty) ledRect.set(r)
                 else -> {
                     // k1..k4 on the cover screen follow the key assignment in Settings.
                     val idx = keyIndex.matchEntire(it.id)?.groupValues?.get(1)?.toInt()
@@ -541,6 +713,11 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
 
     /** Key glass opacity 0..1 (1 = the stock look). */
     var keyOpacity = 1f
+    /** Outline and glyph, 0..1. The backlight pass is not scaled by [keyGlyph]. */
+    var keyOutline = 1f
+    var keyGlyph = 1f
+    /** glass, flat, bubbled, or metallic. */
+    var keyTheme = "glass"
         set(v) { field = v; keysView.invalidate() }
     /** Key colour (0xRRGGBB), or null for the skin's own glass; glyphs pick dark or light to match. */
     var keyColor: Int? = null
@@ -679,6 +856,13 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     var hingeOpacity = 70
         set(v) { if (field != v) { field = v; hingeView.invalidate() } }
 
+    /**
+     * Unfolded Maximize: the Foldable Max layout, and no hinge. The hinge setting is left as it
+     * is; this only hides the band while the larger screen is up.
+     */
+    var foldMax = false
+        set(v) { if (field != v) { field = v; updateHinge(); requestLayout(); invalidate(); keysView.invalidate() } }
+
     private val hingePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val hingeRect = RectF()       // the band (classic: the bar)
     private val hingeShadeRect = RectF()  // classic: the shadow under the bar
@@ -696,7 +880,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     }.apply { visibility = GONE }
 
     private fun updateHinge() {
-        hingeView.visibility = if (hingeOn && foldCrease != null) VISIBLE else GONE
+        hingeView.visibility = if (hingeOn && foldCrease != null && !foldMax) VISIBLE else GONE
         hingeView.invalidate()
     }
 
@@ -740,7 +924,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
 
     private fun drawHinge(c: Canvas) {
         val crease = foldCrease ?: return
-        if (!hingeOn) return
+        if (!hingeOn || foldMax) return
         val d = resources.displayMetrics.density
         val y = (crease.top + crease.bottom) / 2f + hingeLocation / 50f * HINGE_SHIFT * height
         val s = (1f + hingeThickness * 0.4f) * d
@@ -786,6 +970,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
 
     init {
         setWillNotDraw(false)
+        background = null
         addView(screen, LayoutParams(1, 1))
         addView(keysView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(foldKeyboard, LayoutParams(1, 1))
@@ -868,6 +1053,9 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
 
     private fun computeLayout(pw: Int, ph: Int) {
         if (pw == 0 || ph == 0) return
+        dockArea.setEmpty()
+        ledRect.setEmpty()
+        decor.clear()
         val sl = specLayout()
         specActive = sl != null
         if (sl != null) { layoutSpec(sl, pw, ph); return }
@@ -890,9 +1078,10 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             // No keys, but the lock button stays: it is also the way to the power menu and settings.
             val top = minTop(pw)
             val room = ph - top
-            val w = if (fillDisplay) pw.toFloat() else minOf(pw.toFloat(), room / aspect)
-            val h = if (fillDisplay) room else w * aspect
-            val y = top + (room - h) / 2
+            val w = minOf(pw.toFloat(), room / aspect)
+            val h = w * aspect
+            // Resize for dock pins the picture to the top; the remainder under it is the dock's row.
+            val y = if (fillDisplay) top else top + (room - h) / 2
             screenRect.set(((pw - w) / 2).toInt(), y.toInt(), ((pw + w) / 2).toInt(), (y + h).toInt())
             topBar.setEmpty()
             keys.forEach { it.rect.setEmpty() }
@@ -901,13 +1090,13 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             return
         }
         // Full width when it fits; otherwise (wide windows) full height between the bars.
-        // Resize for dock fills that whole place, so 480×800 does not sit in from the edges.
+        // The picture keeps its aspect either way, pinned under the cut-out. Resize for dock
+        // uses the strip that leaves under it for the dock row, instead of stretching into it.
         val bottom = bottomArea(pw)
         var w = pw.toFloat()
         var h = w * aspect
         val room = ph - minTop(pw) - bottom
-        if (fillDisplay) { w = pw.toFloat(); h = room.coerceAtLeast(0f) }
-        else if (h > room) { h = room; w = h / aspect }
+        if (h > room) { h = room; w = h / aspect }
         // Display at the top (below the cut-out); keys and D-pad underneath.
         val top = minTop(pw).coerceAtMost(ph - h - bottom)
         val left = (pw - w) / 2
@@ -920,7 +1109,9 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         val rowW = minOf(pw - 2 * m, w)
         val rowL = (pw - rowW) / 2
         val kw = (rowW - 3 * gap) / 4
-        val ky = screenRect.bottom + pw * KEY_MARGIN
+        // Resize for dock keeps this row at the bottom of the window. The screen stays at the
+        // top, and the strip between them is the dock.
+        val ky = if (fillDisplay) ph - bottom + pw * KEY_MARGIN else screenRect.bottom + pw * KEY_MARGIN
         for (i in 0..3) {
             val l = rowL + i * (kw + gap)
             softKeys[i].rect.set(l, ky, l + kw, ky + kh)
@@ -962,12 +1153,17 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         val h = height.toFloat()
         paint.shader = null
         paint.style = Paint.Style.FILL
-        var alpha = 255
+        // 0 is nothing at all: the window's own wallpaper shows through, with no tint and no copy.
+        val veil = (backdropOpacity * 255).toInt().coerceIn(0, 255)
+        if (veil == 0) {
+            c.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
+            paint.alpha = 255
+            return
+        }
         if (wallpaperOn) {
             val wp = wallpaper
             if (wp != null) {
-                c.drawColor(Color.BLACK)
-                // Centre-crop the (already blurred) wallpaper.
+                paint.alpha = 255
                 val k = maxOf(w / wp.width, h / wp.height)
                 val mtx = Matrix().apply {
                     setScale(k, k)
@@ -975,24 +1171,55 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
                 }
                 c.drawBitmap(wp, mtx, paint)
             }
-            // else: the window shows the live wallpaper underneath.
-            alpha = (backdropOpacity * 255).toInt().coerceIn(0, 255)
-        }
-        // The backdrop itself, over the wallpaper at [backdropOpacity].
-        paint.alpha = alpha
+        } else c.drawColor(Color.BLACK)
+        // The colour is in the gradient itself. A shader ignores Paint.alpha, so a 0 there still painted a solid plate.
+        fun argb(rgb: Int) = (veil shl 24) or (rgb and 0xFFFFFF)
+        paint.alpha = 255
         when (backdrop) {
             BACKDROP_GRAY -> {
-                paint.shader = LinearGradient(0f, 0f, 0f, h, 0xFF26262A.toInt(), 0xFF141416.toInt(), Shader.TileMode.CLAMP)
+                paint.shader = LinearGradient(0f, 0f, 0f, h, argb(0x26262A), argb(0x141416), Shader.TileMode.CLAMP)
                 c.drawRect(0f, 0f, w, h, paint)
             }
             BACKDROP_SILVER, BACKDROP_WHITE -> {
                 val tex = texture ?: makeTexture(width, height, backdrop == BACKDROP_SILVER).also { texture = it }
+                paint.alpha = veil
                 c.drawBitmap(tex, 0f, 0f, paint)
             }
-            else -> c.drawColor(Color.argb(alpha, 0, 0, 0))
+            else -> c.drawRect(0f, 0f, w, h, paint.apply { color = argb(0) })
         }
         paint.alpha = 255
         paint.shader = null
+        for (d in decor) {
+            if (d.image != null) {
+                decorClip.reset()
+                decorClip.addRoundRect(d.rect, d.radius, d.radius, Path.Direction.CW)
+                c.save()
+                c.clipPath(decorClip)
+                c.drawBitmap(d.image, null, d.rect, paint)
+                c.restore()
+            } else {
+                paint.color = d.color
+                c.drawRoundRect(d.rect, d.radius, d.radius, paint)
+            }
+        }
+        paint.shader = null
+    }
+
+    private class Decor(val rect: RectF, val radius: Float, val color: Int, val image: Bitmap?)
+    private val decor = ArrayList<Decor>()
+    private val decorClip = Path()
+    private val decorBitmaps = HashMap<Int, Bitmap>()
+
+    /** A logo from the skin JSON. The same picture is decoded once. */
+    private fun decorBitmap(data: String?): Bitmap? {
+        if (data.isNullOrBlank() || data.length > 1_500_000) return null
+        val key = data.length xor data.hashCode()
+        decorBitmaps[key]?.let { return it }
+        val raw = data.substringAfter("base64,", data)
+        val bytes = runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() ?: return null
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        decorBitmaps[key] = bmp
+        return bmp
     }
 
     /**
@@ -1075,7 +1302,12 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         val k = key.rect
         val p = paint
         val d = resources.displayMetrics.density
-        val r = 2.5f * d
+        val theme = keyTheme
+        val r = when (theme) {
+            "bubbled" -> minOf(k.width(), k.height()) * 0.46f
+            "flat" -> 1.2f * d
+            else -> 2.5f * d
+        }
         val custom = keyColor
         val tint = when (key.vk) {
             Keymap.VK_TTALK -> 0x1E9C3A
@@ -1084,32 +1316,71 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         }
         val tinted = key.vk == Keymap.VK_TTALK || key.vk == Keymap.VK_TEND
         p.style = Paint.Style.FILL
-        // Frosted glass: the blurred wallpaper behind the key (Key Blur).
-        val frost = if (key.kind != KIND_LOCK) frostLayer() else null
+        // Frosted glass: the blurred wallpaper behind a glass key (Key Blur).
+        val frost = if (theme == "glass" && key.kind != KIND_LOCK) frostLayer() else null
         if (frost != null) {
             c.save()
             keyClipPath.reset()
             keyClipPath.addRoundRect(k, r, r, Path.Direction.CW)
             c.clipPath(keyClipPath)
-            p.alpha = (255 * keyOpacity.coerceAtLeast(0.35f)).toInt()
+            p.alpha = (255 * keyOpacity.coerceIn(0f, 1f)).toInt()
             c.drawBitmap(frost, 0f, 0f, p)
             p.alpha = 255
             c.restore()
         }
-        // Glass body; a picked colour is a fuller tint. Key Opacity scales it.
+        // Body. Key Opacity scales the fill. The outline slider scales only the stroke below.
         val a1 = ((if (tinted) 0x90 else if (custom != null) 0xC0 else if (light) 0x60 else 0x58) * keyOpacity).toInt()
         val a2 = ((if (tinted) 0x60 else if (custom != null) 0x90 else if (light) 0x30 else 0x30) * keyOpacity).toInt()
-        p.shader = LinearGradient(0f, k.top, 0f, k.bottom, (a1 shl 24) or tint, (a2 shl 24) or tint, Shader.TileMode.CLAMP)
-        c.drawRoundRect(k, r, r, p)
-        // Gloss over the upper half, ending in a crisp line.
-        val mid = k.top + k.height() * 0.48f
-        p.shader = LinearGradient(0f, k.top, 0f, mid, 0x2EFFFFFF, 0x10FFFFFF, Shader.TileMode.CLAMP)
-        inner.set(k.left, k.top, k.right, mid)
-        c.save()
-        c.clipRect(inner)
-        c.drawRoundRect(k, r, r, p)
-        c.restore()
-        // Pressed: light from inside (Vista's hot glow), strongest along the bottom.
+        when (theme) {
+            "flat" -> {
+                p.shader = null
+                p.color = (a1.coerceIn(0, 255) shl 24) or tint
+                c.drawRoundRect(k, r, r, p)
+            }
+            "bubbled" -> {
+                p.shader = LinearGradient(0f, k.top, 0f, k.bottom,
+                    intArrayOf((minOf(255, a1 + 50) shl 24) or tint, (a1 shl 24) or tint, (a2 shl 24) or tint),
+                    floatArrayOf(0f, 0.42f, 1f), Shader.TileMode.CLAMP)
+                c.drawRoundRect(k, r, r, p)
+                val cap = k.top + k.height() * 0.46f
+                p.shader = LinearGradient(0f, k.top, 0f, cap, 0x88FFFFFF.toInt(), 0x00FFFFFF, Shader.TileMode.CLAMP)
+                inner.set(k.left + k.width() * 0.08f, k.top + k.height() * 0.06f, k.right - k.width() * 0.08f, cap)
+                c.drawRoundRect(inner, r * 0.7f, r * 0.5f, p)
+            }
+            "metallic" -> {
+                val steel = if (tinted) tint else if (light) 0xC5C8CE else 0x8E939C
+                val groove = (((steel shr 16 and 255) - 48).coerceIn(0, 255) shl 16) or
+                    (((steel shr 8 and 255) - 48).coerceIn(0, 255) shl 8) or
+                    ((steel and 255) - 48).coerceIn(0, 255)
+                p.shader = LinearGradient(0f, k.top, 0f, k.bottom,
+                    intArrayOf(0xF2FFFFFF.toInt(), (0xE0 shl 24) or steel, (0xFF shl 24) or groove, (0xF0 shl 24) or steel),
+                    floatArrayOf(0f, 0.18f, 0.55f, 1f), Shader.TileMode.CLAMP)
+                c.drawRoundRect(k, r, r, p)
+                p.shader = LinearGradient(0f, k.top, 0f, k.top + k.height() * 0.22f, 0x66FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+                inner.set(k.left, k.top, k.right, k.top + k.height() * 0.22f)
+                c.save(); c.clipRect(inner); c.drawRoundRect(k, r, r, p); c.restore()
+            }
+            else -> if (frost != null) {
+                // A light tint only. The old fill was dark enough to hide the blurred wallpaper.
+                val tintA = (0x50 * keyOpacity.coerceIn(0f, 1f)).toInt()
+                p.shader = null
+                p.color = (tintA shl 24) or tint
+                c.drawRoundRect(k, r, r, p)
+                val mid = k.top + k.height() * 0.48f
+                val gloss = (0x18 * keyOpacity.coerceIn(0f, 1f)).toInt()
+                p.shader = LinearGradient(0f, k.top, 0f, mid, (gloss shl 24) or 0xFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+                inner.set(k.left, k.top, k.right, mid)
+                c.save(); c.clipRect(inner); c.drawRoundRect(k, r, r, p); c.restore()
+            } else {
+                p.shader = LinearGradient(0f, k.top, 0f, k.bottom, (a1 shl 24) or tint, (a2 shl 24) or tint, Shader.TileMode.CLAMP)
+                c.drawRoundRect(k, r, r, p)
+                val mid = k.top + k.height() * 0.48f
+                p.shader = LinearGradient(0f, k.top, 0f, mid, 0x2EFFFFFF, 0x10FFFFFF, Shader.TileMode.CLAMP)
+                inner.set(k.left, k.top, k.right, mid)
+                c.save(); c.clipRect(inner); c.drawRoundRect(k, r, r, p); c.restore()
+            }
+        }
+        // Pressed: light from inside, strongest along the bottom.
         if (key.pressed) {
             val glow = if (tinted) tint or 0x404040 else 0x9CC8FF
             p.shader = RadialGradient(k.centerX(), k.bottom, k.width() * 0.6f,
@@ -1117,17 +1388,23 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             c.drawRoundRect(k, r, r, p)
         }
         p.shader = null
-        // Borders: light outside, fine dark line inside.
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = maxOf(1f, d)
-        p.color = if (light) 0xB0707880.toInt() else 0xA8D8DCE2.toInt()
-        val half = p.strokeWidth / 2
-        inner.set(k.left + half, k.top + half, k.right - half, k.bottom - half)
-        c.drawRoundRect(inner, r, r, p)
-        p.color = if (light) 0x90FFFFFF.toInt() else 0x90000000.toInt()
-        inner.inset(p.strokeWidth, p.strokeWidth)
-        c.drawRoundRect(inner, r * 0.6f, r * 0.6f, p)
-        p.style = Paint.Style.FILL
+        // Outline. Key Outline scales this stroke and leaves the backlight alone.
+        if (keyOutline > 0.01f) {
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = maxOf(1f, d)
+            val outer = if (theme == "metallic") 0xE0F4F6F8.toInt() else if (light) 0xB0707880.toInt() else 0xA8D8DCE2.toInt()
+            val innerLine = if (theme == "metallic") 0x80606670.toInt() else if (light) 0x90FFFFFF.toInt() else 0x90000000.toInt()
+            p.color = fade(outer, keyOutline)
+            val half = p.strokeWidth / 2
+            inner.set(k.left + half, k.top + half, k.right - half, k.bottom - half)
+            c.drawRoundRect(inner, r, r, p)
+            if (theme == "glass" || theme == "metallic") {
+                p.color = fade(innerLine, keyOutline)
+                inner.inset(p.strokeWidth, p.strokeWidth)
+                c.drawRoundRect(inner, r * 0.6f, r * 0.6f, p)
+            }
+            p.style = Paint.Style.FILL
+        }
         if (key.kind == KIND_LOCK) {
             // Darker towards the window's edge, as if the glass curved away round the phone's side.
             val edge = maxOf(k.left, 0f)
@@ -1291,7 +1568,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         close()
     }
 
-    /** The D-pad: one glass square, a square centre button, equal arrows, and the pressed region lit. */
+    /** The D-pad: one glass pad (as wide and tall as the skin drew it), a centre button, and arrows. */
     private fun drawDpad(c: Canvas) {
         val body = Key(0, KIND_SOFT).apply { rect.set(dpad); label = "" }
         drawKey(c, body)
@@ -1539,6 +1816,12 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     }
 
     /** With the backlight on, unlit glyphs are a little see-through so lit ones stand out. */
+    /** Scales a colour's alpha. The backlight pass does not use this. */
+    private fun fade(color: Int, amount: Float): Int {
+        val a = ((color ushr 24) * amount).toInt().coerceIn(0, 255)
+        return (a shl 24) or (color and 0x00FFFFFF)
+    }
+
     private fun dimmed(color: Int, backlit: Boolean) =
         if (!backlit) color else (((color ushr 24) * BL_DIM).toInt() shl 24) or (color and 0xFFFFFF)
 
@@ -1562,7 +1845,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
      * ([gx], [gy]) with radius [gr] and a faint halo in the backlight's colour.
      */
     private inline fun glyph(c: Canvas, base: Int, glow: Float, backlit: Boolean, gx: Float, gy: Float, gr: Float, draw: () -> Unit) {
-        val dim = dimmed(base, backlit)
+        val dim = fade(dimmed(base, backlit), keyGlyph)
         paint.color = dim
         labelPaint.color = dim
         draw()

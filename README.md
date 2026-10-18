@@ -59,7 +59,7 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 
 | Release | Image needed | Notes |
 |---|---|---|
-| **Windows Mobile 6.5.3 Professional** | `PPC_USA_GSM_FWVGA_VR.BIN` | Main target. Titanium home screen, FakeRIL radio, everything below works. |
+| **Windows Mobile 6.5.3 Professional** | `PPC_USA_GSM_FWVGA_VR.BIN` (optional: `PPC_USA_GSM_WVGA_VR.BIN`) | Main target. Titanium home screen, FakeRIL radio, everything below works. The optional WVGA image is what 480×800 boots, so the Start button does not stick and HTC games fit. |
 | **Windows Mobile 6.1.4 Professional** | `PPC_USA_GSM_480x800.BIN` | .NET CF 3.5 is installed automatically on first boot. Its radio is PocketStylus's virtual GSM modem. |
 | **Windows Mobile 5.0 Pocket PC Phone** | `PPC_USA_GSM_VGA_VR.BIN` | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM (the default). |
 | **Windows Mobile 6.5.3 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_WVGA_VR.bin`) | Keypad edition: soft keys, D-pad, Talk/End and digits on the skin or the phone's own keys. The WVGA image is sharper, but its call screen draws garbled. |
@@ -101,7 +101,7 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Bluetooth | 🟡 | Send/receive files via Android; WM's Bluetooth stack (headsets, pairing) ❌ |
 | Storage card | ✅ | Folder share of phone storage |
 | Standby / resume | 🟡 | 6.1.4, 6.5.3 ✅; WM 5.0's own standby ❌ (hidden) |
-| Accelerometer / light / proximity sensors for apps | ❌ | Only used for screen rotation |
+| Accelerometer (G-sensor) | 🟡 | Phone accelerometer while an HTC app reads it (Teeter). Light and proximity ❌ |
 | USB / ActiveSync to a PC | ❌ | — |
 | FM radio | ❌ | — |
 
@@ -127,6 +127,8 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Windows Live Messenger via Escargot: Messenger / Passport names to Escargot through the secure web proxy, for classic MSNP clients (`docs/research-escargot.md`) | 🟡 |
 | Built-in Windows Live (6.5.3, 6.1.4) on Escargot, through PocketStylus's own Windows Live Mobile gateway | 🟡 sign-in works; contacts and chat in progress |
 | Built-in Pocket MSN (5.0) on Escargot | ❌ |
+| HTC HD2 apps from a ROM you own (Teeter, [`docs/research-hd2-port.md`](docs/research-hd2-port.md)) | 🟡 new in 1.0.6. Teeter plays. Other packages install and are untested |
+| Today plugins: weather, InfraWAN room count (classic Today, not Titanium) | ✅ new in 1.0.6. Installed from PocketStylus settings, not at first boot |
 
 ---
 
@@ -134,7 +136,7 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 
 1. Install the latest APK from the [Download](#download) links above.
 2. **Get the ROM images.** They are Microsoft's and are not included in PocketStylus. Download the [Windows Mobile Emulation Images Archive](https://archive.org/details/windows-mobile-emulation-images-archive.-7z) from the Internet Archive and extract it with 7-Zip. The images PocketStylus uses are in each release's `Emulation Images` folder under `ARM-based/`:
-   - `Windows Mobile 6.5.3 Professional/Emulation Images`
+   - `Windows Mobile 6.5.3 Professional/Emulation Images` (also copy `PPC_USA_GSM_WVGA_VR.BIN` from the Standard images if you want 480×800, including HTC games and "Resize screen for dock")
    - `Windows Mobile 6.1.4 Professional/Emulation Images`
    - `Windows Mobile 5.0 (Pocket PC)/Emulation Images`
    - for the keypad editions: `Windows Mobile 6.5.3 Standard`, `Windows Mobile 6.1.4 Standard` and `Windows Mobile 5.0 (Smartphone)`, each in its `Emulation Images` folder
@@ -199,16 +201,17 @@ Each section below expands to show how the feature works.
 - Built on `androidx.window`: when the phone opens flat, the layout switches to Windows Mobile in landscape across the top of the inner screen, with the keyboard below.
 - The keyboard is either the skin's own X1-style keyboard (number row, Fn layer, Sym lock, Ctrl) or the phone's own keyboard with a row of Windows Mobile keys above it.
 - **Show Mid-Display Hinge:** draws a drop shadow, a classic plastic hinge, a modern crease, or a black void at the fold, with thickness, location and opacity sliders.
+- **Maximize** (power menu, while unfolded) switches to the Foldable Max layout: the screen fills the window and the hinge is hidden. With the phone keyboard, it uses Foldable Max _ Keyboard. Restore returns to the fold layout.
 - The cover screen decides the boot resolution, so the session stays the same whether the phone is opened or closed.
 </details>
 
 <details>
 <summary><b>Skins: glass keys, gyro shine and key backlights</b></summary>
 
-- The skin is drawn on Android with Vista/WM 6.5-era glass keys: Start (with the Windows flag), soft keys, OK, the App Launch keys (marked with one and two dots), a D-pad and a long lock key.
+- The skin is drawn on Android with Vista/WM 6.5-era keys: Start (with the Windows flag), soft keys, OK, the App Launch keys (marked with one and two dots), a D-pad and a long lock key. **Key Style** is Glass, Flat, Bubbled or Metallic, with separate opacity, outline and glyph sliders.
 - **Gyro Key Shine:** virtual lights are fixed in the room. Each frame they are rotated into the phone's frame using the game rotation vector, and each key gets the mirror reflection of each light on its curved surface. The highlights move like real reflections when you tilt the phone.
 - **Key Backlights:** the glyphs dim while unlit and glow when you touch, with inner and outer glow, a timeout, a colour (including your theme's), and **Dirtiness**, which adds the uneven, side-lit light of a rubber-membrane keypad.
-- Skins are JSON files in four layouts: front, front with D-pad, inside (fold), and inside with the phone's keyboard. Design one in `tools/skin-designer.html` and import it under Settings → Skin.
+- Skins are JSON files in several layouts: front, front with D-pad, inside (fold), inside with the phone's keyboard, Foldable Max, Foldable Max with the phone keyboard, and the Standard keypad. A Dock rectangle places the app dock. Design one in `tools/skin-designer.html` and import it under Settings → Skin.
 </details>
 
 <details>
@@ -241,6 +244,7 @@ Each section below expands to show how the feature works.
 - **Modern HTTPS (Secure Web Proxy):** IE Mobile and other programs only speak SSL 3.0 / TLS 1.0, which today's sites refuse. With the setting on, PocketStylus installs its own certificate authority in Windows Mobile (made on the phone, never leaves it) and terminates the guest's old TLS, then connects onwards with modern TLS (BoringSSL) and checks the real site's certificate. A bad certificate shows a Windows Mobile "Security Warning" with Yes/No: Yes allows that site's exact certificate for the session. See `docs/research-tls-proxy.md`.
 - **Windows Live Messenger via Escargot:** Microsoft's Messenger and Passport names lead to [Escargot](https://escargot.chat) instead, for classic MSN Messenger clients. The built-in Windows Live client (6.5.3, 6.1.4) speaks Microsoft's mobile gateway protocol, so PocketStylus answers it with its own gateway, which signs in to Escargot over MSNP (sign-in works; contacts and chat are next). See `docs/research-escargot.md`.
 - **GPS:** the phone's location as an NMEA receiver on COM1 (GGA, GSA, GSV and RMC once a second), where Windows Mobile's GPS Intermediate Driver reads it. Location is used only while a program has the port open.
+- **CAB drop:** while Windows Mobile is open, `python tools/cab-drop.py` on a PC on the same network finds the phone and writes one cabinet onto `\Storage Card` (port 7377). PocketStylus does not install the cabinet; it only places the file.
 </details>
 
 <details>
@@ -249,6 +253,7 @@ Each section below expands to show how the feature works.
 - The audio DMA honours auto-reload; Windows Media Player used to stop after 40 seconds without it.
 - A loudness lift compensates for Windows Mobile's quiet mixer.
 - The helper reports whether a sound is media, an alert or a ringtone, and the app reopens its audio stream with the matching Android usage, so ringtones follow the ringer volume and Do Not Disturb.
+- **Now playing:** while Windows Media Player runs, Android's media session shows its title. The phone's play, pause and skip controls stay off.
 - **Notification light and vibration:** DE's notification-LED device drives a glowing dot on the skin and the phone's vibrator. A patch fixes Microsoft's LED driver, which rejected the shell's blink pattern.
 </details>
 
@@ -276,6 +281,7 @@ Each section below expands to show how the feature works.
 - With **Use Windows Mobile's call screen** (the default-phone-app role), calls stay entirely inside Windows Mobile. Without it, Android's call screen opens and PocketStylus comes back to the front.
 - **Incoming calls** ring on Windows Mobile's own Phone screen: Answer, Ignore and End there act on the real call, and answering or ending on Android stops the ring. **Use Phone's Ringer** (Settings → Phone calls) chooses whether Windows Mobile plays its ringtone (through Android's ringtone volume) or stays quiet while Android rings as usual.
 - Emergency numbers always go to the phone's own dialer.
+- **Call audio** is the earpiece, speaker, a wired headset, or a connected Bluetooth device. The choice is the outputs connected right now (Phone page). A call keeps the session running.
 </details>
 
 <details>
@@ -288,7 +294,7 @@ Each section below expands to show how the feature works.
   - **Defer Incoming SMS Messages** holds texts while Windows Mobile isn't in front.
 - **MMS:** pictures arrive in `My Pictures\MMS`.
 - **Contacts and calendar sync** between Android and Windows Mobile, both ways, with Android winning on conflicts. It asks for your approval before its first sync.
-- **Calls in the background:** an overlay lets you answer or decline while PocketStylus isn't in front.
+- **Calls in the background:** an incoming call opens PocketStylus in full. Ignoring it, or leaving it unanswered, returns to the previous app or the home screen.
 </details>
 
 <details>
@@ -309,7 +315,7 @@ Device Settings → **Launcher** (also a tab in Windows Mobile's own PocketStylu
 - **Use as Phone Launcher** makes PocketStylus Android's home app (Android's default-home choice). Home then brings the running Windows Mobile to the front and shows **Today** or the **Start menu** (*Home Goes To*). A small no-UI home activity (`HomeActivity`) forwards Home to the one emulator, so a session is never started twice and survives Recents, other apps and theme changes.
 - **Show Android Apps Folder** adds Start → Programs → **Android Apps** with every Android launcher app, named and with its own icon; tapping one opens the Android app. It follows installs, removals and updates; only changed icons are redrawn. **Hidden Apps** leaves apps out.
 - **Pinned shortcuts:** while PocketStylus is the launcher, an app's "Add to home screen" asks, then adds the shortcut as a program in Start → Programs (*Pinned Shortcuts* lists and removes them).
-- **Android App Dock** (its own **Dock** page): a row of 4–8 Android apps. Tap to open, hold (or tap an empty slot) to pick its apps. *Auto* puts it in the skin's free space (with the slim 4-key row, the empty area below it); with no free space, or set to *Top* / *Bottom*, it takes a band of the display's area and the display shrinks into the rest (same shape, centred). Either way it never lies over Windows Mobile's touch area, and the guest's resolution and saved sessions don't change. Icon size, padding, background opacity and blur (a blurred copy of the wallpaper made once, not per frame) are adjustable.
+- **Android App Dock** (its own **Dock** page): a row of 4–8 Android apps. Tap to open, hold (or tap an empty slot) to pick its apps. *Auto* puts it in the skin's free space (with the slim 4-key row, the empty area below it); with no free space, or set to *Top*, *Bottom* or *Very Bottom*, it takes a band of the display's area and the display shrinks into the rest (same shape, centred). *Disable Dock in Unfolded Mode* hides it on the open foldable. *Resize Screen for Dock* boots a tall 480-wide screen at 480×800 so the dock can sit in the strip below (needs the optional WVGA image on 6.5.3 Professional). Either way it never lies over Windows Mobile's touch area. Icon size, padding, background opacity and blur (a blurred copy of the wallpaper made once, not per frame) are adjustable.
 
 How it works: each Android app is a tiny native ARM program on the storage card (`guest/AppLink`, `tools/make-applink.py`) with the app's icon written into its icon resource; the helper keeps the shortcuts in step (`guest/Helper/AndroidApps.cs`), and the program writes `android launch <id>` to the helper's mailbox (`AndroidApps.kt`).
 </details>
@@ -322,6 +328,26 @@ How it works: each Android app is a tiny native ARM program on the storage card 
 - Beam a contact, a picture or a file from Windows Mobile's own menus, or use IrDA programs and IrCOMM.
 - **InfraWAN** is a small relay with no dependencies (`server/infrawan`). It has authenticated users, rooms and rate limits, and everyone in a room hears each other's beams.
 - See `docs/research-irda.md`.
+- **InfraLobby** is a program in Start → Programs. It lists who is in the InfraWAN room. The Today plugin (below) shows the count.
+</details>
+
+<details>
+<summary><b>Today plugins: weather and the InfraWAN room</b></summary>
+
+Classic Today (WM 6.1 and 5.0, not Titanium) can show two plugins. Neither is installed until you ask, from the **Today** page in PocketStylus settings:
+
+- **Weather** looks up the phone's public location and writes today's temperature, condition, high and low. Settings → Today lists it as Weather.
+- **InfraWAN** shows how many people are in the room. A tap opens InfraLobby. Turning the item off in Settings → Today stops the count.
+
+A later PocketStylus update replaces a plugin that is already installed. It does not add it again.
+</details>
+
+<details>
+<summary><b>HTC HD2 apps, including Teeter</b></summary>
+
+PocketStylus ships no HTC software. Settings → **HTC HD2 apps** opens an HD2 ROM you own (`RUU_signed.nbh`, an `os.nb`, or an IMGFS dump) and lists packages that contain a program. **Teeter** is the one that is known to run. The rest are marked untested.
+
+Installing stages that package onto the storage card and the helper copies it into Windows Mobile the way the ROM laid it out: files, missing DLLs, registry and the Start menu shortcut. Teeter uses the phone's accelerometer (the sensor runs only while the game is reading it, and automatic rotation pauses so the tilt is the game's). It is a 480×800 program, so the page can switch to that resolution and restart. On 6.5.3 Professional that size boots the optional WVGA image when you have imported it. HTC apps are WM 6.5 only. See `docs/research-hd2-port.md`.
 </details>
 
 <details>
@@ -359,34 +385,29 @@ How it works: each Android app is a tiny native ARM program on the storage card 
 
 ## Settings reference
 
-Device settings are per OS, except those about the phone itself, which every OS shares: the slide-out keyboard and hinge, Use as Phone Launcher, Home Goes To, Hidden Apps and Pinned Shortcuts, and the Phone, Contacts and Infrared pages. They're in Settings → **Device Settings** on Android and in Windows Mobile under Settings → System → **PocketStylus** (its **More** button opens the phone's own settings); most apply live.
+Device settings are per OS, except those about the phone itself, which every OS shares: the slide-out keyboard and hinge, Use as Phone Launcher, Home Goes To, Hidden Apps and Pinned Shortcuts, and the Phone, Contacts, Infrared and Today pages. They're in Settings → **Device Settings** on Android and in Windows Mobile under Settings → System → **PocketStylus** (its **More** button opens the phone's own settings); most apply live.
 
 | Page | Settings |
 |---|---|
 | **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android |
-| **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Opacity · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
-| **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
-| **Power** | Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
+| **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Style (glass / flat / bubbled / metallic) · Key Opacity · Key Outline · Key Glyph · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
+| **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Lock Button Closes App · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
+| **Power** | Disable Battery Optimization (until Android allows it) · Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
 | **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts |
 | **Network** | Secure Web Proxy (modern HTTPS) · Windows Live Messenger via Escargot |
-| **Dock** | Show Android App Dock · Position (auto / top / bottom) · Number of Apps (4–8) · Dock Apps · Icon Size · Padding · Background Opacity · Background Blur |
-| **Phone** | Phone Calls in Windows Mobile · Use Phone's Ringer · Ring Windows Mobile in the Background · Text Messages · Defer Incoming SMS · Phone Number, Call Screen (Android) |
+| **Dock** | Show Android App Dock · Disable Dock in Unfolded Mode · Resize Screen for Dock · Position (auto / top / bottom / very bottom, or the skin's Dock rectangle) · Number of Apps (4–8) · Dock Apps · Icon Size · Padding · Background Opacity · Background Blur |
+| **Phone** | Phone Calls in Windows Mobile · Use Phone's Ringer · Call Audio (earpiece / speaker / headset / Bluetooth) · Ring Windows Mobile in the Background · Text Messages · Defer Incoming SMS · Load Messages · My Phone Number · Use Windows Mobile's Call Screen |
 | **Contacts** | Sync Contacts · Sync Calendar · Prompt before Accepting Changes from Device · Sync Now |
-| **Infrared** | When Windows Mobile Uses Infrared (ask / Bluetooth LE / InfraWAN / off) · Stay Reachable · InfraWAN Account, Test (Android) |
+| **Infrared** | When Windows Mobile Uses Infrared (ask / Bluetooth LE / InfraWAN / off) · Stay Reachable · This Phone's Name · InfraWAN Server, Room, User, Token · Allow Nearby Devices · Test InfraWAN Connection |
+| **Today** | Install Weather · Install InfraWAN |
 | **Device** | Screen resolution (phone shape / 480×854 / 480×800 / 480×640 / 480×480, or the Standard sizes; restarts WM, keeps storage) · Memory (96–256 MB) · Screen DPI · Storage Card (mode, root, folders) |
 
-Other pages in the Android Settings screen:
-- **System:** choose the OS and image, or cold boot this OS.
+Other pages in the Android Settings screen (used when Windows Mobile itself cannot be opened):
+- **System:** choose the OS and image, cold boot this OS, or **HTC HD2 apps** (install from a ROM you own).
 - **Skin:** import or paste a skin JSON, or use the built-in skin.
 - **Storage:** private / chosen folders, and all-files access.
-- **Phone calls:**
-  - enable calls;
-  - Use Windows Mobile's call screen (default phone app);
-  - Use Phone's Ringer;
-  - My phone number;
-  - Defer Incoming SMS Messages.
 - **Contacts & calendar sync**
-- **Infrared:** transport, InfraWAN server and credentials, and a connection test.
+- **Bluetooth**
 
 ---
 
@@ -432,17 +453,22 @@ Useful options:
 
 ```
 core/src/arm/     CPU, MMU, JIT, disassembler
-core/src/board/   SMDK2410 board: S3C2410, flash, PCMCIA/NE2000, DE devices, camera, snapshot
+core/src/board/   SMDK2410 board: S3C2410, flash, PCMCIA/NE2000, DE devices, camera, motion, snapshot
+core/src/htc/     read an HTC HD2 ROM and stage one package (no HTC files are shipped)
 core/src/net/     user-mode NAT, secure web proxy (TLS), Escargot / Windows Live gateway
 core/cli/         headless runner
 app/              Android app (Kotlin UI + JNI: GL presenter, AAudio, sensors, bridges)
 guest/Helper/     the in-guest helper (C#, .NET CF 3.5)
 guest/Autorun/    native .NET CF bootstrap (C, Windows CE ARM)
 guest/AppLink/    native launcher for Android apps in Windows Mobile's Start menu (C, Windows CE ARM)
-guest/*/          small guest programs (Send via Bluetooth, GPS test)
+guest/Sensor/     HTC SEN0: G-sensor driver
+guest/DdShim/     DirectDraw caps wrapper HTC games check for
+guest/Today/      InfraWAN Today plugin
+guest/Weather/    weather Today plugin
+guest/*/          small guest programs (Send via Bluetooth, GPS test, InfraLobby)
 server/infrawan/  InfraWAN relay for infrared beams (Node.js, no dependencies)
-tools/            build scripts, skin designer, ROM scanner, image pusher
-docs/             research notes: hardware, status bar, themes, calls, camera, GPS, Bluetooth, …
+tools/            build scripts, skin designer, ROM scanner, image pusher, CAB drop
+docs/             research notes: hardware, status bar, themes, calls, camera, GPS, Bluetooth, HD2, …
 ```
 
 ## Legal

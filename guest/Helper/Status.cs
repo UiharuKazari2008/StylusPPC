@@ -19,14 +19,22 @@ static class PhoneState
     static bool active;
     static int status, signal, signalRaw, available, connected, wifi;
     static string op = "";
+    static string ssid = "";
 
-    // status svc=0|1 sig=0..4 roam=0|1 data=H|3G|E|G|EV|1X| wifi=0|1 wificonn=0|1 wifisig=0..4 [num=<mccmnc>] op=<name>
+    // status svc=0|1 sig=0..4 roam=0|1 data=H|3G|E|G|EV|1X| wifi=0|1 wificonn=0|1 wifisig=0..4 [num=<mccmnc>] op=<name> [ssid=<network>]
+    // ssid is last (the name may contain spaces). It is the phone's Wi-Fi name; ConnMgr otherwise
+    // calls the emulated ethernet adapter "Network Card" (Status.cs ShowWifiName).
     public static string Set(string args)
     {
         bool svc = false, roam = false, wifiOn = false, wifiConn = false;
         int sig = 0;
         string data = "", num = "";
         op = "";
+        ssid = "";
+        int ssidAt = args.LastIndexOf(" ssid=");
+        if (ssidAt >= 0) { ssid = args.Substring(ssidAt + 6).Trim(); args = args.Substring(0, ssidAt); }
+        ssid = ssid.Replace("\r", "").Replace("\n", "").Trim();
+        if (ssid.Length > 32) ssid = ssid.Substring(0, 32);
         int opAt = args.IndexOf("op=");
         if (opAt >= 0) { op = args.Substring(opAt + 3).Trim(); args = args.Substring(0, opAt); }
         foreach (string part in args.Split(' '))
@@ -152,6 +160,7 @@ static class PhoneState
                 }
             }
             using (RegistryKey k = Registry.LocalMachine.CreateSubKey(HardwareKey)) Put(k, "WiFi", wifi);
+            ShowWifiName();
             ShowCellularLetter();
         }
         catch (Exception e) { Helper.Log("status " + e.Message); }
@@ -167,6 +176,151 @@ static class PhoneState
     {
         object o = k.GetValue(name);
         if (!(o is int) || (int)o != v) k.SetValue(name, v);
+    }
+
+    // The emulated NE2000 is a wired adapter, so Connection Manager publishes it as "Network Card"
+    // (HKLM\System\State\Connections\*\Descriptions, and the wired connectivity bubble). That is the
+    // phone's Wi-Fi while Wi-Fi is the connection, so the label becomes the network name. ConnMgr
+    // writes "Network Card" again on its own events; Apply re-asserts. docs/research-status-indicators.md.
+    const string CardLabel = "Network Card";
+    const string BubblePath = @"\Windows\WZC_CONNECTION_BUBBLE_WIRED.HTM";
+    static string remembered;     // last name this helper published ("" = the stock label)
+    static string bubbleTemplate; // the ROM bubble, still containing "Network Card"; "" = not that file
+    static string bubbleNow;
+
+    static void ShowWifiName()
+    {
+        string want = ssid;
+        string prev = RememberedWifi();
+        try
+        {
+            using (RegistryKey root = Registry.LocalMachine.OpenSubKey(@"System\State\Connections", true))
+            {
+                if (root != null)
+                    foreach (string sub in root.GetSubKeyNames())
+                        using (RegistryKey k = root.OpenSubKey(sub, true))
+                            if (k != null) PutDesc(k, want, prev);
+            }
+        }
+        catch (Exception e) { Helper.Log("wifi name " + e.Message); }
+        if (bubbleNow != want) Bubble(want);
+        if (want != prev) RememberWifi(want);
+    }
+
+    static string RememberedWifi()
+    {
+        if (remembered != null) return remembered;
+        try
+        {
+            using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"Software\WMDroid"))
+                remembered = k == null ? "" : (k.GetValue("WifiName") as string ?? "");
+        }
+        catch (Exception) { remembered = ""; }
+        return remembered;
+    }
+
+    static void RememberWifi(string name)
+    {
+        remembered = name;
+        try
+        {
+            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"Software\WMDroid"))
+                k.SetValue("WifiName", name);
+        }
+        catch (Exception) { }
+    }
+
+    // Replace the stock label, or the name we wrote last time. Leave any other description alone.
+    static void PutDesc(RegistryKey k, string want, string prev)
+    {
+        object o = k.GetValue("Descriptions");
+        string cur = o as string;
+        if (cur == null && o is string[])
+        {
+            string[] a = (string[])o;
+            cur = a.Length == 0 ? "" : a[0];
+        }
+        if (cur == null) return;
+        string next = Retitle(cur, want, prev);
+        if (next == null || next == cur) return;
+        if (o is string[])
+        {
+            try { k.SetValue("Descriptions", new string[] { next }); return; }
+            catch (Exception) { }
+        }
+        k.SetValue("Descriptions", next);
+    }
+
+    static string Retitle(string cur, string want, string prev)
+    {
+        string name = want.Length > 0 ? want : CardLabel;
+        if (cur == CardLabel || (prev.Length > 0 && cur == prev)) return name;
+        if (cur == CardLabel + " Connected" || (prev.Length > 0 && cur == prev + " Connected")) return name + " Connected";
+        return null;
+    }
+
+    static bool bubbleLogged;
+
+    // bubbleNow is the name last written into the bubble file ("" = the stock "Network Card" text).
+    static void Bubble(string name)
+    {
+        try
+        {
+            if (bubbleTemplate == null) bubbleTemplate = LoadBubble();
+            // No bubble file, or Wi-Fi was never named: leave the ROM text alone.
+            if (bubbleTemplate.Length == 0 ||
+                (name.Length == 0 && (bubbleNow == null || bubbleNow.Length == 0) && RememberedWifi().Length == 0))
+            {
+                bubbleNow = name;
+                return;
+            }
+            string text = name.Length == 0 ? bubbleTemplate : SwapCard(bubbleTemplate, Html(name));
+            using (var w = new System.IO.StreamWriter(BubblePath, false, System.Text.Encoding.Unicode)) w.Write(text);
+            bubbleNow = name;
+        }
+        catch (Exception e)
+        {
+            if (bubbleLogged) return;
+            bubbleLogged = true;
+            Helper.Log("wifi bubble " + e.Message);
+        }
+    }
+
+    static string LoadBubble()
+    {
+        string saved = null;
+        using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"Software\WMDroid"))
+            saved = k == null ? null : k.GetValue("WifiBubble") as string;
+        if (saved != null && saved.IndexOf(CardLabel) >= 0) return saved;
+        if (!System.IO.File.Exists(BubblePath)) return "";
+        string text;
+        using (var r = new System.IO.StreamReader(BubblePath, true)) text = r.ReadToEnd();
+        if (text.IndexOf(CardLabel) < 0) return "";
+        using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"Software\WMDroid"))
+            k.SetValue("WifiBubble", text);
+        return text;
+    }
+
+    // "Network Card" but not the settings title "Network Cards".
+    static string SwapCard(string text, string name)
+    {
+        var b = new System.Text.StringBuilder();
+        int i = 0;
+        while (i < text.Length)
+        {
+            int at = text.IndexOf(CardLabel, i);
+            if (at < 0) { b.Append(text, i, text.Length - i); break; }
+            b.Append(text, i, at - i);
+            bool plural = at + CardLabel.Length < text.Length && text[at + CardLabel.Length] == 's';
+            b.Append(plural ? CardLabel : name);
+            i = at + CardLabel.Length;
+        }
+        return b.ToString();
+    }
+
+    static string Html(string s)
+    {
+        return s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
     }
 
     // Locks the device the way the Start menu's Lock item does.

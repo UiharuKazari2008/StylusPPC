@@ -34,9 +34,11 @@
 using namespace wm;
 
 int mwsSelfTest(int argc, char **argv);  // mws_test.cpp
+int thumbJitSelfTest();                  // thumb_test.cpp
 
 static uint64_t g_traceLeft = 0;
 static uint32_t g_traceAt = 0xFFFFFFFF;
+static uint32_t g_tracePid = 0xFFFFFFFF;  // --trace-pid: --trace-at only fires in this FCSE slot
 static uint32_t g_rangeLo = 1, g_rangeHi = 0;
 static bool g_ringVecLoop = false;  // --ring-vec-loop: trigger when a vector-page instruction runs twice in a row (the vector itself faults)
 static uint32_t g_ringLastPc = 0;
@@ -83,7 +85,7 @@ static void ringHook(void *, Cpu &cpu, uint32_t pc, uint32_t insn, bool thumb) {
 }
 
 static void traceHook(void *, Cpu &cpu, uint32_t pc, uint32_t insn, bool thumb) {
-    if (!g_tracing && pc == g_traceAt) g_tracing = true;
+    if (!g_tracing && pc == g_traceAt && (g_tracePid == 0xFFFFFFFF || cpu.cp15_pid == g_tracePid)) g_tracing = true;
     if (!g_tracing || !g_traceLeft) return;
     g_traceLeft--;
     std::string d = thumb ? disasmThumb(pc, (uint16_t)insn) : disasmArm(pc, insn);
@@ -265,6 +267,7 @@ static int runCompare(MachineConfig cfg, double seconds) {
 
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--mws-selftest")) return mwsSelfTest(argc, argv);
+    if (argc >= 2 && !strcmp(argv[1], "--thumb-selftest")) return thumbJitSelfTest();
     if (argc < 2) {
         fprintf(stderr, "usage: %s <image> [--mem MB] [--seconds N] [--v4] [--dump out.ppm] [--trace N] "
                         "[--trace-at HEXPC] [--trace-file F] [--log debug]\n"
@@ -512,6 +515,7 @@ int main(int argc, char **argv) {
         else if (a == "--umstat0") umstat0 = (int)strtol(next(), nullptr, 0);
         else if (a == "--trace") g_traceLeft = strtoull(next(), nullptr, 0);
         else if (a == "--trace-at") g_traceAt = (uint32_t)strtoul(next(), nullptr, 16);
+        else if (a == "--trace-pid") g_tracePid = (uint32_t)strtoul(next(), nullptr, 16);  // e.g. 1e000000
         else if (a == "--trace-file") traceFile = next();
         else if (a == "--trace-range") {
             g_rangeLo = (uint32_t)strtoul(next(), nullptr, 16);

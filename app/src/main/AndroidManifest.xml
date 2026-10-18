@@ -18,6 +18,8 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- The guest's network card reaches the internet through the app's user-mode NAT. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The PC drop window finds the phone with a UDP broadcast (CardDrop). -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Windows Mobile's vibrator, passed through. -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- The phone's GPS as an NMEA receiver on the guest's COM1. -->
@@ -50,6 +52,8 @@
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The Power page asks Android to leave this app out of battery optimization. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Infrared beams to nearby PocketStylus phones over Bluetooth LE (BleIrTransport.kt): scanning
          (never used for location), advertising and GATT links. -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
@@ -206,6 +210,7 @@
         <activity android:name=".BluetoothSettingsActivity" android:exported="false" android:label="Bluetooth" />
         <activity android:name=".PimSettingsActivity" android:exported="false" android:label="Contacts &amp; calendar" />
         <activity android:name=".InfraredSettingsActivity" android:exported="false" android:label="Infrared" />
+        <activity android:name=".HtcAppsActivity" android:exported="false" android:label="HTC HD2 apps" />
         <!-- Text messages for Windows Mobile (SmsBridge.kt): incoming SMS into the queue, quick replies. -->
         <receiver android:name=".SmsReceiver" android:exported="true" android:permission="android.permission.BROADCAST_SMS">
             <intent-filter>

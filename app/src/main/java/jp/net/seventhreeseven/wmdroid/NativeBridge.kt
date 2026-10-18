@@ -22,6 +22,8 @@ object NativeBridge {
     external fun guestHung(handle: Long): Boolean
     /** Android audio usage for the guest's sound: 1 media, 5 notification, 6 ringtone (AAudio values). */
     external fun setAudioUsage(handle: Long, usage: Int)
+    /** Guest audio reached the speaker within the last [ms] (jni.cpp, lastPlayNs). */
+    external fun playedWithin(handle: Long, ms: Int): Boolean
     external fun touch(handle: Long, down: Boolean, x: Int, y: Int)
     /** A Windows virtual key (VK_*) pressed or released. */
     external fun key(handle: Long, vk: Int, down: Boolean)
@@ -106,6 +108,14 @@ object NativeBridge {
     external fun tlsAnswer(id: Int, allow: Boolean)
     /** Forgets the "continue anyway" choices (a new session). */
     external fun tlsForget()
+
+    // ---- G-sensor (motion_jni.cpp, MotionBridge.kt) ----
+    /** True while a Windows Mobile app reads the G-sensor (SEN0:), so the phone's accelerometer runs only then. */
+    external fun motionWanted(handle: Long): Boolean
+    /** One accelerometer sample (m/s^2, Android's sign), already turned into the guest panel's frame. */
+    external fun motionAccel(handle: Long, x: Float, y: Float, z: Float)
+    /** The phone sensor stopped: the guest sees a phone lying face up. */
+    external fun motionClear(handle: Long)
 
     // ---- Camera bridge (camera_jni.cpp, CameraBridge.kt) ----
     /** True while Windows Mobile has its camera open, so the phone's camera runs only then. */

@@ -91,15 +91,11 @@ class CallSettingsActivity : AppCompatActivity() {
             text = "Ring Windows Mobile in the background"
             isChecked = CallOverlay.enabled(this@CallSettingsActivity)
             minHeight = dp(48)
-            setOnCheckedChangeListener { _, on ->
-                CallOverlay.setEnabled(this@CallSettingsActivity, on)
-                if (on && !AndroidSettings.canDrawOverlays(this@CallSettingsActivity))
-                    startActivity(Intent(AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName")))
-            }
+            setOnCheckedChangeListener { _, on -> CallOverlay.setEnabled(this@CallSettingsActivity, on) }
         }, LinearLayout.LayoutParams(-1, -2))
-        text("While PocketStylus is in the background (kept in memory), a call wakes Windows Mobile and its own " +
-            "incoming-call screen comes up over the app you are in; answering opens PocketStylus in full. With the " +
-            "phone locked it opens over the lock screen. Needs \"Display over other apps\".", 13f, 0.65f)
+        text("While PocketStylus is in the background (kept in memory), a call opens it in full. If you ignore " +
+            "the call or it goes unanswered, you return to the app you were in, or the home screen. With the " +
+            "phone locked it opens over the lock screen.", 13f, 0.65f)
 
         text("Text messages", 16f)
         root.addView(MaterialSwitch(this).apply {
@@ -125,6 +121,11 @@ class CallSettingsActivity : AppCompatActivity() {
         text("While Windows Mobile is not on screen, new messages wait for it instead of waking it: PocketStylus shows " +
             "them in a notification, where you can read them and reply right away. Windows Mobile gets them when you " +
             "open it.", 13f, 0.65f)
+        root.addView(MaterialButton(this).apply {
+            text = "Load Messages"
+            setOnClickListener { loadMessages() }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        text("Copies this phone's existing texts into Windows Mobile, once. New messages still arrive on their own.", 13f, 0.65f)
 
         text("My phone number", 16f)
         val settings = Settings(this)
@@ -198,6 +199,18 @@ class CallSettingsActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_BT) fillAudio()
+        if (requestCode == REQ_SMS && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) loadMessages()
+    }
+
+    /** Copies this phone's existing texts into Windows Mobile. New ones still arrive on their own. */
+    private fun loadMessages() {
+        val note = SmsBridge.loadHistory(this)
+        if (note == "permission") {
+            val missing = SmsBridge.permissions().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_SMS)
+            return
+        }
+        android.widget.Toast.makeText(this, note, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     private fun askPermissions() {
@@ -237,5 +250,6 @@ class CallSettingsActivity : AppCompatActivity() {
     companion object {
         private const val REQ_ROLE = 31
         private const val REQ_BT = 33
+        private const val REQ_SMS = 34
     }
 }

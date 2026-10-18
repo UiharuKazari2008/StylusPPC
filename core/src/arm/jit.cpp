@@ -1,9 +1,12 @@
 // ARM (A32) -> AArch64 block translator.
 //
 // Design:
-//  * One block = straight-line guest code up to a branch, PC write, untranslatable instruction,
-//    page end or kMaxInsns. Blocks are keyed by guest PC and host address of the code (so the
-//    same physical code at different VAs, and different code at the same VA, never mix).
+//  * One ARM block = straight-line guest code up to a branch, PC write, untranslatable
+//    instruction, page end or kMaxInsns. A Thumb block is a trace: conditional branches fall
+//    through in the block, and it ends at an unconditional branch, a mode switch, a page end or
+//    128 halfwords. Blocks are keyed by guest PC, host address and instruction set (the same
+//    bytes can be ARM or Thumb). Thumb-to-Thumb branches stay in generated code; a switch back
+//    to ARM returns to the dispatcher.
 //  * Guest NZCV lives in the host NZCV register while a block runs: A32 and A64 flag semantics
 //    match for ADDS/SUBS/ADCS/SBCS. Logical S-ops merge N/Z with the shifter carry by hand.
 //  * Up to six guest registers per block are cached in callee-saved host registers; the rest are
@@ -133,6 +136,34 @@ uint32_t jitInterp(Cpu *c, uint32_t insn, uint32_t pc) {
     return ret;
 }
 
+// One Thumb instruction. r15 is already the architectural PC (instruction address + 4). A branch,
+// exception or mode change leaves r15 and the T bit as the interpreter set them.
+uint32_t jitInterpThumb(Cpu *c, uint32_t insn, uint32_t pc) {
+    if (g_helperHist) (*g_helperHist)[0x10000u | (insn & 0xFFFFu)]++;
+    c->unpackFlags(c->nzcv);
+    c->r[15] = pc + 4;
+    c->branched = false;
+    bool userBefore = c->mode == MODE_USR;
+    uint32_t genBefore = c->tlbGen, pidBefore = c->cp15_pid, ctrlBefore = c->cp15_ctrl;
+    uint32_t ret = 0;
+    try {
+        c->execThumb((uint16_t)insn);
+        if (c->branched) {
+            ret = JIT_NEXT;
+        } else if ((c->jitStatus & 6) || c->halted || (c->mode == MODE_USR) != userBefore ||
+                   c->tlbGen != genBefore || c->cp15_pid != pidBefore || c->cp15_ctrl != ctrlBefore ||
+                   (c->irqLine && !c->fI) || (c->fiqLine && !c->fF) || c->prefetchLeft) {
+            c->r[15] = pc + 2;
+            ret = JIT_STOP;
+        }
+    } catch (const MemAbort &) {
+        c->r[15] = pc;
+        ret = JIT_ABORT;
+    }
+    c->nzcv = c->packFlags();
+    return ret;
+}
+
 // ---------------------------------------------------------------------------------------------
 
 struct Block {
@@ -142,7 +173,8 @@ struct Block {
     uint32_t ninsn;
     uint32_t *code;
     uint32_t words;  // generated code size (debug map)
-    bool dead;
+    bool dead = false;
+    bool thumb = false;
 };
 
 class Jit {
@@ -174,13 +206,15 @@ private:
     size_t capWords = 0, used = 0, codeStart = 0;
     uint32_t (*enter)(CpuState *, uint32_t *) = nullptr;
     uint32_t *exitLabel = nullptr;
-    uint32_t *dispatchStub = nullptr;  // w0 = exit reason, w1 = target pc
+    uint32_t *dispatchStub = nullptr;  // ARM: w0 = exit reason, w1 = target pc
+    uint32_t *dispatchThumb = nullptr; // Thumb: bit0 set stays Thumb; even BX switches to ARM
     uint32_t *exitPc = nullptr;        // w0 = reason, w1 = pc: save flags/pc and leave
     uint32_t *exitChain = nullptr;     // as exitPc, plus x17 = patchable branch to link later
     // Shared slow-path thunks (preserve guest flags; called with bl):
     uint32_t *readThunk[32] = {};      // indexed by kind (size | signed<<4); w1 = va -> w0
     uint32_t *writeThunk[5] = {};      // indexed by size; w1 = va, w2 = value
     uint32_t *interpThunk = nullptr;   // w1 = insn, w2 = pc -> w0 = exit reason or 0
+    uint32_t *thumbInterpThunk = nullptr;
     // Indirect-branch table: generated code looks blocks up by host address + pc.
     struct IbEntry {
         uint64_t host;
@@ -190,18 +224,24 @@ private:
     };
     static const int kIb = 1 << 16;
     IbEntry *ib = nullptr;
-    static uint32_t ibIndex(uint64_t host) { return (uint32_t)(host >> 2) & (kIb - 1); }
+    // Bit 0 of the stored host address is the Thumb tag (real hosts are halfword aligned).
+    // Indexing by >>1 keeps adjacent Thumb entry points in different slots.
+    static uint64_t ibHost(const Block *b) { return b->host | (b->thumb ? 1ull : 0); }
+    static uint32_t ibIndex(uint64_t host) { return (uint32_t)(host >> 1) & (kIb - 1); }
     void ibInsert(Block *b) {
-        IbEntry &e = ib[ibIndex(b->host)];
-        e.host = b->host;
+        uint64_t tagged = ibHost(b);
+        IbEntry &e = ib[ibIndex(tagged)];
+        e.host = tagged;
         e.pc = b->pc;
         e.code = b->code;
     }
     void ibRemove(Block *b) {
-        IbEntry &e = ib[ibIndex(b->host)];
-        if (e.host == b->host && e.pc == b->pc) e.host = 0;
+        uint64_t tagged = ibHost(b);
+        IbEntry &e = ib[ibIndex(tagged)];
+        if (e.host == tagged && e.pc == b->pc) e.host = 0;
     }
     static const int kFast = 1 << 16;
+    static uint32_t fastIx(uint32_t pc) { return (pc >> 1) & (kFast - 1); }
     Block *fast[kFast] = {};
     std::unordered_map<uint64_t, Block *> map;
     std::unordered_map<uint32_t, std::vector<Block *>> pages;
@@ -213,7 +253,9 @@ private:
     std::vector<Block *> freeList;
     Block *compile(uint32_t pc, uint8_t *host);
     void chainTo(uint32_t *site);
-    static uint64_t key(uint32_t pc, uint64_t host) { return host * 0x9E3779B97F4A7C15ull ^ pc; }
+    static uint64_t key(uint32_t pc, uint64_t host, bool thumb) {
+        return host * 0x9E3779B97F4A7C15ull ^ pc ^ (thumb ? 0x100000000ull : 0);
+    }
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -222,13 +264,18 @@ private:
 class Translator {
 public:
     Translator(Jit &j, Emitter &e, uint32_t pc0, const uint32_t *code) : j(j), e(e), pc0(pc0), code(code) {}
+    Translator(Jit &j, Emitter &e, uint32_t pc0, const uint16_t *code16)
+        : j(j), e(e), pc0(pc0), code(nullptr), tcode(code16), thumb(true) {}
     uint32_t translate(uint32_t maxInsns);  // returns number of guest instructions in the block
+    uint32_t translateThumb(uint32_t maxInsns);
 
 private:
     Jit &j;
     Emitter &e;
     uint32_t pc0;
     const uint32_t *code;
+    const uint16_t *tcode = nullptr;
+    bool thumb = false;
     int8_t cacheOf[16];      // guest reg -> index in kCacheRegs, or -1
     int8_t cachedGuest[kNumCache];
     uint32_t dirty = 0;
@@ -241,7 +288,10 @@ private:
     enum Kind { INLINE, HELPER, END_BEFORE };
     Kind classify(uint32_t insn) const;
     void allocate(uint32_t n);
+    void allocateThumb(uint32_t n);
     void usage(uint32_t insn, int counts[16]) const;
+    void usageThumb(uint16_t insn, int counts[16]) const;
+    void assignCache(int counts[16]);
 
     Reg rd(int g, Reg tmp, uint32_t pcOffset = 8);
     Reg dst(int g, Reg tmp) { return cacheOf[g] >= 0 ? kCacheRegs[cacheOf[g]] : tmp; }
@@ -254,6 +304,16 @@ private:
     void deferredExitConst(uint32_t *branch, uint32_t reason, uint32_t pcValue, uint32_t executed);
     void callHelper(void *fn);
     void emitHelperInsn(uint32_t insn);
+    void emitHelperThumb(uint16_t insn);
+    bool thumbStopBefore(uint16_t insn) const;
+    bool thumbEndsBlock(uint16_t insn) const;
+    bool emitThumb(uint16_t insn, bool &ended);
+    // kind: 0 LSL, 1 LSR, 2 ASR, 3 ROR. Rs[7:0] is the amount. N and Z follow the result, C follows
+    // the ARM shift rules (unchanged when the amount is 0), V is left alone.
+    void emitThumbShiftReg(int kind, int rdI, int rsI);
+    void emitThumbMem(Reg addr, int rt, bool load, int size, bool sgn);
+    // kind: 0 push, 1 pop, 2 stmia, 3 ldmia. list bit 8 is LR (push) or PC (pop).
+    bool emitThumbMulti(uint16_t insn, int kind, int baseReg, uint32_t list, bool &ended);
     void tlbProbe(Reg a, Reg table);
     // Load (into dest) or store (val) at the guest VA in addr. ioStop, for stores, emits what
     // runs when the slow path hit I/O or a code page: the rest of the instruction, then an exit.
@@ -284,9 +344,7 @@ void Translator::usage(uint32_t insn, int counts[16]) const {
     }
 }
 
-void Translator::allocate(uint32_t n) {
-    int counts[16] = {};
-    for (uint32_t i = 0; i < n; i++) usage(code[i], counts);
+void Translator::assignCache(int counts[16]) {
     counts[15] = 0;
     memset(cacheOf, -1, sizeof cacheOf);
     for (int k = 0; k < kNumCache; k++) {
@@ -296,6 +354,12 @@ void Translator::allocate(uint32_t n) {
         cachedGuest[k] = (int8_t)best;
         if (best >= 0) cacheOf[best] = (int8_t)k;
     }
+}
+
+void Translator::allocate(uint32_t n) {
+    int counts[16] = {};
+    for (uint32_t i = 0; i < n; i++) usage(code[i], counts);
+    assignCache(counts);
 }
 
 Reg Translator::rd(int g, Reg tmp, uint32_t pcOffset) {
@@ -338,7 +402,10 @@ void Translator::addExecuted(uint32_t n) {
 void Translator::exitConst(uint32_t reason, uint32_t pcValue, uint32_t executed) {
     spillDirty();
     addExecuted(executed);
-    if (reason == JIT_NEXT && ((pcValue ^ pc0) & ~0xFFFu) == 0) {
+    // A chained exit skips the refund above, so only chain when this instruction is the last one
+    // in the block. An earlier conditional branch still leaves through the dispatcher, which
+    // keeps the refund and stays in generated code.
+    if (reason == JIT_NEXT && executed >= blockN && ((pcValue ^ pc0) & ~0xFFFu) == 0) {
         // Same-page target: this branch is patched to jump straight into the target block once
         // it exists (flags stay in NZCV, registers are in state).
         uint32_t *patch = e.b();
@@ -351,7 +418,8 @@ void Translator::exitConst(uint32_t reason, uint32_t pcValue, uint32_t executed)
     }
     e.mov32(X1, pcValue);
     e.movz(X0, reason);
-    e.bTo((reason == JIT_NEXT || reason == JIT_BX) ? j.dispatchStub : j.exitPc);
+    uint32_t *disp = thumb ? j.dispatchThumb : j.dispatchStub;
+    e.bTo((reason == JIT_NEXT || reason == JIT_BX) ? disp : j.exitPc);
 }
 
 void Translator::exitReg(uint32_t reason, Reg pcReg, uint32_t executed) {
@@ -359,7 +427,7 @@ void Translator::exitReg(uint32_t reason, Reg pcReg, uint32_t executed) {
     if (pcReg != X1) e.movr(X1, pcReg);
     addExecuted(executed);
     e.movz(X0, reason);
-    e.bTo(j.dispatchStub);
+    e.bTo(thumb ? j.dispatchThumb : j.dispatchStub);
 }
 
 void Translator::deferredExitConst(uint32_t *branch, uint32_t reason, uint32_t pcValue, uint32_t executed) {
@@ -972,6 +1040,550 @@ uint32_t Translator::translate(uint32_t maxInsns) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Thumb
+
+void Translator::usageThumb(uint16_t insn, int counts[16]) const {
+    auto lo = [&](int bit, int n = 1) { counts[(insn >> bit) & 7] += n; };
+    switch (insn >> 11) {
+        case 0x00: case 0x01: case 0x02: lo(0); lo(3); break;
+        case 0x03:
+            lo(0); lo(3);
+            if (!(insn & (1 << 10))) lo(6);
+            break;
+        case 0x04: case 0x05: case 0x06: case 0x07: lo(8, 2); break;
+        case 0x08:
+            if (!(insn & 0x400)) { lo(0, 2); lo(3); }
+            else {
+                counts[(insn & 7) | ((insn >> 4) & 8)] += 2;
+                counts[(insn >> 3) & 0xF]++;
+            }
+            break;
+        case 0x09: lo(8); break;
+        case 0x0A: case 0x0B: lo(0); lo(3); lo(6); break;
+        case 0x0C: case 0x0D: case 0x0E: case 0x0F:
+        case 0x10: case 0x11: lo(0); lo(3); break;
+        case 0x12: case 0x13: lo(8); counts[13] += 2; break;
+        case 0x14: lo(8); break;
+        case 0x15: lo(8); counts[13] += 2; break;
+        case 0x16: case 0x17: {
+            counts[13] += 2;
+            uint32_t sub = (insn >> 8) & 0xF;
+            if (sub == 4 || sub == 5 || sub == 0xC || sub == 0xD) {
+                for (int i = 0; i < 8; i++) if (insn & (1 << i)) counts[i]++;
+                if (insn & 0x100) counts[sub >= 0xC ? 15 : 14]++;
+            }
+            break;
+        }
+        case 0x18: case 0x19:
+            counts[(insn >> 8) & 7] += 2;
+            for (int i = 0; i < 8; i++) if (insn & (1 << i)) counts[i]++;
+            break;
+        case 0x1D: case 0x1E: case 0x1F: counts[14] += 2; break;
+        default: break;
+    }
+}
+
+void Translator::allocateThumb(uint32_t n) {
+    int counts[16] = {};
+    for (uint32_t i = 0; i < n; i++) usageThumb(tcode[i], counts);
+    assignCache(counts);
+}
+
+void Translator::emitHelperThumb(uint16_t insn) {
+    spillDirty();
+    e.mov32(X1, insn);
+    e.mov32(X2, pc);
+    e.blTo(j.thumbInterpThunk);
+    j.stats.helperCalls++;
+    reloadCached();
+    uint32_t *out = e.cbnz(X0);
+    uint32_t exec = idx + 1;
+    deferred.push_back([=]() {
+        e.here(out);
+        addExecuted(exec);
+        e.strx(ZR, STATE, OFF_LASTEXIT);
+        e.bTo(j.exitLabel);
+    });
+}
+
+bool Translator::thumbStopBefore(uint16_t insn) const {
+    switch (insn >> 11) {
+        case 0x16: case 0x17: {
+            uint32_t sub = (insn >> 8) & 0xF;
+            return sub != 0 && sub != 4 && sub != 5 && sub != 0xC && sub != 0xD;
+        }
+        case 0x1A: case 0x1B: return ((insn >> 8) & 0xF) >= 0xE;
+        case 0x1D: return j.cpu.core < CORE_ARMV5 || (insn & 1);
+        default: return false;
+    }
+}
+
+bool Translator::thumbEndsBlock(uint16_t insn) const {
+    switch (insn >> 11) {
+        case 0x08:
+            if (insn & 0x400) {
+                uint32_t op = (insn >> 8) & 3;
+                uint32_t rd = (insn & 7) | ((insn >> 4) & 8);
+                if (op == 3) return true;
+                if ((op == 0 || op == 2) && rd == 15) return true;
+            }
+            return false;
+        case 0x16: case 0x17: return ((insn >> 8) & 0xF) == 0xD;
+        case 0x1A: case 0x1B: {
+            // A backward branch is a loop. Ending the block here makes both exits the last
+            // instruction, so the taken path can chain back to the loop head.
+            if (((insn >> 8) & 0xF) >= 0xE) return false;
+            return (int8_t)(insn & 0xFF) < 0;
+        }
+        case 0x1C: case 0x1F: return true;
+        case 0x1D: return j.cpu.core >= CORE_ARMV5 && !(insn & 1);
+        default: return false;
+    }
+}
+
+void Translator::emitThumbMem(Reg addr, int rt, bool load, int size, bool sgn) {
+    uint32_t dirty0 = dirty, next = pc + 2, exec = idx + 1;
+    std::function<void()> stop;
+    Reg val = ZR, dest = X0;
+    if (load) dest = dst(rt, X0);
+    else val = rd(rt, X2);
+    if (!load) {
+        stop = [=]() {
+            uint32_t d = dirty;
+            dirty = dirty0;
+            exitConst(JIT_STOP, next, exec);
+            dirty = d;
+        };
+    }
+    memAccess(addr, val, dest, !load, size, sgn, stop);
+    if (load) commit(rt, dest);
+}
+
+bool Translator::emitThumbMulti(uint16_t insn, int kind, int baseReg, uint32_t list, bool &ended) {
+    bool pop = kind == 1, load = kind == 1 || kind == 3, descending = kind == 0;
+    uint32_t regs = list & 0xFF;
+    bool extra = (kind <= 1) && (list & 0x100);
+    uint32_t n = (uint32_t)__builtin_popcount(regs) + (extra ? 1u : 0u);
+    if (n == 0) return true;
+    bool loadsPc = pop && extra;
+    uint32_t savedDirty = dirty;
+    Reg base = rd(baseReg, X9);
+    if (descending) e.subi(X1, base, 4 * n);
+    else e.movr(X1, base);
+    tlbProbe(X1, load ? TLBR : TLBW);
+    uint32_t *slow1 = e.cbnz(X5);
+    e.ubfx(X16, X3, 0, 2);
+    uint32_t *slow2 = e.cbnz(X16);
+    e.addi(X17, X3, 4 * n - 1);          // small add: page cross if bit 12 differs
+    e.eor(X16, X17, X3);
+    e.lsri(X16, X16, 12);
+    uint32_t *slow3 = e.cbnz(X16);
+    e.addx(X7, X6, X3);
+    uint32_t k = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!(regs & (1u << i))) continue;
+        if (load) {
+            Reg d = dst(i, X8);
+            e.ldrw(d, X7, 4 * k);
+            commit(i, d);
+        } else {
+            Reg v = rd(i, X8);
+            e.strw(v, X7, 4 * k);
+        }
+        k++;
+    }
+    if (extra && !loadsPc) {
+        Reg v = rd(14, X8);
+        e.strw(v, X7, 4 * k);
+    } else if (loadsPc) {
+        e.ldrw(X12, X7, 4 * k);
+    }
+    if (load && kind == 3 && (regs & (1u << baseReg))) {
+        // The loaded value of the base wins over writeback.
+    } else if (descending) {
+        commit(baseReg, X1);
+    } else {
+        e.addi(X14, X1, 4 * n);
+        commit(baseReg, X14);
+    }
+    if (loadsPc) {
+        if (j.cpu.core >= CORE_ARMV5) exitReg(JIT_BX, X12, idx + 1);
+        else {
+            e.lsri(X12, X12, 1);
+            e.lsli(X12, X12, 1);
+            exitReg(JIT_NEXT, X12, idx + 1);
+        }
+        ended = true;
+        e.here(slow1);
+        e.here(slow2);
+        e.here(slow3);
+        uint32_t after = dirty;
+        dirty = savedDirty;
+        emitHelperThumb(insn);
+        dirty = after;
+        exitConst(JIT_NEXT, pc + 2, idx + 1);
+        return true;
+    }
+    uint32_t *cont = e.b();
+    e.here(slow1);
+    e.here(slow2);
+    e.here(slow3);
+    uint32_t after = dirty;
+    dirty = savedDirty;
+    emitHelperThumb(insn);
+    dirty = after;
+    e.here(cont);
+    return true;
+}
+
+void Translator::emitThumbShiftReg(int kind, int rdI, int rsI) {
+    Reg val = rd(rdI, X9);
+    Reg rs = rd(rsI, X10);
+    e.ubfx(X13, rs, 0, 8);                 // s = Rs[7:0]
+    e.sub(X14, ZR, X13);
+    e.lsri(X14, X14, 31);
+    e.sub(X14, ZR, X14);                   // all ones when s != 0
+    e.movr(X8, val);                       // zero-extended value
+    if (kind == 3) {
+        e.rorv(X12, X8, X13);              // low 5 bits; a multiple of 32 reproduces the value
+        e.lsri(X17, X12, 31);
+    } else if (kind == 2) {
+        // amount' = (s & 31) | (s >= 32 ? 32 : 0). A 64-bit ASR of the sign-extended value then
+        // matches ARM for 0, 1..31 and every amount past 31, including amounts past 63.
+        e.ubfx(X15, X13, 5, 3);
+        e.sub(X15, ZR, X15);
+        e.lsri(X15, X15, 31);
+        e.ubfx(X16, X13, 0, 5);
+        e.orr(X15, X16, X15, LSL, 5);
+        e.sxtw(X8, X8);
+        e.asrv(X12, X8, X15, true);
+        e.lsri(X17, val, 31);              // carry for s >= 32 is the sign bit
+        e.subi(X16, X13, 1);
+        e.ubfx(X16, X16, 0, 5);
+        e.lsrv(X15, val, X16);
+        e.ubfx(X15, X15, 0, 1);            // bit (s - 1) for s = 1..32
+        e.ubfx(X16, X13, 5, 3);
+        e.sub(X16, ZR, X16);
+        e.lsri(X16, X16, 31);
+        e.sub(X16, ZR, X16);               // all ones when s >= 32
+        e.andr(X17, X17, X16);
+        e.logic(0, true, X15, X15, X16);
+        e.orr(X17, X17, X15);
+    } else {
+        e.ubfx(X15, X13, 6, 2);
+        e.sub(X15, ZR, X15);
+        e.lsri(X15, X15, 31);
+        e.sub(X15, ZR, X15);               // all ones when s >= 64
+        e.ubfx(X16, X13, 0, 6);
+        if (kind == 0) {
+            e.lslv(X12, X8, X16, true);
+            e.lsrix(X17, X12, 32);         // bit shifted into position 32, for amounts 1..63
+            e.ubfx(X17, X17, 0, 1);
+        } else {
+            e.lsrv(X12, X8, X16, true);
+            e.subi(X16, X13, 1);
+            e.ubfx(X16, X16, 0, 6);
+            e.lsrv(X17, X8, X16, true);    // bit 0 is the bit shifted out, for amounts 1..63
+            e.ubfx(X17, X17, 0, 1);
+        }
+        e.logic(0, true, X17, X17, X15);
+        e.logic(0, true, X12, X12, X15);   // amounts >= 64 produce 0 and carry 0
+    }
+    // s == 0 keeps the carry the instruction started with.
+    e.mrsNzcv(X16);
+    e.ubfx(X16, X16, 29, 1);
+    e.logic(0, true, X16, X16, X14);
+    e.andr(X17, X17, X14);
+    e.orr(X17, X17, X16);
+    Reg d = dst(rdI, X12);
+    if (d != X12) e.movr(d, X12);
+    logicFlags(d, 2);
+    commit(rdI, d);
+}
+
+bool Translator::emitThumb(uint16_t insn, bool &ended) {
+    auto dropBit0 = [&](Reg r) { e.lsri(r, r, 1); e.lsli(r, r, 1); };
+    auto addrOf = [&](Reg base, uint32_t off) {
+        if (off) e.addi(X1, base, off);
+        else if (base != X1) e.movr(X1, base);
+    };
+    switch (insn >> 11) {
+        case 0x00: case 0x01: case 0x02: {
+            uint32_t rdI = insn & 7, rmI = (insn >> 3) & 7, s = (insn >> 6) & 0x1F;
+            int kind = insn >> 11;
+            Reg m = rd((int)rmI, X9);
+            Reg d = dst((int)rdI, X12);
+            if (kind == 0) {
+                if (s == 0) { if (d != m) e.movr(d, m); logicFlags(d, -1); }
+                else { e.ubfx(X17, m, 32 - s, 1); e.lsli(d, m, s); logicFlags(d, 2); }
+            } else if (kind == 1) {
+                if (s == 0) { e.lsri(X17, m, 31); e.movz(d, 0); logicFlags(d, 2); }
+                else { e.ubfx(X17, m, s - 1, 1); e.lsri(d, m, s); logicFlags(d, 2); }
+            } else if (s == 0) {
+                e.lsri(X17, m, 31); e.asri(d, m, 31); logicFlags(d, 2);
+            } else {
+                e.ubfx(X17, m, s - 1, 1); e.asri(d, m, s); logicFlags(d, 2);
+            }
+            commit((int)rdI, d);
+            return true;
+        }
+        case 0x03: {
+            uint32_t rdI = insn & 7, rnI = (insn >> 3) & 7;
+            bool sub = insn & (1 << 9), imm = insn & (1 << 10);
+            Reg a = rd((int)rnI, X9);
+            Reg d = dst((int)rdI, X12);
+            if (imm) {
+                uint32_t b = (insn >> 6) & 7;
+                if (sub) e.subsi(d, a, b); else e.addsi(d, a, b);
+            } else {
+                Reg b = rd((int)((insn >> 6) & 7), X10);
+                if (sub) e.subs(d, a, b); else e.adds(d, a, b);
+            }
+            commit((int)rdI, d);
+            return true;
+        }
+        case 0x04: case 0x05: case 0x06: case 0x07: {
+            uint32_t rdI = (insn >> 8) & 7, imm = insn & 0xFF, op = (insn >> 11) & 3;
+            if (op == 0) {
+                Reg d = dst((int)rdI, X12);
+                e.movz(d, imm);
+                logicFlags(d, -1);
+                commit((int)rdI, d);
+                return true;
+            }
+            Reg a = rd((int)rdI, X9);
+            if (op == 1) { e.subsi(ZR, a, imm); return true; }
+            Reg d = dst((int)rdI, X12);
+            if (op == 2) e.addsi(d, a, imm); else e.subsi(d, a, imm);
+            commit((int)rdI, d);
+            return true;
+        }
+        case 0x08: {
+            if (!(insn & 0x400)) {
+                uint32_t op = (insn >> 6) & 0xF, rdI = insn & 7, rmI = (insn >> 3) & 7;
+                if (op == 2 || op == 3 || op == 4 || op == 7) {
+                    int kind = op == 2 ? 0 : op == 3 ? 1 : op == 4 ? 2 : 3;
+                    emitThumbShiftReg(kind, (int)rdI, (int)rmI);
+                    return true;
+                }
+                Reg a = rd((int)rdI, X9), b = rd((int)rmI, X10);
+                bool write = op != 8 && op != 0xA && op != 0xB;
+                Reg d = write ? dst((int)rdI, X12) : X12;
+                switch (op) {
+                    case 0x0: e.andr(d, a, b); logicFlags(d, -1); break;
+                    case 0x1: e.eor(d, a, b); logicFlags(d, -1); break;
+                    case 0x5: e.adcs(d, a, b); break;
+                    case 0x6: e.sbcs(d, a, b); break;
+                    case 0x8: e.andr(X12, a, b); logicFlags(X12, -1); break;
+                    case 0x9: e.subs(d, ZR, b); break;
+                    case 0xA: e.subs(ZR, a, b); break;
+                    case 0xB: e.adds(ZR, a, b); break;
+                    case 0xC: e.orr(d, a, b); logicFlags(d, -1); break;
+                    case 0xD: e.mul(d, a, b); logicFlags(d, -1); break;
+                    case 0xE: e.logic(0, true, d, a, b); logicFlags(d, -1); break;
+                    case 0xF: e.mvn(d, b); logicFlags(d, -1); break;
+                    default: return false;
+                }
+                if (write) commit((int)rdI, d);
+                return true;
+            }
+            uint32_t op = (insn >> 8) & 3;
+            uint32_t rdI = (insn & 7) | ((insn >> 4) & 8), rmI = (insn >> 3) & 0xF;
+            if (op == 3) {
+                if ((insn & 0x80) && j.cpu.core < CORE_ARMV5) return false;
+                Reg t = rd((int)rmI, X12, 4);
+                if (t != X12) e.movr(X12, t);
+                if (insn & 0x80) { e.mov32(X9, (pc + 2) | 1); commit(14, X9); }
+                exitReg(JIT_BX, X12, idx + 1);
+                ended = true;
+                return true;
+            }
+            if (op == 1) {
+                e.subs(ZR, rd((int)rdI, X9, 4), rd((int)rmI, X10, 4));
+                return true;
+            }
+            if (rdI == 15) {
+                if (op == 0) {
+                    e.mov32(X9, pc + 4);
+                    e.add(X12, X9, rd((int)rmI, X10, 4));
+                } else {
+                    Reg b = rd((int)rmI, X12, 4);
+                    if (b != X12) e.movr(X12, b);
+                }
+                dropBit0(X12);
+                exitReg(JIT_NEXT, X12, idx + 1);
+                ended = true;
+                return true;
+            }
+            Reg b = rd((int)rmI, X10, 4);
+            Reg d = dst((int)rdI, X12);
+            if (op == 0) e.add(d, rd((int)rdI, X9, 4), b);
+            else if (d != b) e.movr(d, b);
+            commit((int)rdI, d);
+            return true;
+        }
+        case 0x09: {
+            e.mov32(X1, ((pc + 4) & ~3u) + (insn & 0xFF) * 4);
+            emitThumbMem(X1, (insn >> 8) & 7, true, 4, false);
+            return true;
+        }
+        case 0x0A: case 0x0B: {
+            e.add(X1, rd((insn >> 3) & 7, X9), rd((insn >> 6) & 7, X10));
+            int rt = insn & 7;
+            switch ((insn >> 9) & 7) {
+                case 0: emitThumbMem(X1, rt, false, 4, false); break;
+                case 1: emitThumbMem(X1, rt, false, 2, false); break;
+                case 2: emitThumbMem(X1, rt, false, 1, false); break;
+                case 3: emitThumbMem(X1, rt, true, 1, true); break;
+                case 4: emitThumbMem(X1, rt, true, 4, false); break;
+                case 5: emitThumbMem(X1, rt, true, 2, false); break;
+                case 6: emitThumbMem(X1, rt, true, 1, false); break;
+                default: emitThumbMem(X1, rt, true, 2, true); break;
+            }
+            return true;
+        }
+        case 0x0C: case 0x0D: case 0x0E: case 0x0F: {
+            bool B = insn & (1 << 12), L = insn & (1 << 11);
+            uint32_t off = ((insn >> 6) & 0x1F) * (B ? 1u : 4u);
+            addrOf(rd((insn >> 3) & 7, X9), off);
+            emitThumbMem(X1, insn & 7, L, B ? 1 : 4, false);
+            return true;
+        }
+        case 0x10: case 0x11: {
+            addrOf(rd((insn >> 3) & 7, X9), ((insn >> 6) & 0x1F) * 2);
+            emitThumbMem(X1, insn & 7, insn & (1 << 11), 2, false);
+            return true;
+        }
+        case 0x12: case 0x13: {
+            addrOf(rd(13, X9), (insn & 0xFF) * 4);
+            emitThumbMem(X1, (insn >> 8) & 7, (insn >> 11) == 0x13, 4, false);
+            return true;
+        }
+        case 0x14: case 0x15: {
+            int rdI = (insn >> 8) & 7;
+            Reg d = dst(rdI, X12);
+            if ((insn >> 11) == 0x14) e.mov32(d, ((pc + 4) & ~3u) + (insn & 0xFF) * 4);
+            else {
+                Reg sp = rd(13, X9);
+                uint32_t off = (insn & 0xFF) * 4;
+                if (off) e.addi(d, sp, off);
+                else if (d != sp) e.movr(d, sp);
+            }
+            commit(rdI, d);
+            return true;
+        }
+        case 0x16: case 0x17: {
+            uint32_t sub = (insn >> 8) & 0xF;
+            if (sub == 0) {
+                uint32_t imm = (insn & 0x7F) * 4;
+                Reg s = rd(13, X9), d = dst(13, X12);
+                if (imm == 0) { if (d != s) e.movr(d, s); }
+                else if (insn & 0x80) e.subi(d, s, imm);
+                else e.addi(d, s, imm);
+                commit(13, d);
+                return true;
+            }
+            if (sub == 4 || sub == 5 || sub == 0xC || sub == 0xD)
+                return emitThumbMulti(insn, (sub >= 0xC) ? 1 : 0, 13, (insn & 0xFF) | (insn & 0x100), ended);
+            return false;
+        }
+        case 0x18: case 0x19:
+            return emitThumbMulti(insn, (insn & (1 << 11)) ? 3 : 2, (insn >> 8) & 7, insn & 0xFF, ended);
+        case 0x1A: case 0x1B: {
+            int cond = (insn >> 8) & 0xF;
+            int32_t off = (int32_t)(int8_t)(insn & 0xFF) * 2;
+            uint32_t *skip = e.bcond((Cond)(cond ^ 1));
+            exitConst(JIT_NEXT, pc + 4 + (uint32_t)off, idx + 1);
+            e.here(skip);
+            return true;
+        }
+        case 0x1C: {
+            uint16_t hin = insn;
+            int32_t off = ((int32_t)(hin << 21) >> 20);
+            exitConst(JIT_NEXT, pc + 4 + (uint32_t)off, idx + 1);
+            ended = true;
+            return true;
+        }
+        case 0x1D: {
+            Reg lr = rd(14, X10);
+            uint32_t add = (insn & 0x7FF) << 1;
+            if (add) e.addi(X12, lr, add); else if (lr != X12) e.movr(X12, lr);
+            e.lsri(X12, X12, 2);
+            e.lsli(X12, X12, 2);
+            e.mov32(X9, (pc + 2) | 1);
+            commit(14, X9);
+            exitReg(JIT_BX, X12, idx + 1);
+            ended = true;
+            return true;
+        }
+        case 0x1E: {
+            uint16_t hin = insn;
+            int32_t off = ((int32_t)(hin << 21) >> 9);
+            e.mov32(X9, (uint32_t)((int32_t)(pc + 4) + off));
+            commit(14, X9);
+            return true;
+        }
+        case 0x1F: {
+            Reg lr = rd(14, X10);
+            uint32_t add = (insn & 0x7FF) << 1;
+            if (add) e.addi(X12, lr, add); else if (lr != X12) e.movr(X12, lr);
+            dropBit0(X12);
+            e.mov32(X9, (pc + 2) | 1);
+            commit(14, X9);
+            exitReg(JIT_NEXT, X12, idx + 1);
+            ended = true;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+uint32_t Translator::translateThumb(uint32_t maxInsns) {
+    uint32_t n = 0;
+    while (n < maxInsns) {
+        uint32_t a = pc0 + 2 * n;
+        if (n > 0 && (a & 0xFFF) == 0) break;
+        uint16_t insn = tcode[n];
+        if (thumbStopBefore(insn)) break;
+        n++;
+        if (thumbEndsBlock(insn)) break;
+    }
+    if (n == 0) return 0;
+    allocateThumb(n);
+    blockN = n;
+    e.subi(X16, BUDGET, n);
+    uint32_t *bail = e.tbnz(X16, 31);
+    e.movr(BUDGET, X16);
+    deferred.push_back([=]() {
+        e.here(bail);
+        e.mov32(X1, pc0);
+        e.movz(X0, JIT_NEXT);
+        e.bTo(j.exitPc);
+    });
+    for (int k = 0; k < kNumCache; k++)
+        if (cachedGuest[k] >= 0) e.ldrw(kCacheRegs[k], STATE, cachedGuest[k] * 4);
+    dirty = 0;
+    bool ended = false;
+    for (idx = 0; idx < n && !ended; idx++) {
+        pc = pc0 + 2 * idx;
+        if (!emitThumb(tcode[idx], ended)) emitHelperThumb(tcode[idx]);
+    }
+    if (!ended) exitConst(JIT_NEXT, pc0 + 2 * n, n);
+    for (size_t i = 0; i < deferred.size(); i++) deferred[i]();
+    if (!abortSites.empty()) {
+        for (uint32_t *s : abortSites) e.here(s);
+        for (int k = 0; k < kNumCache; k++)
+            if (cachedGuest[k] >= 0) e.strw(kCacheRegs[k], STATE, cachedGuest[k] * 4);
+        e.mov32(X17, n);
+        e.sub(X17, X17, X2);
+        e.add(BUDGET, BUDGET, X17);
+        e.movz(X0, JIT_ABORT);
+        e.bTo(j.exitPc);
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jit
 
 Jit::Jit(Cpu &c) : cpu(c) {
@@ -1042,7 +1654,7 @@ Jit::Jit(Cpu &c) : cpu(c) {
         e.eor(X5, X5, X16);
         uint32_t *s2 = e.cbnz(X5);
         e.addx(X6, X6, X3);                  // host address of the target
-        e.lsrix(X7, X6, 2);
+        e.lsrix(X7, X6, 1);                  // ibIndex: host >> 1 (bit 0 tags Thumb blocks)
         e.ubfx(X7, X7, 0, 16);
         e.mov64(X8, (uint64_t)(uintptr_t)ib);
         e.addx(X8, X8, X7, LSL, 5);
@@ -1062,6 +1674,57 @@ Jit::Jit(Cpu &c) : cpu(c) {
         e.strw(X1, STATE, 60);
         e.strx(ZR, STATE, OFF_LASTEXIT);
         e.bTo(exitLabel);
+    }
+    // Thumb dispatch. Guest NZCV is live, so this uses no flag-setting instructions.
+    // An even BX target is a switch to ARM. Every other target stays in Thumb; bit 0 is
+    // stripped and the block is looked up under the Thumb tag.
+    dispatchThumb = e.pos();
+    {
+        e.ubfx(X16, X1, 0, 1);
+        e.movz(X17, JIT_BX);
+        e.eor(X17, X17, X0);
+        uint32_t *notBx = e.cbnz(X17);
+        uint32_t *thumbBx = e.cbnz(X16);
+        e.bTo(exitPc);
+        e.here(notBx);
+        e.here(thumbBx);
+        e.lsri(X1, X1, 1);
+        e.lsli(X1, X1, 1);
+        e.ubfx(X4, X1, 12, 12);
+        e.lsri(X16, X1, 25);
+        e.movr(X3, X1);
+        uint32_t *high = e.cbnz(X16);
+        e.lsrix(X17, GENPID, 32);
+        e.orr(X3, X1, X17);
+        e.here(high);
+        e.addx(X4, TLBR, X4, LSL, 4);
+        e.ldp(X5, X6, X4, 0);
+        e.lsri(X16, X3, 12);
+        e.orr(X16, X16, GENPID);
+        e.eor(X5, X5, X16);
+        uint32_t *miss = e.cbnz(X5);
+        e.addx(X6, X6, X3);
+        e.addi(X6, X6, 1, true);             // Thumb tag in bit 0 of the host key
+        e.lsrix(X7, X6, 1);
+        e.ubfx(X7, X7, 0, 16);
+        e.mov64(X8, (uint64_t)(uintptr_t)ib);
+        e.addx(X8, X8, X7, LSL, 5);
+        e.ldp(X9, X10, X8, 0);
+        e.eorx(X9, X9, X6);
+        uint32_t *miss2 = e.cbnz(X9, true);
+        e.eor(X10, X10, X1);
+        uint32_t *miss3 = e.cbnz(X10);
+        e.ldrx(X11, X8, 16);
+        e.br(X11);
+        e.here(miss);
+        e.here(miss2);
+        e.here(miss3);
+        e.movz(X16, JIT_BX);
+        e.eor(X16, X16, X0);
+        uint32_t *keep = e.cbnz(X16);
+        e.movz(X0, JIT_NEXT);                // BX to Thumb that is not translated yet
+        e.here(keep);
+        e.bTo(exitPc);
     }
     auto thunk = [&](void *fn, int argReg, uint32_t imm) {
         uint32_t *start = e.pos();
@@ -1092,6 +1755,7 @@ Jit::Jit(Cpu &c) : cpu(c) {
     for (uint32_t k : {1u, 2u, 4u, 17u, 18u}) readThunk[k] = thunk((void *)&jitRead, X2, k);
     for (uint32_t s : {1u, 2u, 4u}) writeThunk[s] = thunk((void *)&jitWrite, X3, s);
     interpThunk = thunk((void *)&jitInterp, -1, 0);
+    thumbInterpThunk = thunk((void *)&jitInterpThumb, -1, 0);
     codeStart = used = e.size();
     __builtin___clear_cache((char *)buf, (char *)(buf + used));
 }
@@ -1137,8 +1801,8 @@ void Jit::invalidatePage(uint32_t ppn) {
     for (Block *b : it->second) {
         b->dead = true;
         ibRemove(b);
-        map.erase(key(b->pc, b->host));
-        Block *&f = fast[(b->pc >> 2) & (kFast - 1)];
+        map.erase(key(b->pc, b->host, b->thumb));
+        Block *&f = fast[fastIx(b->pc)];
         if (f == b) f = nullptr;
     }
     pages.erase(it);
@@ -1147,8 +1811,8 @@ void Jit::invalidatePage(uint32_t ppn) {
 // Patches a same-page exit to jump directly into the block at the new pc, if it is translated.
 void Jit::chainTo(uint32_t *site) {
     uint32_t pc = cpu.r[15];
-    Block *b = fast[(pc >> 2) & (kFast - 1)];
-    if (!b || b->pc != pc || b->dead || b->ninsn == 0) return;  // linked on a later exit
+    Block *b = fast[fastIx(pc)];
+    if (!b || b->pc != pc || b->dead || b->ninsn == 0 || b->thumb != cpu.fT) return;
     // The target must be the block for the current mapping of this VA (FCSE processes share VAs).
     uint32_t mva = cpu.vaMod(pc);
     bool user = cpu.mode == MODE_USR;
@@ -1178,12 +1842,21 @@ Block *Jit::compile(uint32_t pc, uint8_t *host) {
     b->ppn = pa >> 12;
     b->dead = false;
     b->code = buf + used;
+    b->thumb = cpu.fT;
     Emitter e(buf + used, capWords - used);
-    Translator t(*this, e, pc, (const uint32_t *)host);
-    uint32_t maxInsns = kMaxInsns;
-    uint32_t room = (0x1000 - (pc & 0xFFF)) / 4;
-    if (room < maxInsns) maxInsns = room;
-    b->ninsn = t.translate(maxInsns);
+    if (cpu.fT) {
+        uint32_t maxInsns = 128;
+        uint32_t room = (0x1000 - (pc & 0xFFF)) / 2;
+        if (room < maxInsns) maxInsns = room;
+        Translator t(*this, e, pc, (const uint16_t *)host);
+        b->ninsn = t.translateThumb(maxInsns);
+    } else {
+        uint32_t maxInsns = kMaxInsns;
+        uint32_t room = (0x1000 - (pc & 0xFFF)) / 4;
+        if (room < maxInsns) maxInsns = room;
+        Translator t(*this, e, pc, (const uint32_t *)host);
+        b->ninsn = t.translate(maxInsns);
+    }
     if (e.ovf) {
         flush();
         return nullptr;
@@ -1191,11 +1864,12 @@ Block *Jit::compile(uint32_t pc, uint8_t *host) {
     b->words = (uint32_t)e.size();
     used += e.size();
     __builtin___clear_cache((char *)b->code, (char *)(buf + used));
-    map[key(pc, b->host)] = b;
+    map[key(pc, b->host, b->thumb)] = b;
     pages[b->ppn].push_back(b);
     if (b->ninsn) ibInsert(b);
     {
-        uint32_t lo = (pc & 0xFFF) >> 6, hi = ((pc & 0xFFF) + 4 * (b->ninsn ? b->ninsn : 1) - 1) >> 6;
+        uint32_t bytes = (b->thumb ? 2u : 4u) * (b->ninsn ? b->ninsn : 1u);
+        uint32_t lo = (pc & 0xFFF) >> 6, hi = ((pc & 0xFFF) + bytes - 1) >> 6;
         uint64_t &m = codeLines[b->ppn];
         for (uint32_t l = lo; l <= hi && l < 64; l++) m |= 1ull << l;
     }
@@ -1206,7 +1880,8 @@ Block *Jit::compile(uint32_t pc, uint8_t *host) {
 
 bool Jit::run(uint64_t budget, uint32_t &reason, uint32_t &executed) {
     uint32_t pc = cpu.r[15];
-    if (pc & 3) return false;
+    bool thumb = cpu.fT;
+    if (pc & (thumb ? 1u : 3u)) return false;
     uint32_t mva = cpu.vaMod(pc);
     bool user = cpu.mode == MODE_USR;
     const FastTlb &f = cpu.ftlb[user * 2][(mva >> 12) & (Cpu::TLB_SIZE - 1)];
@@ -1220,14 +1895,16 @@ bool Jit::run(uint64_t budget, uint32_t &reason, uint32_t &executed) {
         host = te->host + (mva & 0xFFF);
     }
     uint64_t hk = (uint64_t)(uintptr_t)host;
-    Block *&slot = fast[(pc >> 2) & (kFast - 1)];
+    Block *&slot = fast[fastIx(pc)];
     Block *b = slot;
-    if (!b || b->pc != pc || b->host != hk) {
-        auto it = map.find(key(pc, hk));
-        if (it != map.end() && it->second->pc == pc && it->second->host == hk) b = it->second;
+    if (!b || b->dead || b->pc != pc || b->host != hk || b->thumb != thumb) {
+        auto it = map.find(key(pc, hk, thumb));
+        if (it != map.end() && it->second->pc == pc && it->second->host == hk && it->second->thumb == thumb &&
+            !it->second->dead)
+            b = it->second;
         else b = compile(pc, host);
         if (!b) return false;
-        fast[(pc >> 2) & (kFast - 1)] = b;
+        slot = b;
     }
     if (b->ninsn == 0 || b->ninsn > budget) {
         if (b->ninsn == 0) {

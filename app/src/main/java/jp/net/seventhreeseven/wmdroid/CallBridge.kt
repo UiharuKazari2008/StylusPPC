@@ -55,10 +55,12 @@ import java.util.concurrent.Executor
  * Incoming calls ring in Windows Mobile while the emulator is on screen ("call ring <number>"; the
  * helper makes FakeRIL raise the call, and cprog shows its own incoming-call screen). WM's Answer /
  * Ignore / End answer, reject or end the real call; answering or ending it on the phone answers or
- * ends WM's. With the dialer role the call stays in WmInCallService (no Android screen); without it
- * the phone's dialer shows the call too and WM follows the phone state. "Use Phone's Ringer" picks
- * which ringtone sounds: Windows Mobile's (the phone's ringer is silenced for that call) or the
- * phone's (Windows Mobile's sound is muted while it rings).
+ * ends WM's. While PocketStylus is in the background, the call opens the emulator in full; if it is
+ * ignored or goes unanswered, the previous app or the home screen comes back. With the dialer role
+ * the call stays in WmInCallService (no Android screen); without it the phone's dialer shows the
+ * call too and WM follows the phone state. "Use Phone's Ringer" picks which ringtone sounds:
+ * Windows Mobile's (the phone's ringer is silenced for that call) or the phone's (Windows Mobile's
+ * sound is muted while it rings).
  *
  * Call audio never passes through the emulator: it stays on the phone's earpiece, speaker or headset.
  * docs/research-phone-calls-pim.md, sections E and F.
@@ -106,12 +108,18 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     var onModemSms: ((Int, String) -> Unit)? = null
     /** Wakes a session kept in memory for an incoming call (EmulatorActivity.wakeForEvent). */
     var wake: ((Long) -> Boolean)? = null
-    /** Windows Mobile over other apps while a call rings in the background (CallOverlay). */
+    /** A floating card left from an older session; incoming calls open the activity instead. */
     var overlay: CallOverlay? = null
     /** The guest's size and whether the frame is turned (fold mode), for the overlay. */
     var guestFrame: (() -> Triple<Int, Int, Boolean>)? = null
-    /** Brings the emulator to the front (an incoming call answered from the overlay). */
+    /** Brings the emulator activity to the front for an incoming call. */
     var bringFront: (() -> Unit)? = null
+    /** True while the emulator activity is started (on screen, including under a dialog). */
+    var visible: (() -> Boolean)? = null
+    /** An incoming call opened the emulator over another app, then went unanswered or was rejected. */
+    var onRingDismissed: (() -> Unit)? = null
+    /** That open should return to the previous app when the ring ends without an answer. */
+    private var returnAfterRing = false
     /** The last Windows Mobile call just ended while the app is in the background (EmulatorActivity.leave). */
     var onIdle: (() -> Unit)? = null
     /** Gives the guest's picture back to the activity's own surface (after the overlay had it). */
@@ -168,6 +176,9 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         /** Not per OS: the phone's ring stream muted for a call, to unmute if the app died during it. */
         private fun ringState(ctx: Context) = ctx.getSharedPreferences("wmdroid.calls", Context.MODE_PRIVATE)
         private const val RING_MUTED = "ringStreamMuted"
+        private const val HANDLED = "calls.handled"
+        private const val CAUGHT = "calls.caught"
+        private const val VMAIL = "calls.vmail"
 
         /** WMDroid is the default phone app, so WM's call screen can be the only one. */
         fun holdsRole(ctx: Context): Boolean =
@@ -208,6 +219,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         lastEnabled = on
         if (on && holdsRole(ctx)) bindLink()
         resync()
+        watchCallLog()
+        ui.post(catchUpRun)
         updateShowing()
         updateListening()
         updateFastPoll()
@@ -216,6 +229,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     fun pause() {
         foreground = false
+        unwatchCallLog()
         updateShowing()
         updateListening()
         updateFastPoll()
@@ -245,6 +259,8 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     fun stop() {
         CallAudio.onRoute = null
         endFromPill = null
+        unwatchCallLog()
+        ui.removeCallbacks(catchUpRun)
         handOff()
         unbindLink()
         stopListening()
@@ -375,8 +391,17 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
 
     // ---- Incoming calls ----
 
-    /** Windows Mobile can ring for an incoming call now: on screen, calls on, its phone up. */
+    /** Windows Mobile can ring for an incoming call now: on screen or allowed in the background, calls on, its phone up. */
     private fun canRing() = (foreground || CallOverlay.enabled(ctx)) && enabled(ctx) && callsReady != false && handle() != 0L
+
+    /** The emulator activity is up, or another of this app's screens is the one the user is in. */
+    private fun onScreen(): Boolean {
+        if (visible?.invoke() == true || foreground) return true
+        val info = android.app.ActivityManager.RunningAppProcessInfo()
+        android.app.ActivityManager.getMyMemoryState(info)
+        return info.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND ||
+            info.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+    }
 
     /** Tells the call process (dialer role) whether to keep incoming calls for Windows Mobile. */
     private fun updateShowing() {
@@ -413,20 +438,31 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     }
 
     /**
-     * In the background: the session wakes at full speed (EmulatorActivity.wakeForEvent) and Windows
-     * Mobile's screen comes up over other apps, or, with the phone locked, through a full-screen call
-     * notification that opens the emulator over the lock screen. False if no session is in memory.
+     * In the background: the session wakes at full speed (EmulatorActivity.wakeForEvent) and the
+     * emulator opens in full. With the phone locked, a full-screen call notification opens it over
+     * the lock screen. False if no session is in memory or the app cannot come forward.
      */
     private fun showInBackground(): Boolean {
         if (wake?.invoke(120_000) != true) return false
+        val interrupted = !onScreen()
         val pm = ctx.getSystemService(PowerManager::class.java)
         val km = ctx.getSystemService(android.app.KeyguardManager::class.java)
         val locked = pm?.isInteractive == false || km?.isKeyguardLocked == true
-        if (!locked) {
-            val f = guestFrame?.invoke() ?: return false
-            if (overlay?.show(handle(), f.first, f.second, f.third) == true) return true
-        }
-        return fullScreenCall()
+        val opened = if (!locked && openFull()) true else fullScreenCall()
+        if (!opened) return false
+        returnAfterRing = interrupted
+        return true
+    }
+
+    /**
+     * Brings the emulator activity forward. From the background this is allowed for the default
+     * dialer, and for an app the user has allowed to draw over other apps.
+     */
+    private fun openFull(): Boolean {
+        if (bringFront == null) return false
+        if (Build.VERSION.SDK_INT >= 29 && !holdsRole(ctx) && !android.provider.Settings.canDrawOverlays(ctx)) return false
+        bringFront?.invoke()
+        return true
     }
 
     private fun fullScreenCall(): Boolean {
@@ -450,12 +486,16 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         return true
     }
 
-    /** The ringing is over: the overlay or the call notification goes; answered means the full emulator. */
+    /**
+     * The ringing is over: the call notification goes. Answering leaves the emulator in front.
+     * An unanswered or rejected call that opened it over another app returns there.
+     */
     private fun endRingUi(answered: Boolean) {
-        val wasShown = overlay?.showing == true
         overlay?.hide()
         ctx.getSystemService(android.app.NotificationManager::class.java)?.cancel(CALL_NOTE)
-        if (answered && !foreground && wasShown) bringFront?.invoke()
+        val opened = returnAfterRing
+        returnAfterRing = false
+        if (!answered && opened) onRingDismissed?.invoke()
     }
 
     /** WM did not ring in time (helper busy or gone): the phone handles the call as usual. */
@@ -479,6 +519,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         ui.removeCallbacks(ringTimeout)
         if (r == null || r.gone) {
             // The real call was answered elsewhere or ended meanwhile (or WM was too late).
+            if (r?.gone == true) noteHandled(r.number)
             guest.send("call state $id ended missed")
             endRingerOverrides()
             finishCalls()
@@ -558,10 +599,13 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         muteRingStream(false)
     }
 
-    /** The usage for the guest's sound ("audio ring|media|alert" from the helper). */
+    /**
+     * The usage for the guest's sound ("audio ring|notify|media" from the helper).
+     * A ringtone uses the ringtone stream. Everything else uses media: the helper calls anything
+     * that isn't a player a notification, and that made the side keys follow notification volume.
+     */
     fun audioUsage(kind: String): Int = when (kind) {
-        "ring" -> if (ringMuted) 1 else 6  // the ring stream is muted for this call: media volume
-        "alert" -> 5
+        "ring" -> if (ringMuted) 1 else 6
         else -> 1
     }
 
@@ -652,7 +696,11 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
             if (call != null && call.connectedAt == 0L) call.connectedAt = System.currentTimeMillis()
             CallAudio.applySaved(ctx)
         }
-        if (s == "ended") { calls.remove(id); finishCalls() } else { updateWakeLock(); updatePill() }
+        if (s == "ended") {
+            if (was == "ringing") noteHandled(calls[id]?.number)
+            calls.remove(id)
+            finishCalls()
+        } else { updateWakeLock(); updatePill() }
     }
 
     private fun finishCalls() {
@@ -663,6 +711,7 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
         updateFastPoll()
         cancelPill()
         if (!foreground) onIdle?.invoke()
+        ui.post(catchUpRun)
     }
 
     /** The status chip's Hang up: end the call Windows Mobile is showing. */
@@ -796,6 +845,169 @@ class CallBridge(private val activity: Activity, private val guest: GuestBridge,
     private fun handedOff() {
         ring?.takeIf { it.token != null }?.gone = true
         for (c in calls.values.filter { it.owned }.toList()) state(c.id, "ended", "handoff")
+    }
+
+    // ---- Missed calls and voice mail Windows Mobile did not see ----
+
+    private var watchingLog = false
+    private val catchUpRun = Runnable { catchUp() }
+    private val callObserver = object : android.database.ContentObserver(ui) {
+        override fun onChange(selfChange: Boolean) {
+            ui.removeCallbacks(catchUpRun)
+            ui.postDelayed(catchUpRun, 2000)
+        }
+    }
+
+    private fun watchCallLog() {
+        if (watchingLog || !enabled(ctx)) return
+        if (ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) return
+        runCatching {
+            ctx.contentResolver.registerContentObserver(android.provider.CallLog.Calls.CONTENT_URI, true, callObserver)
+            if (holdsRole(ctx)) ctx.contentResolver.registerContentObserver(
+                android.provider.VoicemailContract.Voicemails.CONTENT_URI, true, callObserver)
+            watchingLog = true
+        }
+    }
+
+    private fun unwatchCallLog() {
+        if (!watchingLog) return
+        runCatching { ctx.contentResolver.unregisterContentObserver(callObserver) }
+        watchingLog = false
+    }
+
+    /** A miss Windows Mobile already recorded, so the catch-up does not count it again. */
+    private fun noteHandled(number: String?) {
+        val t = tail(number ?: return)
+        if (t.isEmpty()) return
+        val prefs = Settings.prefs(ctx)
+        val cur = prefs.getString(HANDLED, "").orEmpty().split(',').filter { it.isNotEmpty() }.toMutableList()
+        cur += "$t@${System.currentTimeMillis()}"
+        prefs.edit().putString(HANDLED, cur.takeLast(40).joinToString(",")).apply()
+    }
+
+    private fun wasHandled(number: String, whenMs: Long): Boolean {
+        val t = tail(number)
+        if (t.isEmpty()) return false
+        return Settings.prefs(ctx).getString(HANDLED, "").orEmpty().split(',').any { e ->
+            val p = e.split('@')
+            p.size == 2 && p[0] == t && kotlin.math.abs((p[1].toLongOrNull() ?: 0L) - whenMs) < 3 * 60_000L
+        }
+    }
+
+    private fun tail(number: String) = number.filter { it.isDigit() }.takeLast(8)
+
+    /**
+     * Unacknowledged missed calls, and new voice mail, from while Windows Mobile was not in the call.
+     * Filed into the home-screen counts (Calls.cs). A call WM already rang for is skipped.
+     */
+    @SuppressLint("MissingPermission")
+    private fun catchUp() {
+        if (!enabled(ctx) || handle() == 0L) return
+        if (ring != null || calls.isNotEmpty()) { ui.postDelayed(catchUpRun, 4000); return }
+        val canLog = ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
+        val canPhone = ctx.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+        if (!canLog && !canPhone) return
+        val prefs = Settings.prefs(ctx)
+        val seen = prefs.getString(CAUGHT, "").orEmpty().split(',').filter { it.isNotEmpty() }.toMutableSet()
+        val sb = StringBuilder()
+        val fresh = ArrayList<String>()
+        if (canLog || holdsRole(ctx)) {
+            val posted = HashSet<String>()
+            for (row in (if (canLog) readNewCalls() else emptyList()) + unreadVoicemail()) {
+                val key = (if (row.voicemail) "v" else "m") + row.id
+                if (key in seen) continue
+                val slot = tail(row.number) + "@" + row.time / 120_000
+                if (row.voicemail && slot in posted) { fresh += key; continue }
+                if (!row.voicemail && wasHandled(row.number, row.time)) { fresh += key; continue }
+                if (row.voicemail) posted += slot
+                val kind = if (row.voicemail) "vmsg" else "missed"
+                sb.append('#').append(kind).append("\nnumber=").append(flat(row.number))
+                    .append("\nname=").append(flat(row.name))
+                    .append("\ntext=").append(flat(row.text)).append('\n')
+                fresh += key
+            }
+        }
+        var vmailCount = -1
+        var vmailNote = false
+        if (canPhone) {
+            val count = voiceMessageCount()
+            val last = prefs.getInt(VMAIL, -1)
+            if (count >= 0 && count != last) {
+                val box = runCatching { telephony.voiceMailNumber }.getOrNull().orEmpty()
+                vmailCount = count
+                vmailNote = count > last && count > 0
+                sb.append("#vmail\ncount=").append(count).append("\nnumber=").append(flat(box))
+                    .append("\nnotify=").append(if (vmailNote) "1" else "0").append('\n')
+            }
+        }
+        val edit = prefs.edit()
+        if (fresh.isNotEmpty()) edit.putString(CAUGHT, (seen + fresh).toList().takeLast(200).joinToString(","))
+        if (sb.isEmpty()) { edit.apply(); return }
+        guest.boxFile("call-catch.txt").writeText(sb.toString())
+        guest.send("call catchup")
+        if (vmailCount >= 0) edit.putInt(VMAIL, vmailCount)
+        edit.apply()
+        Log.i(TAG, "catching up calls Windows Mobile missed (${fresh.size} new, voicemail notice $vmailNote)")
+    }
+
+    private class Logged(val id: Long, val voicemail: Boolean, val number: String, val name: String, val time: Long, val text: String)
+
+    private fun flat(s: String) = s.replace('\n', ' ').replace('\r', ' ').take(160)
+
+    /** Carrier message-waiting count. The method is still on the phone; current SDKs no longer list it. */
+    private fun voiceMessageCount(): Int {
+        val tm = telephony ?: return -1
+        return runCatching { tm.javaClass.getMethod("getVoiceMessageCount").invoke(tm) as Int }.getOrDefault(-1)
+    }
+
+    /** Unread visual voicemail, when this app is the phone app (the mailbox is closed to everyone else). */
+    private fun unreadVoicemail(): List<Logged> {
+        if (!holdsRole(ctx)) return emptyList()
+        val out = ArrayList<Logged>()
+        runCatching {
+            ctx.contentResolver.query(
+                android.provider.VoicemailContract.Voicemails.CONTENT_URI,
+                arrayOf("_id", "number", "date", "transcription"),
+                "is_read=0", null, "date DESC"
+            )?.use { c ->
+                while (c.moveToNext() && out.size < 30)
+                    out += Logged(-(c.getLong(0) + 1), true, c.getString(1).orEmpty(), "", c.getLong(2), c.getString(3).orEmpty())
+            }
+        }
+        return out
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readNewCalls(): List<Logged> {
+        val withText = runCatching { readNewCalls(true) }
+        return withText.getOrElse { readNewCalls(false) }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readNewCalls(transcription: Boolean): List<Logged> {
+        val cols = arrayOf(
+            android.provider.CallLog.Calls._ID, android.provider.CallLog.Calls.NUMBER, android.provider.CallLog.Calls.DATE,
+            android.provider.CallLog.Calls.TYPE, android.provider.CallLog.Calls.CACHED_NAME
+        ) + if (transcription) arrayOf("transcription") else emptyArray()
+        val out = ArrayList<Logged>()
+        ctx.contentResolver.query(
+            android.provider.CallLog.Calls.CONTENT_URI, cols,
+            "new=1 AND (type=? OR type=? OR type=?)",
+            arrayOf(
+                android.provider.CallLog.Calls.MISSED_TYPE.toString(),
+                android.provider.CallLog.Calls.VOICEMAIL_TYPE.toString(),
+                android.provider.CallLog.Calls.REJECTED_TYPE.toString()
+            ),
+            "${android.provider.CallLog.Calls.DATE} DESC"
+        )?.use { c ->
+            while (c.moveToNext() && out.size < 30) {
+                val type = c.getInt(3)
+                out += Logged(c.getLong(0), type == android.provider.CallLog.Calls.VOICEMAIL_TYPE,
+                    c.getString(1).orEmpty(), c.getString(4).orEmpty(), c.getLong(2),
+                    if (transcription && !c.isNull(5)) c.getString(5).orEmpty() else "")
+            }
+        }
+        return out
     }
 
     // ---- Phone state (calls without the role, and a backstop for the rest) ----

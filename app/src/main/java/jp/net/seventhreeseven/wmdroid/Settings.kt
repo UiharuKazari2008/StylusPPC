@@ -147,6 +147,20 @@ class Settings(ctx: Context) {
     var keyOpacity: Int
         get() = p.getInt("skin.keys.opacity", 100)
         set(v) = p.edit().putInt("skin.keys.opacity", v.coerceIn(0, 100)).apply()
+
+    /** Outline stroke and glyph, 0..100. Neither scales the backlight drawn over the glyphs. */
+    var keyOutline: Int
+        get() = p.getInt("skin.keys.outline", 100)
+        set(v) = p.edit().putInt("skin.keys.outline", v.coerceIn(0, 100)).apply()
+    var keyGlyph: Int
+        get() = p.getInt("skin.keys.glyph", 100)
+        set(v) = p.edit().putInt("skin.keys.glyph", v.coerceIn(0, 100)).apply()
+
+    /** Key face: glass, flat, bubbled, metallic. */
+    var keyTheme: String
+        get() = p.getString("skin.keys.theme", "glass")!!
+        set(v) = p.edit().putString("skin.keys.theme",
+            if (v == "flat" || v == "bubbled" || v == "metallic") v else "glass").apply()
     var keyBlur: Int
         get() = p.getInt("skin.keys.blur", 0)
         set(v) = p.edit().putInt("skin.keys.blur", v.coerceIn(0, 25)).apply()
@@ -262,6 +276,17 @@ class Settings(ctx: Context) {
     fun hwButton(n: Int): String = p.getString("hwbutton.$n", null) ?: if (n == 4) "okclose" else GuestSettings.BUTTON_WM
     fun setHwButton(n: Int, v: String) = p.edit().putString("hwbutton.$n", v).apply()
 
+    /** A Today widget the phone asked to install ("weather" or "infrawan"), empty if none. */
+    var widgetRequest: String
+        get() = p.getString("widget.req", "")!!
+        set(v) = p.edit().putString("widget.req", v).apply()
+
+    fun requestWidget(which: String) {
+        val cur = widgetRequest.split(' ').filter { it.isNotEmpty() }.toMutableSet()
+        cur.add(which)
+        widgetRequest = cur.joinToString(" ")
+    }
+
     /** WM's own Buttons assignments as the helper last reported them (Keymap.HwButtons; null = stock). */
     var hwButtonMap: String?
         get() = p.getString("hwbutton.map", null)
@@ -360,6 +385,14 @@ class Settings(ctx: Context) {
         get() = gl.getBoolean("fold.hinge.on", false)
         set(v) = gl.edit().putBoolean("fold.hinge.on", v).apply()
 
+    /**
+     * Open foldable uses the Foldable Max layout (the screen fills the window; the hinge is hidden).
+     * Toggled from the power menu while the phone is unfolded.
+     */
+    var foldMax: Boolean
+        get() = gl.getBoolean("fold.max", false)
+        set(v) = gl.edit().putBoolean("fold.max", v).apply()
+
     /** Status bar data letters: "auto" (the phone's network), "gsm" (G/E/3G/H) or "cdma" (1X/EV). */
     var netIndicator: String
         get() = p.getString("status.net", "auto")!!
@@ -401,6 +434,11 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("lock.leave", false)
         set(v) = p.edit().putBoolean("lock.leave", v).apply()
 
+    /** The skin's lock button minimises PocketStylus instead of locking Windows Mobile. */
+    var lockClosesApp: Boolean
+        get() = p.getBoolean("lock.closes", false)
+        set(v) = p.edit().putBoolean("lock.closes", v).apply()
+
     /** What happens when the app goes to the background: BG_*. */
     var backgroundMode: String
         get() = p.getString("bg.mode", BG_SUSPEND)!!
@@ -433,7 +471,12 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("dock.on", p.getString("dock.pos", DOCK_OFF) != DOCK_OFF)
         set(v) = p.edit().putBoolean("dock.on", v).apply()
 
-    /** Where the dock goes: DOCK_AUTO (the skin's free space, else the bottom of the display), DOCK_TOP or DOCK_BOTTOM. */
+    /** Hide the dock while the phone is unfolded. The cover screen still shows it. */
+    var dockHideUnfolded: Boolean
+        get() = p.getBoolean("dock.unfolded.off", false)
+        set(v) = p.edit().putBoolean("dock.unfolded.off", v).apply()
+
+    /** Where the dock goes: DOCK_AUTO, DOCK_TOP, DOCK_BOTTOM (under the display), or DOCK_FLOOR (the bottom edge). */
     var dockPlace: String
         get() = p.getString("dock.place", null) ?: p.getString("dock.pos", null)?.takeIf { it != DOCK_OFF } ?: DOCK_AUTO
         set(v) = p.edit().putString("dock.place", v).apply()
@@ -579,6 +622,8 @@ class Settings(ctx: Context) {
         const val DOCK_AUTO = "auto"
         const val DOCK_TOP = "top"
         const val DOCK_BOTTOM = "bottom"
+        /** Below the keys, on the bottom edge of the phone. */
+        const val DOCK_FLOOR = "floor"
 
         // Background behaviour. Suspend: paused in memory. Hibernate: saved to resume.wms and
         // released. Running: on at a reduced CPU share under a foreground service.

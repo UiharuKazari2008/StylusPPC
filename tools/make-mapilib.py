@@ -34,7 +34,7 @@ SECTIONS {
 ''' % (IMAGEBASE + 0x1000)
 # .idata read-only: Windows CE refuses a DLL whose import tables are writable (ERROR_BAD_EXE_FORMAT).
 FLAGS = {'.text': 0x60000020, '.rdata': 0x40000040, '.data': 0xC0000040, '.idata': 0x40000040,
-         '.edata': 0x40000040, '.reloc': 0x42000040}
+         '.edata': 0x40000040, '.rsrc': 0x40000040, '.reloc': 0x42000040}
 EXPORT_PREFIXES = ('IMAPI', 'IMsgStore', 'IMessage', 'MAPIlib', 'Release')
 
 CFLAGS = ['--target=armv4t-none-eabi', '-marm', '-Os', '-ffreestanding', '-fno-builtin', '-fshort-wchar',
@@ -81,7 +81,26 @@ def abs32_relocs(b, sections):
     return sorted(set(out))
 
 
-def build_pe(entry, sections, symbols, relocs, dllname='MAPIlib.dll', prefixes=EXPORT_PREFIXES):
+def hires_resource():
+    """Resource tree FindResourceW(module, "HI_RES_AWARE", "CEUX") locks. Data entry sits at offset 72."""
+    def wstr(s):
+        return struct.pack('<H', len(s)) + s.encode('utf-16le')
+    s_type, s_name = wstr('CEUX'), wstr('HI_RES_AWARE')
+    str_type, str_name = 88, 88 + len(s_type)
+    res_at = (str_name + len(s_name) + 3) & ~3
+    buf = bytearray(res_at + 4)
+    struct.pack_into('<IIHHHH', buf, 0, 0, 0, 0, 0, 1, 0)
+    struct.pack_into('<II', buf, 16, 0x80000000 | str_type, 0x80000000 | 24)
+    struct.pack_into('<IIHHHH', buf, 24, 0, 0, 0, 0, 1, 0)
+    struct.pack_into('<II', buf, 40, 0x80000000 | str_name, 0x80000000 | 48)
+    struct.pack_into('<IIHHHH', buf, 48, 0, 0, 0, 0, 0, 1)
+    struct.pack_into('<II', buf, 64, 0, 72)
+    buf[str_type:str_type + len(s_type)] = s_type
+    buf[str_name:str_name + len(s_name)] = s_name
+    return buf, res_at
+
+
+def build_pe(entry, sections, symbols, relocs, dllname='MAPIlib.dll', prefixes=EXPORT_PREFIXES, ordinal_base=1):
     iat_start, iat_end = symbols['iat_start'], symbols['iat_end']
     slots = sorted((a, n) for n, a in symbols.items() if n.startswith('iat_') and n not in ('iat_start', 'iat_end'))
     assert len(slots) * 4 == iat_end - iat_start, 'every .iat slot must be one iat_<dll>_<name> variable'
@@ -145,8 +164,18 @@ def build_pe(entry, sections, symbols, relocs, dllname='MAPIlib.dll', prefixes=E
         struct.pack_into('<I', edata, names_off + 4 * i, rva + len(edata))
         struct.pack_into('<H', edata, ords_off + 2 * i, i)
         edata += e.encode() + b'\0'
-    struct.pack_into('<IIHHIIIIIII', edata, 0, 0, 0, 0, 0, name_rva, 1, n, n, rva + funcs_off, rva + names_off, rva + ords_off)
+    # IMAGE_EXPORT_DIRECTORY. Ordinal of export i is ordinal_base + i (the Today item must be 240).
+    struct.pack_into('<IIHHIIIIIII', edata, 0, 0, 0, 0, 0, name_rva, ordinal_base, n, n,
+                     rva + funcs_off, rva + names_off, rva + ords_off)
     parts.append(['.edata', rva, len(edata), edata])
+
+    # HI_RES_AWARE / CEUX, first dword 1. aygshell treats a DLL without this, linked as 4.20,
+    # as a legacy plugin and shell32 never calls InitializeCustomItem on the Today window.
+    rva = next_rva()
+    rsrc, res_at = hires_resource()
+    struct.pack_into('<IIII', rsrc, 72, rva + res_at, 4, 0, 0)
+    struct.pack_into('<I', rsrc, res_at, 1)
+    parts.append(['.rsrc', rva, len(rsrc), rsrc])
 
     # .reloc: HIGHLOW for every absolute address, in 4K blocks
     rva = next_rva()
@@ -181,13 +210,14 @@ def build_pe(entry, sections, symbols, relocs, dllname='MAPIlib.dll', prefixes=E
     dirs[0] = (find['.edata'][1], len(find['.edata'][3]))
     if slots:
         dirs[1] = (find['.idata'][1], desc_size)
+    dirs[2] = (find['.rsrc'][1], len(find['.rsrc'][3]))
     dirs[5] = (find['.reloc'][1], len(find['.reloc'][3]))
     if slots:
         dirs[12] = (iat_start - IMAGEBASE, iat_end - iat_start)
     code_size = ma.align(parts[0][2], FILE_ALIGN)
     data_size = sum(ma.align(p[2], FILE_ALIGN) for p in parts[1:])
     opt = struct.pack('<HBBIIIIIII', 0x10B, 6, 0, code_size, data_size, 0, entry - IMAGEBASE, parts[0][1], parts[1][1], IMAGEBASE)
-    opt += struct.pack('<IIHHHHHHIIIIHHIIIIII', SECT_ALIGN, FILE_ALIGN, 4, 20, 0, 0, 4, 20, 0, image_size, HEADERS,
+    opt += struct.pack('<IIHHHHHHIIIIHHIIIIII', SECT_ALIGN, FILE_ALIGN, 5, 2, 0, 0, 5, 2, 0, image_size, HEADERS,
                        0, 9, 0, 0x10000, 0x1000, 0x100000, 0x1000, 0, 16)
     opt += b''.join(struct.pack('<II', *d) for d in dirs)
     hdr = bytes(dos) + b'PE\0\0' + coff + opt + shdrs

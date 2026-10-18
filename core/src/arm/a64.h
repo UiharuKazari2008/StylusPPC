@@ -89,6 +89,8 @@ public:
     void clz(Reg d, Reg n) { put(0x5AC01000u | (n << 5) | d); }
     void csel(Reg d, Reg n, Reg m, Cond c) { put(0x1A800000u | (m << 16) | (c << 12) | (n << 5) | d); }
     void cmpi(Reg n, uint32_t imm12) { put(0x7100001Fu | (imm12 << 10) | (n << 5)); }
+    void addsi(Reg d, Reg n, uint32_t imm12) { put(0x31000000u | (imm12 << 10) | (n << 5) | d); }
+    void subsi(Reg d, Reg n, uint32_t imm12) { put(0x71000000u | (imm12 << 10) | (n << 5) | d); }
     void mrsNzcv(Reg t) { put(0xD53B4200u | t); }
     void msrNzcv(Reg t) { put(0xD51B4200u | t); }
     // orr with x-register to build 64-bit values

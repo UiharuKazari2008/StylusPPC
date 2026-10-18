@@ -76,6 +76,11 @@ object GuestStates {
         // "Resize screen for dock": the tall 480-wide screen (the phone's 852, or 854) gives up
         // the bottom strip and Windows Mobile boots at 480×800, which is where the dock sits.
         if (settings.dockResizeScreen && w == 480 && h > 800) h = 800
+        // An installed image built for exactly this size boots instead: 6.5.3 Pro's FWVGA image at
+        // 480×800 leaves the Start button stuck pressed, its WVGA image does not.
+        val exact = profile.variants.firstOrNull { it.width == w && it.height == h && it.id != variant.id }
+        val exactFile = exact?.let { ImageStore.find(ctx, profile, it) }
+        if (exact != null && exactFile != null) return Target(profile, exact, exactFile, w, h, mem)
         return Target(profile, variant, file, w, h, mem)
     }
 

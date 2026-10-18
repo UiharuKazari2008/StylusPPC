@@ -14,7 +14,7 @@ const uint8_t BOF = 0xC0, EOF_ = 0xC1, CE = 0x7D;
 const uint64_t kSecond = 1000000000ull;
 const size_t kMaxQueuedBytes = 256 * 1024;  // SIR bytes for the guest; beyond that, frames are dropped
 const size_t kMaxOutbox = 512;              // guest frames waiting for a slow transport
-const size_t kFeedLevel = 32;               // keep at most this many bytes in the UART's receive queue
+const size_t kFeedLevel = 2048;             // one max I-frame of SIR bytes; the driver's buffer is 4 KB
 
 // IrLAP control field values (P/F bit 0x10 masked off).
 const uint8_t U_XID_CMD = 0x2F, U_XID_RSP = 0xAF, U_SNRM = 0x83, U_UA = 0x63, U_DISC = 0x43, U_DM = 0x0F,

@@ -10,7 +10,7 @@ using Microsoft.Win32;
 static class Patch
 {
     // Bump when Apply() changes; images patched with an older version are patched again.
-    public const int Version = 7;
+    public const int Version = 10;  // v10: modem images expose the GPS as COM4 (UART1); COM1 is the radio
 
     // Patches below this version changed driver settings and need a restart to take effect.
     // (v4: states booted before the PCMCIA network card existed need their drivers reloaded.)
@@ -73,12 +73,7 @@ static class Patch
             if (string.Compare(self, SystemExe, true) != 0) File.Copy(self, SystemExe, true);
             Helper.Shortcut(@"\Windows\StartUp\PocketStylus.lnk", "\"" + SystemExe + "\" serve");
             Helper.Shortcut(@"\Windows\Start Menu\Programs\PocketStylus.lnk", "\"" + SystemExe + "\"");
-            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"ControlPanel\PocketStylus"))
-            {
-                k.SetValue("Group", 2);
-                k.SetValue("Redirect", SystemExe);
-                k.SetValue("Icon", SystemExe + ",0");
-            }
+            Helper.SettingsEntry(SystemExe);
         });
         Step("radio", ModemRadio);
         Step("fakeril", delegate
@@ -104,24 +99,81 @@ static class Patch
         Step("ethman", NoWiredUi);
         Step("gps", delegate
         {
-            // The GPS Intermediate Driver reads the phone's GPS from COM1 and shares it
-            // (GPS API, and raw NMEA on COM4: for older programs).
-            // On rilgsm images COM1 is the radio (ModemRadio), so the GPS is not set up there.
-            if (ModemRil) return;
+            // The GPS Intermediate Driver shares the phone's GPS (GPS API, and raw NMEA on COM4
+            // for older programs). 6.5 reads it from COM1. On rilgsm images COM1 is the radio, so
+            // COM4 itself is the receiver: UART1, which those programs open directly.
             const string Gps = @"System\CurrentControlSet\GPS Intermediate Driver";
+            const string Port = @"COM4:";
             using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps)) k.SetValue("IsEnabled", 1);
-            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps + @"\Drivers")) k.SetValue("CurrentDriver", "WMDroid");
-            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps + @"\Drivers\PocketStylus"))
+            // CurrentDriver names the subkey. An earlier build wrote the settings under PocketStylus
+            // while pointing CurrentDriver at WMDroid, so GPSID never opened its source.
+            using (RegistryKey drivers = Registry.LocalMachine.CreateSubKey(Gps + @"\Drivers"))
             {
-                k.SetValue("InterfaceType", "COMM");
-                k.SetValue("CommPort", "COM1:");
-                k.SetValue("FriendlyName", "Phone GPS (PocketStylus)");
+                if (!"WMDroid".Equals(drivers.GetValue("CurrentDriver") as string))
+                {
+                    drivers.SetValue("CurrentDriver", "WMDroid");
+                    needRestart = true;
+                }
+                try { drivers.DeleteSubKey("PocketStylus", false); } catch (Exception) { }
             }
-            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps + @"\Multiplexer")) k.SetValue("DriverInterface", "COM4:");
+            if (ModemRil)
+            {
+                // serial_smdk2410.dll class 1 has no modem lines (class 0 is COM1's DTR/DSR).
+                // MemBase selects UART1; class 1 is already COM2's IR port on UART2.
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"Drivers\BuiltIn\Gps"))
+                {
+                    if (!Port.Equals(k.GetValue("Port") as string) || !(k.GetValue("MemBase") is int) || (int)k.GetValue("MemBase") != 0x50004000)
+                        needRestart = true;
+                    k.SetValue("Dll", "serial_smdk2410.dll");
+                    k.SetValue("Prefix", "COM");
+                    k.SetValue("Index", 4);
+                    k.SetValue("Port", Port);
+                    k.SetValue("MemBase", 0x50004000);
+                    k.SetValue("MemLen", 0x2C);
+                    k.SetValue("Irq", 23);                 // UART1
+                    k.SetValue("InterruptBitsShift", 3);   // SUBSRCPND bits 3-5
+                    k.SetValue("ISTTimeouts", 0x200);
+                    k.SetValue("DeviceArrayIndex", 1);
+                    k.SetValue("FriendlyName", "Phone GPS (PocketStylus)");
+                }
+            }
+            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps + @"\Drivers\WMDroid"))
+            {
+                string com = ModemRil ? Port : "COM1:";
+                if (!com.Equals(k.GetValue("CommPort") as string) || !"COMM".Equals(k.GetValue("InterfaceType") as string))
+                    needRestart = true;
+                k.SetValue("InterfaceType", "COMM");
+                k.SetValue("CommPort", com);
+                k.SetValue("FriendlyName", "Phone GPS (PocketStylus)");
+                if (ModemRil)
+                {
+                    try { k.DeleteValue("File"); } catch (Exception) { }
+                    try { k.DeleteValue("File1"); } catch (Exception) { }
+                    try { k.DeleteValue("ReadInterval"); } catch (Exception) { }
+                }
+            }
+            // 6.5: GPSID reads COM1 and republishes raw NMEA on a virtual COM4.
+            // 6.1: COM4 is the UART, so the virtual port must not take that name.
+            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps + @"\Multiplexer"))
+            {
+                if (ModemRil)
+                {
+                    if (k.GetValue("DriverInterface") != null) { k.DeleteValue("DriverInterface"); needRestart = true; }
+                }
+                else k.SetValue("DriverInterface", Port);
+            }
             using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Gps + @"\Multiplexer\ActiveDevice"))
             {
-                k.SetValue("Prefix", "COM");
-                k.SetValue("Index", 4);
+                if (ModemRil)
+                {
+                    try { k.DeleteValue("Prefix"); } catch (Exception) { }
+                    try { k.DeleteValue("Index"); } catch (Exception) { }
+                }
+                else
+                {
+                    k.SetValue("Prefix", "COM");
+                    k.SetValue("Index", 4);
+                }
             }
         });
     }
@@ -265,7 +317,7 @@ static class Patch
     static void InstallApps()
     {
         string dir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().GetName().CodeBase);
-        string[][] apps = { new string[] { "GpsTest.exe", "GPS Test" } };
+        string[][] apps = { new string[] { "GpsTest.exe", "GPS Test" }, new string[] { "InfraLobby.exe", "InfraLobby" } };
         foreach (string[] a in apps)
         {
             string src = Path.Combine(@"\Storage Card\2577", a[0]);

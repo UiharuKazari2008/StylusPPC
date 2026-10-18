@@ -68,16 +68,20 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private val phone by lazy { PhoneStatus(this) }
     private val gps by lazy { GpsBridge(this) { handle } }
     private val camera by lazy { CameraBridge(this, settings) { handle } }  // camera bridge
+    private val motion by lazy { MotionBridge(this, { handle }) { using -> onMotionUse(using) } }  // G-sensor for HTC apps
     // Infrared beams over Bluetooth LE / InfraWAN (InfraredBridge.kt, docs/research-irda.md)
     private val irda by lazy { InfraredBridge(this, { handle }) { if (::guest.isInitialized) guest else null } }
     private var askedLocation = false
     private var lastStatus = ""
     private var statusTicks = 0
     private var askedPhone = false
+    private var loadSmsAfterPermit = false
     private var askedNumber = false
     private var myNumber = ""  // PhoneNumber.own, read on resume and after permission answers
     private var guestReady = false
     private var wallpaperChecked = false
+    /** Display rect and guest size the wallpaper slice was last cut for. */
+    private var wallpaperCut = ""
     private var bootCompleteAt = 0L
 
     // Power and background state (see leave()).
@@ -100,6 +104,17 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private var lockSent = false
     /** Running in the background under BackgroundService. */
     private var serviceOn = false
+    /** Last "audio" kind from the helper, and the player's window title (AudioClass). */
+    private var audioKind = ""
+    private var trackTitle = ""
+    private var trackArtist = ""
+    private var trackAlbum = ""
+    private var trackPos = -1L
+    private var trackDur = 0L
+    private var trackState = ""
+    /** Left the screen while media was actually sounding, so the background timer waits. */
+    private var heldForMusic = false
+    private var nowPlaying: NowPlaying? = null
     private var askedNotify = false
     private var pendingLeave: Runnable? = null
     /** Elapsed-realtime deadline of the "after X minutes" setting, 0 if none. */
@@ -107,6 +122,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Side keys follow media. Ringtone takes over only while Windows Mobile is actually ringing.
+        volumeControlStream = android.media.AudioManager.STREAM_MUSIC
         // One emulator at a time: a second instance (e.g. started from another task while this one
         // runs as the phone's home screen) hands its intent to the running one and goes.
         val other = running?.get()
@@ -121,6 +138,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         running = java.lang.ref.WeakReference(this)
         settings = Settings(this)
         settings.migrate()
+        CardDrop.start(this)  // PC drop window can put a CAB on the storage card
         guest = GuestBridge(this, settings, this)
         secureProxy = SecureProxy(this, guest) { handle }
         bluetooth = BluetoothBridge(this, settings, guest, ui).apply { start() }
@@ -129,14 +147,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         sms = SmsBridge(this, guest) { handle }.apply { wake = { wakeForEvent(120_000) }; start() }
         calls.onModemSms = { mr, pdu -> sms.onModemSend(mr, pdu) }
         calls.wake = { wakeForEvent(it) }
-        // Incoming calls while in the background: WM's screen over other apps, the full view on answer.
+        // Incoming calls while in the background open this activity. Ignored or unanswered: back to the previous app.
         calls.overlay = CallOverlay(this)
         calls.guestFrame = { Triple(guestW, guestH, foldGuest) }
         calls.reattach = { if (handle != 0L && surface.holder.surface.isValid) NativeBridge.setSurface(handle, surface.holder.surface) }
+        calls.visible = { foreground }
         calls.bringFront = {
             startActivity(Intent(this, EmulatorActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         }
+        calls.onRingDismissed = { dismissIncoming() }
         // A call kept the session running after we left; once it ends, the usual leave policy applies.
         calls.onIdle = { if (!foreground && !isFinishing && !suspended && !hibernated) leave() }
         showForCall(intent)
@@ -167,8 +187,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             shineBrightness = settings.shineBrightness
             shineWidth = settings.shineWidth
             keyOpacity = settings.keyOpacity / 100f
+            keyOutline = settings.keyOutline / 100f
+            keyGlyph = settings.keyGlyph / 100f
+            keyTheme = settings.keyTheme
             keyColor = keyColorOf(settings.keyColor)
             hingeOn = settings.hingeOn
+            foldMax = settings.foldMax
+            dockHideUnfolded = settings.dockHideUnfolded
             hingeStyle = settings.hingeStyle
             hingeThickness = settings.hingeThickness
             hingeLocation = settings.hingeLocation
@@ -179,7 +204,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             wallpaperOn = settings.showWallpaper
             backdropOpacity = settings.backdropOpacity / 100f
             carrier = settings.skinCarrier
-            onLock = { if (handle != 0L) guest.send("lock") }
+            onLock = {
+                if (calls.inCall()) calls.pickOutput()
+                else if (settings.lockClosesApp) moveTaskToBack(true)
+                else if (handle != 0L) guest.send("lock")
+            }
             onLockLong = { showPowerMenu() }
             // Full width and one line: new text each second then needs no layout pass.
             addView(stats, FrameLayout.LayoutParams(-1, -2, Gravity.TOP or Gravity.START))
@@ -207,6 +236,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         powerMenu.onOpenChanged = { menuBack.isEnabled = it }
         onBackPressedDispatcher.addCallback(this, menuBack)
         BackgroundService.onSuspend = notificationSuspend
+        nowPlaying = NowPlaying(this, mediaCommandRef)
+        BackgroundService.onMedia = mediaCommandRef
         val screenFilter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -215,9 +246,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         else registerReceiver(screenReceiver, screenFilter)
         if (settings.showWallpaper) loadWallpaper()
         loadKeyFrost()
-        rotation = GuestRotation(this, { settings.rotationDelayMs }, { settings.rotationSensitivity }) { boost(); guest.send("rotate $it") }
+        rotation = GuestRotation(this, { settings.rotationDelayMs }, { settings.rotationSensitivity }) { boost(); sendRotate(it) }
         surface.setOnTouchListener { v, e -> onGuestTouch(v, e) }
         boot()
+        // The surface can be created during setContentView, before the machine exists.
+        if (handle != 0L && surface.holder.surface.isValid) NativeBridge.setSurface(handle, surface.holder.surface)
     }
 
     /**
@@ -284,12 +317,14 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             if (settings.restoresSession) add(File(dir, RESUME))
             add(File(dir, BOOT))
         }
+        var restored = false
         for (snap in candidates) {
             if (!snap.exists()) continue
             if (NativeBridge.loadState(handle, snap.path)) {
                 Log.i(TAG, "restored ${snap.name}")
                 booting = !NativeBridge.bootComplete(handle)
                 alignRotationPending = true
+                restored = true
                 break
             }
             snap.delete()
@@ -314,10 +349,34 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         settings.lastStateDir = dir.name
         bootedScreenRes = settings.screenRes
         bootedMemMB = settings.memMB
+        // An install keeps this session and soft-resets it, the same as the power menu's Reset.
+        // The saved snapshots stay: deleting them is what made the next start boot the empty image.
+        if (restored && noteAppUpdate(dir)) {
+            Log.i(TAG, "app updated: soft-resetting Windows Mobile")
+            NativeBridge.softReset(handle)
+            resumeSaved = false
+            booting = true
+            guestReady = false
+            alignRotationPending = true
+            guest.setRunning(false)
+        }
         title = profile.title
         // Keep the phone awake while Windows Mobile boots; released once it reaches the home screen.
         if (booting) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         skin.setGuestSize(w, h)
+    }
+
+    /**
+     * True the first time this state folder is started after the app was installed or updated.
+     * The stamp is written either way, so a later open of the same install does not reset again.
+     */
+    private fun noteAppUpdate(dir: File): Boolean {
+        @Suppress("DEPRECATION")
+        val installed = packageManager.getPackageInfo(packageName, 0).lastUpdateTime
+        val stamp = File(dir, "host-update")
+        val seen = if (stamp.isFile) stamp.readText().trim().toLongOrNull() else null
+        stamp.writeText(installed.toString())
+        return seen != installed
     }
 
     private fun onGuestTouch(v: View, e: MotionEvent): Boolean {
@@ -374,7 +433,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     private fun micGranted() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
-    /** Runs the phone's GPS only while Windows Mobile has its GPS port open. */
+    /** Runs the phone's GPS only while Windows Mobile has its GPS port open (COM1, or COM4 on 6.1). */
     private fun updateGps() {
         val wanted = settings.gpsOn && handle != 0L && NativeBridge.serialOpen(handle)
         if (wanted && !gps.hasPermission()) {
@@ -422,7 +481,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             // Stops while the guest is stopped (suspended, paused, hibernated); startGuest restarts it.
             if (h == 0L || suspended || userPaused || hibernated) return
             val s = NativeBridge.ledState(h)
+            val units = (s shr 8) and 0xFF
+            skin.ledOnMs = if (units == 0) 0 else units * 50
             skin.alertLight = s and (NativeBridge.LED_LIGHT or NativeBridge.LED_BLINK)
+            skin.pulseLed()
             if (s and NativeBridge.LED_VIBRATE != 0) runCatching {
                 vibrator?.vibrate(android.os.VibrationEffect.createOneShot(250, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
             }
@@ -525,19 +587,46 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private var foldGuest = false
     /** After a restore or wake, force the phone's current orientation once the guest is up. */
     private var alignRotationPending = false
+    /** Already asked a landscape guest to turn back to portrait for this stretch. */
+    private var portraitFixSent = false
+    /** Degrees counter-clockwise last sent to Windows Mobile (GuestRotation: 90 = left side up). */
+    private var guestAngle = 0
+    private fun sendRotate(deg: Int) {
+        guestAngle = ((deg % 360) + 360) % 360
+        guest.send("rotate $guestAngle")
+    }
+
+    /**
+     * The D-pad is fixed to the phone. Windows Mobile's display turns with the phone, so an arrow
+     * is sent as the direction it points on that turned screen. 90° (left side up): the key that
+     * points at the sky is Up. The open-fold layout turns the whole window with the picture.
+     */
+    private fun turnDpad(vk: Int): Int {
+        if (foldGuest || guestAngle == 0) return vk
+        val clockwise = intArrayOf(0x25, Keymap.VK_UP, 0x27, Keymap.VK_DOWN)  // left, up, right, down
+        val i = clockwise.indexOf(vk)
+        if (i < 0) return vk
+        val steps = when (guestAngle) { 90 -> 1; 180 -> 2; 270 -> 3; else -> 0 }
+        return clockwise[(i + steps) % 4]
+    }
 
     /** Windows Mobile Standard (Smartphone, OsProfile.touch false): keypad only, no rotation or slider. */
     private val keypad get() = settings.profile?.touch == false
     private val autoRotate get() = settings.rotateGuest && !keypad
 
+    /** A guest app started or stopped reading the G-sensor: WM's automatic rotation stays off meanwhile. */
+    private fun onMotionUse(using: Boolean) {
+        if (using) rotation.stop() else if (autoRotate && foreground && !foldGuest) rotation.start()
+    }
+
     /** The guest's saved orientation is often not how the phone is held. Apply the current one, portrait included. */
     private fun alignRotation() {
         if (handle == 0L || keypad) return
         if (foldGuest) {
-            guest.send("rotate 90")
+            sendRotate(90)
             return
         }
-        if (autoRotate) rotation.poke() else guest.send("rotate 0")
+        if (autoRotate) rotation.poke() else sendRotate(0)
     }
 
     private var lastLayoutInfo: androidx.window.layout.WindowLayoutInfo? = null
@@ -555,9 +644,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 boost()
                 if (handle != 0L) NativeBridge.setRotation(handle, 0)
                 camera.panelRotation = 0  // the camera picture follows the panel, not WM's rotation
-                guest.send("rotate 0")
+                motion.panelRotation = 0
+                sendRotate(0)
                 if (settings.showWallpaper) loadWallpaper()  // each screen can have its own wallpaper
-                if (autoRotate && foreground) rotation.start()
+                if (autoRotate && foreground && !motion.inUse) rotation.start()
                 wallpaperChecked = false
             }
             return
@@ -570,6 +660,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             rotation.stop()
             if (handle != 0L) NativeBridge.setRotation(handle, 1)
             camera.panelRotation = 90  // setRotation(1): the panel is drawn a quarter turn clockwise
+            motion.panelRotation = 90
             // Folding rewrote the landscape picture with the cover's (for turning WM on the cover):
             // put the open screen's picture back first, so WM turns straight onto it.
             runCatching {
@@ -577,7 +668,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 if (open.exists()) for (name in listOf("wall_landscape_90.jpg", "wall_landscape.jpg"))
                     open.copyTo(guest.boxFile(name), overwrite = true)
             }
-            guest.send("rotate 90")
+            sendRotate(90)
             if (settings.showWallpaper) loadWallpaper()
             wallpaperChecked = false
         }
@@ -614,7 +705,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
      * Mobile's display is off: press its power button so it wakes with the phone.
      */
     private fun wakeGuestDisplay() {
-        if (handle == 0L || booting || userPaused) return
+        if (handle == 0L || booting || userPaused || suppressWake) return
         if (NativeBridge.guestAsleep(handle)) {
             // In standby nothing in Windows Mobile runs (the helper's commands wait): the power
             // button is the one thing that wakes it.
@@ -636,7 +727,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 val size = NativeBridge.screenSize(handle)
                 if (size[0] > 1 && (size[0] != guestW || size[1] != guestH)) {
                     guestW = size[0]; guestH = size[1]; skin.setGuestSize(guestW, guestH)
+                    wallpaperChecked = false  // the slice was cut for the previous size
                 }
+                // Portrait phone, Windows Mobile still landscape (a restored turn): the portrait slice cannot line up.
+                val landscapeGuest = size[0] > size[1] && size[1] > 1 && skin.height > skin.width
+                if (!foldGuest && !autoRotate && landscapeGuest) {
+                    if (!portraitFixSent) { portraitFixSent = true; sendRotate(0) }
+                } else portraitFixSent = false
                 stats.text = if (settings.showStats) NativeBridge.status(handle) else ""
                 updateMic()
                 updateGps()
@@ -649,13 +746,19 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 // (right after folding or unfolding it is still the other shape for a moment).
                 val settled = if (foldGuest) skin.foldCrease != null && skin.width > skin.height
                 else skin.foldCrease == null && skin.height > skin.width
-                if (!wallpaperChecked && settled && !skin.displayRect().isEmpty) {
+                val rect = skin.displayRect()
+                fun q(n: Int) = n / 4  // ignore a pixel or two of layout noise
+                val cut = "${if (foldGuest) 1 else 0}:$guestW:$guestH:${q(rect.left)}:${q(rect.top)}:${q(rect.width())}:${q(rect.height())}"
+                if (cut != wallpaperCut) wallpaperChecked = false  // the display moved (dock, 480×800, fold)
+                if (!wallpaperChecked && settled && !rect.isEmpty) {
                     wallpaperChecked = true
+                    wallpaperCut = cut
                     writeDeviceWallpaper()
                 }
                 calls.pollModem()  // calls dialled through the virtual modem (WM 6 / 6.1 / 6.1.4)
                 pim.tick()  // contacts and calendar sync when due
                 guest.syncTimeZone()
+                syncPlayback()
                 // Mirror the phone's radio/Wi-Fi state into the guest every few seconds (on change).
                 if (statusTicks++ % 3 == 0) {
                     val snap = phone.read()
@@ -667,12 +770,14 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 }
                 if (booting && NativeBridge.bootComplete(handle)) {
                     booting = false
+                    guest.setRunning(shouldRun())  // the helper can read now; commands were held until this
                     bootCompleteAt = System.nanoTime()
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     if (alignRotationPending) {
                         alignRotationPending = false
                         alignRotation()
                     }
+                    scheduleHourlySave()
                 }
                 // The saved boot state is the patched system: wait for the helper to report it,
                 // or give up waiting on releases the helper cannot run on.
@@ -694,6 +799,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         val h = handle
         if (h == 0L) return
         saveThread?.join()
+        guest.setRunning(false)  // the helper is paused with the guest; commands wait in memory
         NativeBridge.pause(h)
         saveThread = thread(name = "snapshot") {
             val ok = NativeBridge.saveState(h, file.path)
@@ -701,6 +807,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             ui.post {
                 if (resumeAfter && handle == h && shouldRun()) {
                     NativeBridge.start(h)
+                    if (!booting) guest.setRunning(true)
                     resumeSaved = false
                 }
                 then?.invoke(ok)
@@ -711,7 +818,15 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_MIC) updateMic()
-        if (requestCode == REQ_PHONE) { phone.stop(); phone.start(); lastStatus = "" }
+        if (requestCode == REQ_LOCATION) updateGps()
+        if (requestCode == REQ_PHONE) {
+            phone.stop(); phone.start(); lastStatus = ""
+            if (loadSmsAfterPermit && checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED) {
+                val note = SmsBridge.loadHistory(this)
+                if (note != "permission") Toast.makeText(this, note, Toast.LENGTH_SHORT).show()
+            }
+            loadSmsAfterPermit = false
+        }
         myNumber = PhoneNumber.own(this)
         calls.onPermissionsResult(requestCode)  // CALL_PHONE asked for during a WM dial
     }
@@ -724,7 +839,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         suspended = false
         cancelLeave()
         cancelBackgroundTimer()
-        releaseService()
+        heldForMusic = false
+        ui.removeCallbacks(musicWatch)
+        // A player already open keeps its now-playing notice; the next tick starts one if media comes back.
+        if (audioKind != "media") releaseService()
         saveThread?.join()
         if (hibernated) wake()
         if (handle != 0L) NativeBridge.setCpuLimit(handle, 100)
@@ -734,9 +852,28 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onResume() {
         super.onResume()
+        if (returnUntil != 0L) {
+            val due = returnUntil
+            if (SystemClock.uptimeMillis() < due) {
+                goBackFromCall()
+                if (returnUntil == 0L) return
+            }
+            returnUntil = 0
+        }
         ownUi = false  // a Bluetooth share shown over this window (no onStop) is over
+        // A stopped guest's last heartbeat is old. Count it as alive now, or the next tick pulls the
+        // storage card and the screen we just opened freezes (black under a half-drawn window).
+        if (::guest.isInitialized) guest.markAlive()
+        if (handle != 0L && surface.holder.surface.isValid) NativeBridge.setSurface(handle, surface.holder.surface)
         startGuest()
-        wakeGuestDisplay()
+        flushWidgetRequest()
+        if (suppressWake && !leftForSleep) {
+            // Suspend just closed us; a tick before onStop must not press power and wake Windows Mobile.
+        } else {
+            suppressWake = false
+            leftForSleep = false
+            wakeGuestDisplay()
+        }
         status.start()
         calls.resume()  // call link, call-state resync, fast mailbox polling during calls
         pim.resume()  // contacts / calendar change watch
@@ -744,6 +881,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         clipboard.resume()  // clipboard sync while on screen
         ime.resume()  // the helper watches WM's SIP while on screen
         camera.start()  // the phone camera opens only while the guest uses its camera
+        motion.start()  // the accelerometer runs only while a guest app reads SEN0:
         irda.start()  // infrared transport (only connects when WM uses IR, or "Stay reachable")
         // Phone state, and notifications for running in the background, asked for together.
         val wanted = buildList {
@@ -766,7 +904,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         phone.start()
         myNumber = PhoneNumber.own(this)
         lastStatus = ""
-        if (autoRotate && !foldGuest) rotation.start()
+        if (autoRotate && !foldGuest && !motion.inUse) rotation.start()
         if (alignRotationPending && handle != 0L && !booting) {
             alignRotationPending = false
             alignRotation()
@@ -781,6 +919,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             android.app.WallpaperManager.getInstance(this).addOnColorsChangedListener(wallpaperListener as android.app.WallpaperManager.OnColorsChangedListener, ui)
         }
         ui.post(tick)
+        scheduleHourlySave()
         if (pendingHome) {
             pendingHome = false
             goHome()
@@ -817,6 +956,29 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             Toast.makeText(this, "Syncing contacts and calendar", Toast.LENGTH_SHORT).show()
             return
         }
+        if (command == GuestSettings.CMD_CALL_ROLE) { requestCallRole(); return }
+        if (command == GuestSettings.CMD_IR_TEST) {
+            thread(name = "infrawan-test") {
+                val r = InfraWanTransport.probe(InfraredSettings(this))
+                ui.post { if (!isFinishing) Toast.makeText(this, r, Toast.LENGTH_LONG).show() }
+            }
+            return
+        }
+        if (command == GuestSettings.CMD_IR_BLE) {
+            val missing = InfraredSettings.blePermissions().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            if (missing.isEmpty()) Toast.makeText(this, "Nearby devices already allowed", Toast.LENGTH_SHORT).show()
+            else requestPermissions(missing.toTypedArray(), REQ_FEATURES)
+            return
+        }
+        if (command == GuestSettings.CMD_SMS_LOAD) {
+            val note = SmsBridge.loadHistory(this)
+            if (note == "permission") {
+                loadSmsAfterPermit = true
+                val missing = SmsBridge.permissions().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_PHONE)
+            } else Toast.makeText(this, note, Toast.LENGTH_SHORT).show()
+            return
+        }
         val i = GuestSettings.screenFor(this, command) ?: return
         ownUi = true  // suspends without locking while the screen is open
         @Suppress("DEPRECATION")
@@ -833,6 +995,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         rotation.stop()
         gps.setActive(false)
         camera.stop()
+        motion.stop()
         skin.stopTilt()
         skin.releaseAll()
         status.stop()
@@ -853,6 +1016,23 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         // The guest keeps running while merely paused (e.g. under a permission dialog); leaving
         // the screen is handled in onStop.
         super.onPause()
+    }
+
+    /**
+     * The incoming call that opened this activity over another app went unanswered or was rejected.
+     * If this screen is already up, leave at once; if it is still coming up, leave as it appears.
+     */
+    private fun dismissIncoming() {
+        returnUntil = SystemClock.uptimeMillis() + 8_000
+        if (!isFinishing && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) goBackFromCall()
+    }
+
+    private var returnUntil = 0L
+
+    /** Back to the app that was open before the call, or the home screen when that was in front. */
+    private fun goBackFromCall() {
+        if (callShown) { callShown = false; showWhenLocked(false) }
+        if (moveTaskToBack(true)) returnUntil = 0
     }
 
     /** Opened by the full-screen incoming-call notification: over the lock screen, screen on. */
@@ -879,12 +1059,14 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         foreground = false
         calls.leave()  // the call stays with this session; leave() keeps it running
         irda.stop()  // off screen: other devices see this one leave its IR room
+        if (suppressWake) leftForSleep = true
         leave()
         super.onStop()
     }
 
     override fun onDestroy() {
         if (duplicate) { super.onDestroy(); return }  // never set anything up (see onCreate)
+        CardDrop.stop()
         if (running?.get() === this) running = null
         launcher.stop()
         cancelLeave()
@@ -896,6 +1078,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         sms.stop()
         unregisterReceiver(screenReceiver)
         if (BackgroundService.onSuspend === notificationSuspend) BackgroundService.onSuspend = null
+        if (BackgroundService.onMedia === mediaCommandRef) BackgroundService.onMedia = null
+        nowPlaying?.release()
+        nowPlaying = null
+        ui.removeCallbacks(musicWatch)
+        ui.removeCallbacks(hourlySave)
         saveThread?.join()
         if (handle != 0L) {
             // Ended while still running in the background (e.g. swiped away): save it first.
@@ -936,6 +1123,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             saveThread?.join()
             NativeBridge.start(h)
             guest.markAlive()
+            if (!booting) guest.setRunning(true)
             suspended = false
             eventResumed = true
             Log.i(TAG, "woken from suspend for an incoming event")
@@ -961,10 +1149,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             if (SystemClock.uptimeMillis() < eventUntil) { ui.postDelayed(this, 500); return }
             eventLock?.let { runCatching { it.release() } }
             if (handle == 0L) return
-            if (calls.inCall()) {
+            if (calls.inCall() || musicPlaying()) {
                 eventResumed = false
-                if (!serviceOn) serviceOn = BackgroundService.start(this@EmulatorActivity)
-                if (serviceOn) NativeBridge.setCpuLimit(handle, 100)
+                if (musicPlaying()) keepForMusic()
+                else {
+                    if (!serviceOn) serviceOn = BackgroundService.start(this@EmulatorActivity)
+                    if (serviceOn) NativeBridge.setCpuLimit(handle, 100)
+                }
                 return
             }
             if (eventResumed) { eventResumed = false; suspendSession() }
@@ -974,12 +1165,28 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     private fun startGuest() {
         saveThread?.join()
-        if (!shouldRun()) return
+        if (!shouldRun()) { if (::guest.isInitialized) guest.setRunning(false); return }
         NativeBridge.start(handle)
+        if (!booting) guest.setRunning(true)  // still booting: held until the home screen is up
         guest.markAlive()  // the helper was stopped with the guest (or unheard in the background)
+        flushWidgetRequest()
         startLedPoll()
         resumeSaved = false
     }
+
+    /** A Today widget chosen in settings: install that package once Windows Mobile is running. */
+    private fun flushWidgetRequest() {
+        if (!::guest.isInitialized || handle == 0L) return
+        val which = settings.widgetRequest
+        if (which.isEmpty()) return
+        settings.widgetRequest = ""
+        for (w in which.split(' ')) if (w.isNotEmpty()) guest.send("widget $w")
+    }
+
+    /** Suspend from the power menu: don't wake the display until the app has been opened again. */
+    private var suppressWake = false
+    /** onStop ran after that Suspend, so the next onResume is the user coming back. */
+    private var leftForSleep = false
 
     /**
      * The app left the screen. An ongoing call keeps the session running so Windows Mobile still
@@ -989,6 +1196,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
      */
     private fun leave() {
         if (handle == 0L) return
+        if (suppressWake) {
+            // The power button is still being handled. Pausing now would drop it and the display
+            // would come back on; leave once standby has had a moment.
+            suppressWake = false
+            ui.postDelayed({ if (!foreground && handle != 0L) leave() }, 1200)
+            return
+        }
         if (isFinishing || isChangingConfigurations) {
             // Closing: the lock waits in the mailbox and acts when the saved session resumes.
             if (isFinishing && settings.lockOnLeave && !userPaused && settings.restoresSession && !booting) sendLock()
@@ -1001,7 +1215,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             return
         }
         val screenOff = getSystemService(PowerManager::class.java)?.isInteractive == false
-        if (!userPaused && (settings.lockOnLeave || (screenOff && settings.lockOnScreenOff))) sendLock()
+        val playing = musicPlaying()
+        // A lock can pause the player, so it waits until the music stops.
+        if (!userPaused && !playing && (settings.lockOnLeave || (screenOff && settings.lockOnScreenOff))) sendLock()
+        if (playing && keepForMusic()) return
         val mode = settings.backgroundMode
         if (!userPaused && settings.runsInBackground && runInBackground(screenOff)) return
         val hibernate = mode == Settings.BG_HIBERNATE || (mode == Settings.BG_HIBERNATE_AFTER && !userPaused)
@@ -1016,6 +1233,90 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         cancelBackgroundTimer()
         NativeBridge.setCpuLimit(handle, 100)
         return true
+    }
+
+    /** Media is actually coming out of the speaker (a player process sitting idle does not count). */
+    private fun musicPlaying(): Boolean {
+        val h = handle
+        return audioKind == "media" && h != 0L && NativeBridge.playedWithin(h, 8_000)
+    }
+
+    /**
+     * A song is playing: stay at full speed under the foreground service and do not suspend or
+     * hibernate until it stops. The usual background setting applies then (finishBackgroundHold).
+     */
+    private fun keepForMusic(): Boolean {
+        if (!musicPlaying() || handle == 0L || isFinishing) return false
+        if (!serviceOn) serviceOn = BackgroundService.start(this)
+        if (!serviceOn) return false
+        cancelBackgroundTimer()
+        NativeBridge.setCpuLimit(handle, 100)
+        heldForMusic = true
+        ui.removeCallbacks(musicWatch)
+        ui.postDelayed(musicWatch, 1000)
+        syncPlayback()
+        return true
+    }
+
+    /** While off screen with music: read the helper (title, player still open) and let go when it stops. */
+    private val musicWatch = object : Runnable {
+        override fun run() {
+            if (foreground || handle == 0L || suspended) return
+            guest.poll()
+            syncPlayback()
+            if (musicPlaying() || calls.inCall()) {
+                cancelBackgroundTimer()
+                NativeBridge.setCpuLimit(handle, 100)
+                heldForMusic = true
+                ui.postDelayed(this, 1000)
+                return
+            }
+            if (heldForMusic) {
+                finishBackgroundHold()  // re-posts this watch when the session keeps running
+                return
+            }
+            ui.postDelayed(this, 1000)
+        }
+    }
+
+    /** Music stopped after it had been holding the session. The background setting applies from now. */
+    private fun finishBackgroundHold() {
+        heldForMusic = false
+        ui.removeCallbacks(musicWatch)
+        if (foreground || handle == 0L || suspended || isFinishing) return
+        val screenOff = getSystemService(PowerManager::class.java)?.isInteractive == false
+        if (!userPaused && (settings.lockOnLeave || (screenOff && settings.lockOnScreenOff))) sendLock()
+        if (settings.runsInBackground && runInBackground(screenOff)) return
+        val hibernate = settings.backgroundMode == Settings.BG_HIBERNATE ||
+            (settings.backgroundMode == Settings.BG_HIBERNATE_AFTER && !userPaused)
+        afterLock { if (hibernate) hibernate() else suspendSession() }
+    }
+
+    /** Headset and notification controls are off (WmpHook did not drive the player). */
+    private val mediaCommandRef: (String) -> Unit = { }
+
+    /** Android's media session, and the notification, follow the guest player. */
+    private fun syncPlayback() {
+        val session = nowPlaying ?: return
+        // A player that is only open (or paused, or stopped) is not now-playing.
+        val playing = when {
+            audioKind != "media" || handle == 0L || suspended -> false
+            trackState == "playing" -> true
+            trackState == "paused" || trackState == "stopped" -> false
+            else -> musicPlaying()
+        }
+        val title = trackTitle.ifBlank { "Windows Mobile" }
+        session.update(playing, playing, title, trackArtist, trackAlbum, if (trackState.isEmpty()) -1L else trackPos, trackDur)
+        // The system now-playing list follows the media notification, so it has to stay up while the
+        // emulator is on screen too. Suspend is only offered once the app has left the screen.
+        if (playing) {
+            if (!serviceOn) serviceOn = BackgroundService.start(this)
+            if (serviceOn) BackgroundService.setPlayback(
+                BackgroundService.Playback(title, playing, session.token, trackArtist, suspendable = !foreground))
+        } else if (serviceOn) {
+            BackgroundService.setPlayback(null)
+            if (foreground && !calls.inCall()) releaseService()
+        }
     }
 
     private fun sendLock() {
@@ -1042,12 +1343,36 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (!serviceOn) serviceOn = BackgroundService.start(this)
         if (!serviceOn) return false
         NativeBridge.setCpuLimit(handle, backgroundCpu(screenOff))
+        ui.removeCallbacks(musicWatch)
+        ui.postDelayed(musicWatch, 1000)
         if (settings.backgroundMode != Settings.BG_RUN) {
             val ms = settings.backgroundMinutes * 60_000L
             bgDeadline = SystemClock.elapsedRealtime() + ms
             ui.postDelayed(backgroundTimeout, ms)
-        }
+        } else scheduleHourlySave()
         return true
+    }
+
+    /** Unrestricted: write resume.wms once an hour without stopping the session. */
+    private var hourlyArmed = false
+    private val hourlySave = Runnable {
+        hourlyArmed = false
+        val dir = snapshotDir
+        val ready = settings.backgroundMode == Settings.BG_RUN && handle != 0L && !booting && !suspended &&
+            !isFinishing && dir != null && saveThread?.isAlive != true
+        if (ready) saveSnapshot(File(dir, RESUME), resumeAfter = true)
+        scheduleHourlySave()
+    }
+
+    private fun scheduleHourlySave() {
+        if (settings.backgroundMode != Settings.BG_RUN || isFinishing) {
+            hourlyArmed = false
+            ui.removeCallbacks(hourlySave)
+            return
+        }
+        if (hourlyArmed) return
+        hourlyArmed = true
+        ui.postDelayed(hourlySave, 60L * 60L * 1000L)
     }
 
     /**
@@ -1062,6 +1387,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private val backgroundTimeout = Runnable {
         bgDeadline = 0L
         if (!foreground && !calls.inCall()) {
+            if (musicPlaying()) { keepForMusic(); return@Runnable }
             if (settings.backgroundMode == Settings.BG_HIBERNATE_AFTER) hibernate() else suspendSession()
         }
     }
@@ -1084,8 +1410,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
             val off = intent.action == Intent.ACTION_SCREEN_OFF
-            if (off && settings.lockOnScreenOff && shouldRun()) sendLock()
-            if (serviceOn && handle != 0L && !calls.inCall()) NativeBridge.setCpuLimit(handle, backgroundCpu(off))
+            if (off && settings.lockOnScreenOff && shouldRun() && !musicPlaying()) sendLock()
+            if (serviceOn && handle != 0L && !calls.inCall() && !musicPlaying())
+                NativeBridge.setCpuLimit(handle, backgroundCpu(off))
             if (!off && bgDeadline != 0L && SystemClock.elapsedRealtime() >= bgDeadline) {
                 ui.removeCallbacks(backgroundTimeout)
                 backgroundTimeout.run()
@@ -1099,8 +1426,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
      */
     private fun suspendSession() {
         cancelBackgroundTimer()
+        ui.removeCallbacks(musicWatch)
+        heldForMusic = false
+        nowPlaying?.update(false, false, trackTitle)
+        BackgroundService.setPlayback(null)
         if (handle == 0L) { releaseService(); return }
         suspended = true
+        guest.setRunning(false)
         alignRotationPending = true
         calls.handOff()
         if (settings.restoresSession && !booting && !resumeSaved) saveResume { releaseService() }
@@ -1113,10 +1445,15 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** Hibernate: save to resume.wms and release the native session and its memory. */
     private fun hibernate() {
         cancelBackgroundTimer()
+        ui.removeCallbacks(musicWatch)
+        heldForMusic = false
+        nowPlaying?.update(false, false, trackTitle)
+        BackgroundService.setPlayback(null)
         val h = handle
         if (h == 0L) { releaseService(); return }
         if (booting) { suspendSession(); return }  // a half-booted system is not worth keeping
         suspended = true
+        guest.setRunning(false)
         alignRotationPending = true
         calls.handOff()
         val release = {
@@ -1163,9 +1500,17 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     private fun showPowerMenu() {
         powerMenu.show(listOfNotNull(
-            if (!calls.inCall()) null
-            else PowerMenu.Item("Call audio", CallAudio.savedName(this)) { calls.pickOutput() },
-            PowerMenu.Item("Savepoint", "Save the session now; PocketStylus resumes from here next time") {
+            if (!foldGuest) null
+            else PowerMenu.Item(
+                if (settings.foldMax) "Restore" else "Maximize",
+                if (settings.foldMax) "Back to the fold layout" else "Larger screen for reading. Hides the hinge.",
+                icon = "max",
+            ) {
+                settings.foldMax = !settings.foldMax
+                skin.foldMax = settings.foldMax
+                wallpaperChecked = false
+            },
+            PowerMenu.Item("Savepoint", "Save the session now; PocketStylus resumes from here next time", icon = "save") {
                 if (handle == 0L || booting) return@Item
                 // Written as the resume point: the next start (or a hibernate) continues from here.
                 saveSnapshot(File(snapshotDir, RESUME), resumeAfter = true) { ok ->
@@ -1174,26 +1519,29 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             },
             // WM 5's standby loses a kernel page on power-off and never wakes: no Suspend there.
             if (settings.profileId == "wm5ppcphone" || settings.profileId == "wm5sp") null
-            else PowerMenu.Item("Suspend", "Windows Mobile's power button (again to wake)") {
+            else PowerMenu.Item("Suspend", "Sleep Windows Mobile and leave PocketStylus", icon = "suspend") {
                 if (userPaused) setUserPaused(false)
+                suppressWake = true
                 if (handle != 0L) NativeBridge.powerButton(handle)
+                moveTaskToBack(true)
             },
-            if (userPaused) PowerMenu.Item("Resume") { setUserPaused(false) }
-            else PowerMenu.Item("Pause", "Stop the emulation until resumed") { setUserPaused(true) },
-            PowerMenu.Item("Reset…", "Restart Windows Mobile (soft reset)",
+            if (userPaused) PowerMenu.Item("Resume", icon = "resume") { setUserPaused(false) }
+            else PowerMenu.Item("Pause", "Stop the emulation until resumed", icon = "pause") { setUserPaused(true) },
+            PowerMenu.Item("Reset", "Restart Windows Mobile (soft reset)", icon = "reset",
                 confirm = Triple("Reset Windows Mobile?", "Unsaved work in open programs is lost.", "Reset")) {
                 if (userPaused) setUserPaused(false)
                 if (handle != 0L) NativeBridge.softReset(handle)
                 resumeSaved = false
             },
-            PowerMenu.Item("Cold boot…", "Start Windows Mobile from scratch, like a new device", warn = true,
+            PowerMenu.Item("Cold boot", "Start Windows Mobile from scratch, like a new device", icon = "cold", warn = true,
                 confirm = Triple("Cold boot Windows Mobile?", "Everything stored inside Windows Mobile is erased and it " +
                     "boots like a new device (files on the storage card stay).", "Cold boot")) { coldBoot() },
-            PowerMenu.Item("Power off…", "End the session without saving it", warn = true,
+            PowerMenu.Item("Power off", "End the session without saving it", icon = "off", warn = true,
                 confirm = Triple("Power off?", "The session is not saved; next time Windows Mobile starts " +
                     "from its freshly booted state.", "Power off")) { powerOff() },
-            null,
-            PowerMenu.Item("Settings") { openSettings() },
+            PowerMenu.Item("Settings", icon = "settings") { openSettings() },
+            if (!calls.inCall()) null
+            else PowerMenu.Item("Call audio", CallAudio.savedName(this), icon = "audio") { calls.pickOutput() },
         ))
     }
 
@@ -1202,7 +1550,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         userPaused = paused
         pausedCover.visibility = if (paused) View.VISIBLE else View.GONE
         if (!paused) startGuest()
-        else if (handle != 0L && saveThread?.isAlive != true) NativeBridge.pause(handle)  // a save in progress keeps it paused
+        else {
+            guest.setRunning(false)
+            if (handle != 0L && saveThread?.isAlive != true) NativeBridge.pause(handle)  // a save in progress keeps it paused
+        }
     }
 
     /** Ends the session without saving it: the next start comes from the booted state (boot.wms). */
@@ -1220,10 +1571,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private fun checkHelper() {
         val h = handle
         if (h == 0L || booting || userPaused || !NativeBridge.bootComplete(h) || NativeBridge.guestHung(h)) return
+        if (sms.isFiling()) return  // pulling the card while texts are being filed locks Windows Mobile
         if (NativeBridge.guestAsleep(h)) { if (foreground) wakeGuestDisplay(); return }  // standby, not a dead helper
         val now = android.os.SystemClock.uptimeMillis()
         if (helperKicks > 0 && guest.lastHeard > helperKickAt) { helperKicks = 0; helperAsked = false }  // it came back
-        if (guest.pendingCommands() == 0 || now - guest.lastHeard < 70_000 || now - helperKickAt < 60_000) return
+        // The helper's pulse is every 5 s of Windows Mobile time. A slowed guest (background speed)
+        // stretches that on the phone's clock, so the wait stretches by the same amount.
+        val screenOff = getSystemService(PowerManager::class.java)?.isInteractive == false
+        val share = if (foreground || calls.inCall() || musicPlaying()) 100 else backgroundCpu(screenOff)
+        val budget = (70_000L * 100 / share.coerceAtLeast(10)).coerceAtMost(8 * 60_000L)
+        if (guest.pendingCommands() == 0 || now - guest.lastHeard < budget || now - helperKickAt < 60_000) return
         helperKickAt = now
         // (The helper restarts itself after 45 s stuck, so this is for a helper that is gone.)
         // Second time in a row: the card trick didn't bring it back; a Windows Mobile restart will
@@ -1266,6 +1623,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** Cold boot: no saved state at all; Windows Mobile boots from its ROM like a new device. */
     private fun coldBoot() {
         camera.stop()
+        motion.stop()
         cancelLeave()
         cancelBackgroundTimer()
         saveThread?.join()
@@ -1300,6 +1658,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** Ends the crashed session without saving it and starts again from boot.wms. */
     private fun restartFromBoot() {
         camera.stop()
+        motion.stop()
         cancelLeave()
         cancelBackgroundTimer()
         saveThread?.join()
@@ -1316,6 +1675,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     private fun powerOff() {
         camera.stop()  // no camera frame may reach the session being destroyed
+        motion.stop()
         cancelLeave()
         cancelBackgroundTimer()
         releaseService()
@@ -1374,15 +1734,19 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         skin.shineBrightness = settings.shineBrightness
         skin.shineWidth = settings.shineWidth
         skin.keyOpacity = settings.keyOpacity / 100f
+        skin.keyOutline = settings.keyOutline / 100f
+        skin.keyGlyph = settings.keyGlyph / 100f
+        skin.keyTheme = settings.keyTheme
         skin.keyColor = keyColorOf(settings.keyColor)
         loadKeyFrost()
         skin.hingeOn = settings.hingeOn
+        skin.foldMax = settings.foldMax
         skin.hingeStyle = settings.hingeStyle
         skin.hingeThickness = settings.hingeThickness
         skin.hingeLocation = settings.hingeLocation
         skin.hingeOpacity = settings.hingeOpacity
         skin.setBacklight(settings.backlightOn, settings.backlightIntensity, settings.backlightTimeout, settings.backlightColor, settings.backlightDirt)
-        if (autoRotate && foreground && !foldGuest) rotation.start() else rotation.stop()
+        if (autoRotate && foreground && !foldGuest && !motion.inUse) rotation.start() else rotation.stop()
         if (handle != 0L) {
             NativeBridge.setFilter(handle, settings.screenFilter)
             NativeBridge.setAudioGain(handle, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
@@ -1409,11 +1773,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             NativeBridge.setEscargot(handle, settings.escargot)
         }
         ime.apply()  // Use Android IME over Device IME
+        scheduleHourlySave()  // unrestricted writes a resume point every hour
         launcher.apply()  // Android Apps folder, hidden apps, dock
         applyDockLook()
         askFeaturePermissions()  // Phone / Contacts / Infrared turned on from Windows Mobile's settings app
         // The dock shrinks the display: the guest's wallpaper piece is cut again for its new place.
-        val dockKey = "${settings.dockPos}/${settings.dockSize}"
+        val dockKey = "${settings.dockPos}/${settings.dockSize}/${settings.dockHideUnfolded}/${settings.foldMax}"
         if (dockKey != lastDockLayout) { lastDockLayout = dockKey; wallpaperChecked = false }
     }
 
@@ -1421,7 +1786,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     /** The dock's look (Dock page); its blurred wallpaper is built once per wallpaper and blur. */
     private fun applyDockLook() {
-        skin.fillDisplay = settings.dockResizeScreen  // 480×800 still fills the screen's edge-to-edge place
+        skin.fillDisplay = settings.dockResizeScreen  // 480×800 stays its own shape, pinned to the top; the strip below is the dock
+        skin.dockHideUnfolded = settings.dockHideUnfolded
         skin.dockIconDp = settings.dockIcon
         skin.dockPadDp = settings.dockPad
         skin.dockOpacity = settings.dockOpacity / 100f
@@ -1446,9 +1812,34 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             if (InfraredSettings(this@EmulatorActivity).mode == "ble") addAll(InfraredSettings.blePermissions())
         }
         val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }.toSet()
-        if (missing.isEmpty() || missing == askedFeatures) return
-        askedFeatures = missing
-        requestPermissions(missing.toTypedArray(), REQ_FEATURES)
+        if (missing.isNotEmpty() && missing != askedFeatures) {
+            askedFeatures = missing
+            requestPermissions(missing.toTypedArray(), REQ_FEATURES)
+        }
+    }
+
+    /** Phone tab: make PocketStylus the default phone app so Windows Mobile's call screen is the only one. */
+    private fun requestCallRole() {
+        if (CallBridge.holdsRole(this)) {
+            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+            return
+        }
+        val request = CallBridge.roleRequest(this)
+        if (request == null) {
+            Toast.makeText(this, "This phone does not let other apps be the phone app", Toast.LENGTH_LONG).show()
+            return
+        }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle("Make PocketStylus the phone app?")
+            .setMessage("Android asks next. PocketStylus passes every call it does not show to your usual phone " +
+                "app, and you can switch back any time in Settings > Apps > Default apps > Phone app.")
+            .setPositiveButton("Continue") { _, _ ->
+                ownUi = true
+                @Suppress("DEPRECATION")
+                startActivityForResult(request, REQ_ROLE)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private var dockFrostKey = ""
@@ -1465,13 +1856,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         thread(name = "dock-frost") {
             val bmp = runCatching {
                 val d = phoneWallpaper() ?: return@runCatching null
-                val k = 4f + blur
-                val sw = (d.intrinsicWidth / k).toInt().coerceAtLeast(8)
-                val sh = (d.intrinsicHeight / k).toInt().coerceAtLeast(8)
+                val sw = (d.intrinsicWidth / 6).toInt().coerceIn(32, 320)
+                val sh = (d.intrinsicHeight / 6).toInt().coerceIn(32, 320)
                 val small = android.graphics.Bitmap.createBitmap(sw, sh, android.graphics.Bitmap.Config.ARGB_8888)
                 d.setBounds(0, 0, sw, sh)
                 d.draw(android.graphics.Canvas(small))
-                boxBlur(small, 2, 3)
+                boxBlur(small, (blur / 2).coerceAtLeast(1), 2)
                 small
             }.getOrNull()
             ui.post { if (!isFinishing) skin.dockFrost = bmp }
@@ -1495,7 +1885,6 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     override fun onGuestPatched() {
         Log.i(TAG, "guest patched; waiting for it to restart")
         guestReady = false
-        File(snapshotDir, BOOT).delete()
         booting = true
         bootCompleteAt = 0L
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1503,10 +1892,39 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onGuestReady() { guestReady = true }
 
-    /** Ring tones and alerts play on Android's ringer / notification volume, media on media volume. */
+    /** Ring tones use Android's ringtone output, notifications its notification output, media the media output. */
     override fun onGuestAudio(kind: String) {
         if (handle == 0L) return
-        NativeBridge.setAudioUsage(handle, calls.audioUsage(kind))  // ring: media while the phone's ringer is muted for WM's
+        audioKind = kind
+        if (kind != "media") {
+            trackState = ""
+            trackArtist = ""
+            trackAlbum = ""
+            trackPos = -1L
+            trackDur = 0L
+        }
+        val usage = calls.audioUsage(kind)  // ring: media while the phone's ringer is muted for WM's
+        NativeBridge.setAudioUsage(handle, usage)
+        volumeControlStream = if (usage == 6) android.media.AudioManager.STREAM_RING
+            else android.media.AudioManager.STREAM_MUSIC
+        syncPlayback()
+        if (!foreground && musicPlaying()) keepForMusic()
+    }
+
+    override fun onGuestTrack(title: String) {
+        if (trackState.isNotEmpty()) return  // the plug-in is reporting the real title
+        trackTitle = title
+        syncPlayback()
+    }
+
+    override fun onGuestMeta(state: String, posMs: Long, durMs: Long, title: String, artist: String, album: String) {
+        trackState = state
+        trackPos = posMs
+        trackDur = durMs
+        if (title.isNotEmpty()) trackTitle = title
+        trackArtist = artist
+        trackAlbum = album
+        syncPlayback()
     }
 
     /** Send via Bluetooth from Windows Mobile: the phone's Bluetooth picker, without locking the guest. */
@@ -1515,6 +1933,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     override fun onGuestPim(line: String) = pim.onGuest(line)
 
     override fun onGuestIrda(line: String) = irda.onGuest(line)  // the infrared question page's answer
+
+    override fun onGuestLobby(stop: Boolean) = irda.onLobby(stop)  // InfraLobby: who is in the room
+
+    override fun onGuestLobbyToday(stop: Boolean) = irda.onLobbyToday(stop)  // Today item: how many are connected
 
     override fun onGuestSms(line: String) = sms.onGuest(line)
 
@@ -1555,7 +1977,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         helperKicks = 0
         helperAsked = false
         lastStatus = ""
-        if (foldGuest) guest.send("rotate 90")
+        if (foldGuest) sendRotate(90)
         else if (foreground && !booting) alignRotation()
         else alignRotationPending = true
         lastBacklight = -1
@@ -1635,6 +2057,30 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         guest.send("backlight $pct")
     }
 
+    /**
+     * Taskbar and menu bar on Windows Mobile 6.1 and earlier, in pixels. Both are 26 at 96 dpi
+     * and 52 at 192. Null on 6.5 and later, whose picture is full-bleed behind the bars.
+     * Only those older profiles are listed: a 6.5 release must not pick this up by default.
+     */
+    private fun classicBar(w: Int, h: Int): Int? {
+        val id = settings.profileId ?: return null
+        if (!id.startsWith("wm614") && !id.startsWith("wm5")) return null
+        val dpi = settings.guestDpi.let { if (it >= 96) it else if (maxOf(w, h) >= 640) 192 else 96 }
+        return Math.round(26f * dpi / 96f)
+    }
+
+    /**
+     * 6.1 draws the picture under the solid taskbar and stops it above the solid menu bar, so row 0
+     * of the file is the wallpaper row that belongs just below the taskbar. Shift the slice up by
+     * that bar; the menu bar covers the same number of rows at the bottom.
+     */
+    private fun offsetForBars(src: android.graphics.Bitmap, bar: Int): android.graphics.Bitmap {
+        if (bar <= 0) return src
+        val out = android.graphics.Bitmap.createBitmap(src.width, src.height, android.graphics.Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(out).drawBitmap(src, 0f, -bar.toFloat(), null)
+        return out
+    }
+
     /** Writes the home-screen pictures for the helper: portrait, and landscape for each turn. */
     private fun writeWallpaperJpegs(portrait: android.graphics.Bitmap) {
         fun save(name: String, b: android.graphics.Bitmap) {
@@ -1646,13 +2092,18 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         }
         fun turned(deg: Float) = android.graphics.Bitmap.createBitmap(portrait, 0, 0, portrait.width, portrait.height,
             android.graphics.Matrix().apply { postRotate(deg) }, true)
-        save("wall_portrait.jpg", portrait)
+        // 6.1 draws this between the solid taskbar and menu bar, same as landscape. Shift the original,
+        // then turn that original for the landscape files so each shift stays on that picture's vertical.
+        val portraitBar = classicBar(portrait.width, portrait.height)
+        save("wall_portrait.jpg", if (portraitBar == null) portrait else offsetForBars(portrait, portraitBar))
         // Turned so the picture stays put on the panel while Windows Mobile draws sideways:
         // left side up (guest 90) needs it a quarter turn clockwise, right side up the other way.
-        val cw = turned(90f)
+        val bar = classicBar(portrait.height, portrait.width)
+        fun land(b: android.graphics.Bitmap) = if (bar == null) b else offsetForBars(b, bar)
+        val cw = land(turned(90f))
         save("wall_landscape_90.jpg", cw)
         save("wall_landscape.jpg", cw)
-        save("wall_landscape_270.jpg", turned(-90f))
+        save("wall_landscape_270.jpg", land(turned(-90f)))
     }
 
     /**
@@ -1693,11 +2144,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             d.draw(c)
             if (fold) {
                 // Shown by Windows Mobile turned to 90 degrees: exactly what sits under the display.
+                // 6.1's landscape picture starts under the taskbar, so the slice is shifted to match.
+                val land = classicBar(out.width, out.height)?.let { offsetForBars(out, it) } ?: out
                 for (name in listOf("wall_landscape_90.jpg", "wall_landscape.jpg", OPEN_WALL)) {
                     val jf = guest.boxFile(name)
                     jf.parentFile?.mkdirs()
                     val tmp = File(jf.path + ".tmp")
-                    tmp.outputStream().use { out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, it) }
+                    tmp.outputStream().use { land.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, it) }
                     tmp.renameTo(jf)
                 }
                 portraitJpegsStale = true
@@ -1708,11 +2161,19 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             val f = guest.deviceWallpaper
             val same = f.exists() && f.length() == bytes.size.toLong() && f.readBytes().contentEquals(bytes)
             val stale = portraitJpegsStale
-            if (gw < gh && (!same || stale || !guest.boxFile("wall_portrait.jpg").exists())) {
+            // 6.1's landscape files differ from the portrait slice even when that slice is unchanged.
+            // wall_bar.txt is the shift last written. A picture shifted for 6.1 must be rewritten
+            // unshifted when this session is 6.5, even if the phone's wallpaper itself did not change.
+            val bar = if (gw < gh) classicBar(gh, gw) ?: 0 else 0
+            val barFile = guest.boxFile("wall_bar.txt")
+            val barChanged = barFile.takeIf { it.exists() }?.readText()?.trim() != bar.toString()
+            if (gw < gh && (!same || stale || barChanged || !guest.boxFile("wall_portrait.jpg").exists())) {
                 writeWallpaperJpegs(out)
                 portraitJpegsStale = false
+                barFile.parentFile?.mkdirs()
+                barFile.writeText(bar.toString())
             }
-            if (!same || stale || !wallpaperSent) ui.post {
+            if (!same || stale || barChanged || !wallpaperSent) ui.post {
                 if (handle != 0L && settings.syncWallpaper) { wallpaperSent = true; guest.send("wallpaper") }
             }
             if (same) return@thread
@@ -1773,33 +2234,35 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         thread(name = "key-frost") {
             val bmp = runCatching {
                 val d = phoneWallpaper() ?: return@runCatching null
-                val k = 4f + blur
-                val sw = (d.intrinsicWidth / k).toInt().coerceAtLeast(8)
-                val sh = (d.intrinsicHeight / k).toInt().coerceAtLeast(8)
+                // Keep enough pixels that the blur is soft, then blur by the slider (1..25).
+                val sw = (d.intrinsicWidth / 6).toInt().coerceIn(32, 320)
+                val sh = (d.intrinsicHeight / 6).toInt().coerceIn(32, 320)
                 val small = android.graphics.Bitmap.createBitmap(sw, sh, android.graphics.Bitmap.Config.ARGB_8888)
                 d.setBounds(0, 0, sw, sh)
                 d.draw(android.graphics.Canvas(small))
-                boxBlur(small, 2, 3)
+                boxBlur(small, (blur / 2).coerceAtLeast(1), 2)
                 small
             }.getOrNull()
             ui.post { if (!isFinishing) skin.keyFrost = bmp }
         }
     }
 
+    /** The system's wallpaper, through a window that is actually see-through (no baked copy, no black). */
+    private fun showLiveWallpaper() {
+        skin.wallpaper = null
+        window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
+        if (Build.VERSION.SDK_INT >= 31) window.setBackgroundBlurRadius(0)
+        skin.invalidate()
+    }
+
     private fun loadWallpaper() {
         val blur = settings.wallpaperBlur
-        // Unblurred: the system's own wallpaper behind a see-through window, the very picture the
-        // home screen shows on this screen, placed exactly as there. Blurred: a copy blurred by the
-        // skin (One UI's blur-behind also dims what it blurs, so it is not used).
-        if (blur == 0) {
-            skin.wallpaper = null
-            // A see-through window: without the translucent format the compositor treats it as
-            // opaque and draws black where the wallpaper should be (blur 0 looked solid).
-            window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
-            window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
-            if (Build.VERSION.SDK_INT >= 31) window.setBackgroundBlurRadius(0)
-            skin.invalidate()
+        // Unblurred, or skin opacity 0: the system's own wallpaper behind a see-through window.
+        // Blurred: a copy blurred by the skin (One UI's blur-behind also dims what it blurs).
+        if (blur == 0 || settings.backdropOpacity == 0) {
+            showLiveWallpaper()
             return
         }
         if (Build.VERSION.SDK_INT >= 31) window.setBackgroundBlurRadius(0)
@@ -1822,12 +2285,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 if (isFinishing) return@post
                 if (bmp != null) {
                     skin.wallpaper = bmp
-                } else {
-                    window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
-                    window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-                    window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
-                    if (Build.VERSION.SDK_INT >= 31 && blur > 0) window.setBackgroundBlurRadius(blur * 6)
-                }
+                } else showLiveWallpaper()
             }
         }
     }
@@ -1865,10 +2323,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         // Buttons 1-4 go out as the stock key for their Device Settings choice (Keymap.HwButtons),
         // so they need no guest helper; the release goes to the key the press went to.
         val n = Keymap.HwButtons.button(vk)
-        if (n == 0) { NativeBridge.key(handle, vk, down); return }
+        if (n == 0) { NativeBridge.key(handle, turnDpad(vk), down); return }
         val key = if (down) Keymap.HwButtons.key(n, settings.hwButton(n), settings.hwButtonMap).also { heldButtons[n] = it }
             else if (heldButtons.containsKey(n)) heldButtons.remove(n) else return
-        if (key != null) NativeBridge.key(handle, key, down)
+        if (key != null) NativeBridge.key(handle, turnDpad(key), down)
     }
 
     /** The key each held button was sent as (null: "None"). */

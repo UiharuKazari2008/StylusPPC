@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
@@ -52,6 +53,8 @@ using Microsoft.Win32;
 //                 call ring <number|->             the phone rings: ring WM ("-": number withheld)
 //                 call answer                      rilgsm images: answer the call ringing through the
 //                                                  virtual modem (it was answered on the phone)
+//                 call catchup                     call-catch.txt: missed calls and new voice mail the
+//                                                  emulator did not see, filed without ringing
 //                 call info                        (diagnostics) answered by a "call info ..." line
 static class Calls
 {
@@ -567,7 +570,7 @@ static class Calls
     public static string Command(string args)
     {
         string[] p = args.Split(' ');
-        if (p.Length >= 3 && p[0] == "state" || p.Length >= 2 && p[0] == "ring" || p[0] == "info" || p[0] == "answer")
+        if (p.Length >= 3 && p[0] == "state" || p.Length >= 2 && p[0] == "ring" || p[0] == "info" || p[0] == "answer" || p[0] == "catchup")
         {
             lock (commands) commands.Add(p);
             return "ok";
@@ -580,9 +583,176 @@ static class Calls
         if (p[0] == "state") return State(p);
         if (p[0] == "ring") return Ring(p[1]);
         if (p[0] == "answer") return AnswerModemCall();
+        if (p[0] == "catchup") return CatchUp();
         Queue("call info " + Info());
         return "ok";
     }
+
+    // Missed calls and new voice mail the phone took while Windows Mobile was not in the call.
+    // The home-screen counts are the SNAPI values (HKCU); one notice lists them. Nothing rings.
+    static string CatchUp()
+    {
+        string path = Path.Combine(Helper.Box, "call-catch.txt");
+        if (!File.Exists(path)) return "nothing";
+        var missed = new List<string>();
+        var vmsgs = new List<string>();
+        int vmail = -1;
+        bool vmailNotify = false;
+        string vmailNumber = "";
+        try
+        {
+            string kind = "";
+            string number = "", name = "", text = "";
+            using (StreamReader r = new StreamReader(path, Encoding.UTF8))
+            {
+                string line;
+                while ((line = r.ReadLine()) != null)
+                {
+                    if (line.StartsWith("#"))
+                    {
+                        Take(kind, number, name, text, missed, vmsgs, ref vmail, ref vmailNotify, ref vmailNumber);
+                        kind = line.Substring(1); number = ""; name = ""; text = "";
+                        continue;
+                    }
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string v = line.Substring(eq + 1);
+                    switch (line.Substring(0, eq))
+                    {
+                        case "number": number = v; break;
+                        case "name": name = v; break;
+                        case "text": text = v; break;
+                        case "count": try { vmail = int.Parse(v); } catch { } break;
+                        case "notify": vmailNotify = v == "1"; break;
+                    }
+                }
+            }
+            Take(kind, number, name, text, missed, vmsgs, ref vmail, ref vmailNotify, ref vmailNumber);
+        }
+        catch (Exception e) { Helper.Log("calls: catchup " + e.Message); return "failed"; }
+        try { File.Delete(path); } catch { }
+        if (missed.Count > 0)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"System\State\Phone"))
+                {
+                    object o = k.GetValue("Missed Call Count");
+                    int cur = o is int ? (int)o : 0;
+                    k.SetValue("Missed Call Count", cur + missed.Count);
+                }
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"System\State\Phone"))
+                {
+                    object o = k.GetValue("Status");
+                    int cur = o is int ? (int)o : 0;
+                    if ((cur & 0x800) == 0) k.SetValue("Status", cur | 0x800);  // PhoneMissedCall
+                }
+            }
+            catch (Exception e) { Helper.Log("calls: missed count " + e.Message); }
+            Notice(MissedClass, 1, "Missed calls", missed.Count == 1 ? "Missed call" : missed.Count + " missed calls", missed);
+        }
+        if (vmail >= 0)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"System\State\Messages\vmail"))
+                    k.SetValue("TotalUnread", vmail);
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"System\State\Messages\Total\vmail"))
+                    k.SetValue("Unread", vmail);
+            }
+            catch (Exception e) { Helper.Log("calls: voicemail count " + e.Message); }
+            if (vmailNotify || vmsgs.Count > 0)
+            {
+                string title = vmail == 1 ? "New voice mail" : vmail + " new voice messages";
+                if (vmail <= 0) title = "New voice mail";
+                if (vmailNumber.Length > 0 && vmsgs.Count == 0) vmsgs.Add(vmailNumber);
+                Notice(VmailClass, 1, "Voice mail", title, vmsgs);
+            }
+        }
+        Helper.Log("calls: caught up " + missed.Count + " missed, voicemail " + vmail);
+        return "ok";
+    }
+
+    static void Take(string kind, string number, string name, string text, List<string> missed, List<string> vmsgs,
+        ref int vmail, ref bool vmailNotify, ref string vmailNumber)
+    {
+        string who = name.Length > 0 ? name : number;
+        if (kind == "missed" && who.Length > 0) missed.Add(who);
+        else if (kind == "vmsg" && who.Length > 0) vmsgs.Add(text.Length > 0 ? who + ": " + text : who);
+        else if (kind == "vmail") vmailNumber = number;
+    }
+
+    static readonly Guid MissedClass = new Guid("A4C8E21B-7D30-4F6A-9B15-2E8D0C5A7F11");
+    static readonly Guid VmailClass = new Guid("B5D9F32C-8E41-4A7B-AC26-3F9E1D6B8022");
+
+    // One bubble. It hides itself; the counts stay in the registry the home screen reads.
+    static void Notice(Guid cls, int id, string title, string heading, List<string> lines)
+    {
+        var html = new StringBuilder("<html><body><b>");
+        html.Append(Html(heading)).Append("</b><br>");
+        int from = lines.Count > 8 ? lines.Count - 8 : 0;
+        for (int i = from; i < lines.Count; i++) html.Append(Html(lines[i])).Append("<br>");
+        html.Append("</body></html>");
+        IntPtr t = Str(title), body = Str(html.ToString());
+        try
+        {
+            var n = new SHNOTIFICATIONDATA();
+            n.cbStruct = Marshal.SizeOf(typeof(SHNOTIFICATIONDATA));
+            n.dwID = id;
+            n.npPriority = 0x1B1;  // SHNP_INFORM
+            n.csDuration = 20;
+            n.hicon = PhoneIcon();
+            n.clsid = cls;
+            n.pszHTML = body;
+            n.pszTitle = t;
+            SHNotificationRemove(ref cls, id);
+            int hr = SHNotificationAdd(ref n);
+            if (hr != 0) Helper.Log("calls: notice 0x" + hr.ToString("x8"));
+        }
+        finally { Marshal.FreeHGlobal(t); Marshal.FreeHGlobal(body); }
+    }
+
+    static IntPtr phoneIcon;
+    static IntPtr PhoneIcon()
+    {
+        if (phoneIcon != IntPtr.Zero) return phoneIcon;
+        IntPtr small = IntPtr.Zero;
+        try
+        {
+            if (ExtractIconEx(@"\Windows\cprog.exe", 0, IntPtr.Zero, out small, 1) > 0 && small != IntPtr.Zero)
+                return phoneIcon = small;
+        }
+        catch { }
+        return IntPtr.Zero;
+    }
+
+    static string Html(string s) { return s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;"); }
+
+    // A NUL-terminated UTF-16 copy. Same as Bluetooth.Str (guest/Helper/Bluetooth.cs).
+    static IntPtr Str(string s)
+    {
+        char[] c = (s + "\0").ToCharArray();
+        IntPtr p = Marshal.AllocHGlobal(c.Length * 2);
+        Marshal.Copy(c, 0, p, c.Length);
+        return p;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SHNOTIFICATIONDATA
+    {
+        public int cbStruct, dwID, npPriority, csDuration;
+        public IntPtr hicon;
+        public int grfFlags;
+        public Guid clsid;
+        public IntPtr hwndSink, pszHTML, pszTitle, lParam;
+        public IntPtr sk0Title; public int sk0Cmd, sk0Flags;
+        public IntPtr sk1Title; public int sk1Cmd, sk1Flags;
+        public IntPtr pszTodaySK, pszTodayExec;
+    }
+
+    [DllImport("aygshell.dll")] static extern int SHNotificationAdd(ref SHNOTIFICATIONDATA n);
+    [DllImport("aygshell.dll")] static extern int SHNotificationRemove(ref Guid clsid, int id);
+    [DllImport("coredll.dll", EntryPoint = "ExtractIconExW")] static extern int ExtractIconEx(string file, int index, IntPtr large, out IntPtr small, int count);
 
     // rilgsm images: the call ringing through the virtual modem was answered on the phone. cprog keeps
     // the caller's number only when it answers itself (the modem switching the call to active, or

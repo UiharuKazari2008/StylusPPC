@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32;
 using Microsoft.WindowsCE.Forms;
 
 // Clipboard sync and "Use Android IME over Device IME" (the app's ClipboardBridge.kt / ImeBridge.kt).
@@ -246,6 +247,41 @@ static class InputSync
 
     static IntPtr SipWindow() { return FindWindow("SipWndClass", null); }
 
+    /// Drops the blank keyboard this project briefly installed (wmdime.dll). It is not a keyboard anyone picks.
+    public static void RemoveBlank()
+    {
+        byte[] ours = new Guid("{C3A91E40-7B2D-4F58-9A16-5E0D8C4B71A2}").ToByteArray();
+        try
+        {
+            byte[] cur = new byte[16];
+            if (SipGetCurrentIM(cur))
+            {
+                bool match = true;
+                for (int i = 0; i < 16; i++) if (cur[i] != ours[i]) { match = false; break; }
+                if (match)
+                {
+                    byte[] prev = null;
+                    using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\WMDroid\Ime"))
+                        if (k != null) prev = k.GetValue("Prev") as byte[];
+                    if (prev == null || prev.Length != 16)
+                        prev = new Guid("{42429667-ae04-11d0-a4f8-00aa00a749b9}").ToByteArray();
+                    SipSetCurrentIM(prev);
+                }
+            }
+        }
+        catch (Exception e) { Helper.Log("ime " + e.Message); }
+        try { Registry.CurrentUser.DeleteSubKeyTree(@"CLSID\{C3A91E40-7B2D-4F58-9A16-5E0D8C4B71A2}"); } catch { }
+        try { Registry.ClassesRoot.DeleteSubKeyTree(@"CLSID\{C3A91E40-7B2D-4F58-9A16-5E0D8C4B71A2}"); } catch { }
+        try
+        {
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"ControlPanel\Sip\Installed", true))
+                if (k != null) k.DeleteValue("{C3A91E40-7B2D-4F58-9A16-5E0D8C4B71A2}", false);
+        }
+        catch { }
+        try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\WMDroid\Ime"); } catch { }
+        try { if (File.Exists(@"\Windows\wmdime.dll")) File.Delete(@"\Windows\wmdime.dll"); } catch { }
+    }
+
     static bool SipOn()
     {
         var si = new SIPINFO();
@@ -389,6 +425,8 @@ static class InputSync
     struct MSG { public IntPtr hwnd; public int message; public IntPtr wParam, lParam; public int time, x, y; }
 
     [DllImport("coredll.dll")] static extern bool SipGetInfo(ref SIPINFO si);
+    [DllImport("coredll.dll")] static extern bool SipGetCurrentIM(byte[] clsid);
+    [DllImport("coredll.dll")] static extern bool SipSetCurrentIM(byte[] clsid);
     [DllImport("coredll.dll")] static extern bool SipShowIM(int flags);
     [DllImport("coredll.dll")] static extern IntPtr FindWindow(string cls, string title);
     [DllImport("coredll.dll")] static extern bool IsWindowVisible(IntPtr w);

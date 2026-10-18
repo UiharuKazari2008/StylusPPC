@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.telephony.ServiceState
@@ -31,10 +32,14 @@ class PhoneStatus(private val ctx: Context) {
         val wifiConnected: Boolean,
         val wifiSignal: Int,      // 0..4
         val numeric: String = "", // MCC+MNC of the network (the virtual modem's +COPS numeric format)
+        val wifiName: String = "", // SSID, empty when Wi-Fi is not the connection or the name is unavailable
     ) {
-        /** Line sent to the guest helper. */
-        fun encode() = "status svc=${if (service) 1 else 0} sig=$signal roam=${if (roaming) 1 else 0} " +
-            "data=$data wifi=${if (wifiOn) 1 else 0} wificonn=${if (wifiConnected) 1 else 0} wifisig=$wifiSignal num=${numeric.ifEmpty { "-" }} op=$operator"
+        /** Line sent to the guest helper. `ssid` is last: the name may contain spaces. */
+        fun encode(): String {
+            val line = "status svc=${if (service) 1 else 0} sig=$signal roam=${if (roaming) 1 else 0} " +
+                "data=$data wifi=${if (wifiOn) 1 else 0} wificonn=${if (wifiConnected) 1 else 0} wifisig=$wifiSignal num=${numeric.ifEmpty { "-" }} op=$operator"
+            return if (wifiName.isEmpty()) line else "$line ssid=$wifiName"
+        }
     }
 
     private val tm = ctx.getSystemService(TelephonyManager::class.java)
@@ -91,6 +96,7 @@ class PhoneStatus(private val ctx: Context) {
             wifiConnected = onWifi,
             wifiSignal = wifiBars,
             numeric = runCatching { tm.networkOperator }.getOrNull().orEmpty().ifEmpty { runCatching { tm.simOperator }.getOrNull().orEmpty() },
+            wifiName = wifiName(),
         )
     }
 
@@ -129,6 +135,32 @@ class PhoneStatus(private val ctx: Context) {
         val end = text.indexOf('}', at).let { if (it < 0) text.length else it }
         return Regex("""[A-Za-z]*[Ll]evel=(\d+)""").findAll(text.substring(at, end))
             .mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()?.coerceIn(0, 4)
+    }
+
+    /**
+     * The joined network's name. Android quotes it ("My Wifi") and reports "<unknown ssid>" when
+     * location permission is missing, which Windows Mobile should not show in place of "Network Card".
+     */
+    @Suppress("DEPRECATION")
+    private fun wifiName(): String {
+        val raw = runCatching {
+            var fromCaps: String? = null
+            if (Build.VERSION.SDK_INT >= 29) {
+                for (net in cm.allNetworks) {
+                    val caps = cm.getNetworkCapabilities(net) ?: continue
+                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+                    fromCaps = (caps.transportInfo as? WifiInfo)?.ssid
+                    break
+                }
+            }
+            fromCaps?.takeIf { it.isNotBlank() && it != "<unknown ssid>" }
+                ?: wm.connectionInfo?.let { if (it.networkId != -1) it.ssid else null }
+        }.getOrNull() ?: return ""
+        var name = raw.trim()
+        if (name.length >= 2 && name.startsWith("\"") && name.endsWith("\"")) name = name.substring(1, name.length - 1)
+        name = name.replace('\n', ' ').replace('\r', ' ').trim()
+        if (name.isEmpty() || name == "<unknown ssid>" || name == "0x") return ""
+        return if (name.length > 32) name.substring(0, 32) else name
     }
 
     private fun wifiLevel(): Int {

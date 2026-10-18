@@ -28,7 +28,7 @@ void jitInvalidatePage(Jit *jit, uint32_t ppn);
 bool jitCodeWrite(Jit *jit, uint32_t pa, uint32_t size);
 
 // Runs one translated block at the current pc. Returns false when the next instruction has to be
-// executed by the interpreter (Thumb, untranslatable, fetch fault, or block longer than budget).
+// executed by the interpreter (untranslatable, fetch fault, or block longer than budget).
 bool jitRun(Jit *jit, uint64_t budget, uint32_t &reason, uint32_t &executed);
 
 struct JitStats {

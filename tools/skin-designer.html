@@ -57,7 +57,8 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
 .item { position: absolute; cursor: move; z-index: 2; }
 .item.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
 .handle { position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px; border-radius: 4px; background: var(--accent); cursor: nwse-resize; display: none; }
-.item.sel .handle { display: block; }
+.item.primary .handle { display: block; }
+.led { border-radius: 50%; background: radial-gradient(circle at 40% 35%, #e8ffee, #2ee05a 42%, #0c3d1c 78%); box-shadow: 0 0 10px rgba(46,224,90,.7); }
 
 .screen { background: #0c1a33; border: 1px solid rgba(255,255,255,.08); display: flex; flex-direction: column; overflow: hidden; color: #fff; font-size: 11px; }
 .screen .bar { height: 7%; min-height: 10px; background: linear-gradient(#3a2a2a, #1e1514); display: flex; align-items: center; padding: 0 6px; font-weight: 600; }
@@ -78,6 +79,10 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
 .kbd b { flex: 1; border-radius: 4px; border: 1px solid rgba(216,220,226,.5); background: rgba(10,12,16,.35); font-size: 10px; font-weight: 500; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.85); }
 .light .kbd b { color: #303236; background: rgba(255,255,255,.3); border-color: rgba(112,120,128,.6); }
 .lock { border-top-left-radius: 0; border-top-right-radius: 0; }
+.rect { border: 0; box-shadow: none; }
+.dockarea { border: 2px dashed rgba(110,162,255,.9); background: rgba(110,162,255,.14); color: rgba(190,214,255,.95);
+  display: flex; align-items: center; justify-content: center; font-weight: 600; letter-spacing: .04em; box-shadow: none; }
+.logo { background: rgba(255,255,255,.08) center / contain no-repeat; border: 1px dashed rgba(255,255,255,.35); box-shadow: none; }
 
 @media (max-width: 760px) {
   main { grid-template-columns: 1fr; }
@@ -94,11 +99,18 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
     <button data-side="frontDpad">Front + D-pad</button>
     <button data-side="inside">Foldable</button>
     <button data-side="insideIme">Foldable + phone keyboard</button>
+    <button data-side="insideMax" title="Unfolded Maximize: the screen fills the window and the hinge is hidden">Foldable Max</button>
+    <button data-side="insideMaxIme" title="Unfolded Maximize with the phone keyboard">Foldable Max _ Keyboard</button>
     <button data-side="standard" title="Windows Mobile Standard (no touch screen): keypad phone">Standard keypad</button>
   </div>
   <span class="spacer"></span>
   <button id="addKey">+ Key</button>
   <button id="addDpad">+ D-pad</button>
+  <button id="addLed">+ Light</button>
+  <button id="addRect">+ Rectangle</button>
+  <button id="addDock" title="Where the Android app dock sits on this layout">+ Dock</button>
+  <button id="addImage">+ Image</button>
+  <input type="file" id="imageFile" accept="image/*" hidden>
   <button id="dup">Duplicate</button>
   <button id="del" class="danger">Delete</button>
   <select id="copyFrom" title="Copy another layout into this one"><option value="">Copy layout from…</option></select>
@@ -109,7 +121,34 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
   <div id="stageWrap"><div id="phone"><div id="wall"></div><div id="tint"></div></div></div>
   <aside>
     <h2>Selected</h2>
-    <div id="props" class="hint">Tap an element on the phone. Drag to move, drag the blue corner to resize, arrow keys nudge (Shift = 10×).</div>
+    <div id="props" class="hint">Tap an element on the phone. Shift-click to select more. Drag to move, drag the blue corner to resize, arrow keys nudge (Shift = 10×).</div>
+
+    <h2>Align</h2>
+    <p class="hint">Moves the selection on the phone. Align lines items up with each other. Space needs three or more.</p>
+    <div class="row">
+      <button type="button" data-align="left">Left</button>
+      <button type="button" data-align="cx">Center</button>
+      <button type="button" data-align="right">Right</button>
+    </div>
+    <div class="row">
+      <button type="button" data-align="top">Top</button>
+      <button type="button" data-align="cy">Middle</button>
+      <button type="button" data-align="bottom">Bottom</button>
+    </div>
+    <div class="row">
+      <button type="button" data-align="edges-left">Align left</button>
+      <button type="button" data-align="edges-cx">Align centers</button>
+      <button type="button" data-align="edges-right">Align right</button>
+    </div>
+    <div class="row">
+      <button type="button" data-align="edges-top">Align top</button>
+      <button type="button" data-align="edges-cy">Align middles</button>
+      <button type="button" data-align="edges-bottom">Align bottom</button>
+    </div>
+    <div class="row">
+      <button type="button" data-align="dist-x">Space across</button>
+      <button type="button" data-align="dist-y">Space down</button>
+    </div>
 
     <h2>Canvas</h2>
     <label>Width px <input type="number" id="cw"></label>
@@ -132,7 +171,7 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
       <button id="load">Load from box</button>
     </div>
     <textarea id="json" spellcheck="false"></textarea>
-    <p class="hint">Positions are fractions of the canvas, so the layout scales to any phone. Send the JSON (or skin.json) back and it becomes the skin.</p>
+    <p class="hint">Positions are fractions of the canvas, so the layout scales to any phone. A Dock rectangle is where the Android app dock is drawn. Send the JSON (or skin.json) back and it becomes the skin.</p>
   </aside>
 </main>
 <script>
@@ -159,14 +198,35 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
   function defaults() {
     return JSON.parse(JSON.stringify(DEFAULT_SKIN));
   }
-  const DEFAULT_SKIN = {"version": 1, "name": "WMDroid", "backdrop": "silver", "opacity": 40, "front": {"canvas": {"w": 1080, "h": 2520}, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.07, "y": 0, "w": 0.22, "h": 0.022}, {"id": "screen", "type": "screen", "x": 0, "y": 0.0375, "w": 1, "h": 0.7625}, {"id": "k1", "type": "key", "action": "talk", "x": 0.03, "y": 0.81, "w": 0.22, "h": 0.03}, {"id": "k2", "type": "key", "action": "app1", "x": 0.27, "y": 0.81, "w": 0.22, "h": 0.03}, {"id": "k3", "type": "key", "action": "app2", "x": 0.5, "y": 0.81, "w": 0.22, "h": 0.03}, {"id": "k4", "type": "key", "action": "end", "x": 0.74, "y": 0.81, "w": 0.22, "h": 0.03}]}, "frontDpad": {"canvas": {"w": 1080, "h": 2520}, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.07, "y": 0, "w": 0.22, "h": 0.022}, {"id": "screen", "type": "screen", "x": 0, "y": 0.0375, "w": 1, "h": 0.7625}, {"id": "dpad", "type": "dpad", "x": 0.31, "y": 0.83, "w": 0.4, "h": 0.15}, {"id": "ok", "type": "key", "action": "ok", "x": 0.73, "y": 0.87, "w": 0.22, "h": 0.05}, {"id": "start", "type": "key", "action": "start", "x": 0.07, "y": 0.87, "w": 0.22, "h": 0.05}, {"id": "app1", "type": "key", "action": "app1", "x": 0.07, "y": 0.83, "w": 0.22, "h": 0.03}, {"id": "end", "type": "key", "action": "end", "x": 0.73, "y": 0.93, "w": 0.22, "h": 0.05}, {"id": "talk", "type": "key", "action": "talk", "x": 0.07, "y": 0.93, "w": 0.22, "h": 0.05}, {"id": "app2", "type": "key", "action": "app2", "x": 0.73, "y": 0.83, "w": 0.22, "h": 0.03}]}, "inside": {"canvas": {"w": 2184, "h": 1968}, "crease": 50, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.87, "y": 0, "w": 0.08, "h": 0.03}, {"id": "screen", "type": "screen", "x": 0.04, "y": 0, "w": 0.78, "h": 0.4865253898440624}, {"id": "talk", "type": "key", "action": "talk", "x": 0.925, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "ok", "type": "key", "action": "ok", "x": 0.855, "y": 0.07, "w": 0.06, "h": 0.085}, {"id": "dpad", "type": "dpad", "x": 0.855, "y": 0.165, "w": 0.13, "h": 0.16}, {"id": "end", "type": "key", "action": "end", "x": 0.925, "y": 0.07, "w": 0.055, "h": 0.085}, {"id": "start", "type": "key", "action": "start", "x": 0.855, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "keyboard", "type": "keyboard", "x": 0.03, "y": 0.625, "w": 0.94, "h": 0.33}, {"id": "app1", "type": "key", "action": "app1", "x": 0.855, "y": 0.43, "w": 0.06, "h": 0.055}, {"id": "app2", "type": "key", "action": "app2", "x": 0.925, "y": 0.43, "w": 0.06, "h": 0.055}]}, "insideIme": {"canvas": {"w": 2184, "h": 1968}, "crease": 50, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.87, "y": 0, "w": 0.08, "h": 0.03}, {"id": "screen", "type": "screen", "x": 0.04, "y": 0, "w": 0.78, "h": 0.4865253898440624}, {"id": "talk", "type": "key", "action": "talk", "x": 0.925, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "ok", "type": "key", "action": "ok", "x": 0.855, "y": 0.07, "w": 0.06, "h": 0.085}, {"id": "dpad", "type": "dpad", "x": 0.855, "y": 0.165, "w": 0.13, "h": 0.16}, {"id": "end", "type": "key", "action": "end", "x": 0.925, "y": 0.07, "w": 0.055, "h": 0.085}, {"id": "start", "type": "key", "action": "start", "x": 0.855, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "app1", "type": "key", "action": "app1", "x": 0.855, "y": 0.43, "w": 0.06, "h": 0.055}, {"id": "app2", "type": "key", "action": "app2", "x": 0.925, "y": 0.43, "w": 0.06, "h": 0.055}, {"id": "keyboard", "type": "keyboard", "x": 0.03, "y": 0.505, "w": 0.94, "h": 0.06}]}, "standard": {"canvas": {"w": 1080, "h": 2520}, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.07, "y": 0, "w": 0.22, "h": 0.022}, {"id": "screen", "type": "screen", "x": 0, "y": 0.0375, "w": 1, "h": 0.565}, {"id": "soft1", "type": "key", "action": "soft1", "x": 0.03, "y": 0.612, "w": 0.27, "h": 0.042}, {"id": "home", "type": "key", "action": "home", "x": 0.32, "y": 0.612, "w": 0.17, "h": 0.042}, {"id": "back", "type": "key", "action": "back", "x": 0.51, "y": 0.612, "w": 0.17, "h": 0.042}, {"id": "soft2", "type": "key", "action": "soft2", "x": 0.7, "y": 0.612, "w": 0.27, "h": 0.042}, {"id": "talk", "type": "key", "action": "talk", "x": 0.03, "y": 0.677, "w": 0.27, "h": 0.075}, {"id": "dpad", "type": "dpad", "x": 0.35, "y": 0.662, "w": 0.3, "h": 0.105}, {"id": "end", "type": "key", "action": "end", "x": 0.7, "y": 0.677, "w": 0.27, "h": 0.075}, {"id": "n1", "type": "key", "action": "1", "x": 0.03, "y": 0.776, "w": 0.3, "h": 0.045}, {"id": "n2", "type": "key", "action": "2", "x": 0.35, "y": 0.776, "w": 0.3, "h": 0.045}, {"id": "n3", "type": "key", "action": "3", "x": 0.67, "y": 0.776, "w": 0.3, "h": 0.045}, {"id": "n4", "type": "key", "action": "4", "x": 0.03, "y": 0.827, "w": 0.3, "h": 0.045}, {"id": "n5", "type": "key", "action": "5", "x": 0.35, "y": 0.827, "w": 0.3, "h": 0.045}, {"id": "n6", "type": "key", "action": "6", "x": 0.67, "y": 0.827, "w": 0.3, "h": 0.045}, {"id": "n7", "type": "key", "action": "7", "x": 0.03, "y": 0.878, "w": 0.3, "h": 0.045}, {"id": "n8", "type": "key", "action": "8", "x": 0.35, "y": 0.878, "w": 0.3, "h": 0.045}, {"id": "n9", "type": "key", "action": "9", "x": 0.67, "y": 0.878, "w": 0.3, "h": 0.045}, {"id": "nstar", "type": "key", "action": "star", "x": 0.03, "y": 0.929, "w": 0.3, "h": 0.045}, {"id": "n0", "type": "key", "action": "0", "x": 0.35, "y": 0.929, "w": 0.3, "h": 0.045}, {"id": "npound", "type": "key", "action": "pound", "x": 0.67, "y": 0.929, "w": 0.3, "h": 0.045}]}, "snap": 1};
-  const SIDES = { front: "Front", frontDpad: "Front + D-pad", inside: "Foldable", insideIme: "Foldable + phone keyboard", standard: "Standard keypad" };
+  const DEFAULT_SKIN = {"version": 1, "name": "WMDroid", "backdrop": "silver", "opacity": 40, "front": {"canvas": {"w": 1080, "h": 2520}, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.07, "y": -0.002, "w": 0.22, "h": 0.03}, {"id": "screen", "type": "screen", "x": 0, "y": 0.0375, "w": 1, "h": 0.7625}, {"id": "k1", "type": "key", "action": "talk", "x": 0.024, "y": 0.81, "w": 0.22, "h": 0.03}, {"id": "k2", "type": "key", "action": "app1", "x": 0.268, "y": 0.81, "w": 0.22, "h": 0.03}, {"id": "k3", "type": "key", "action": "app2", "x": 0.512, "y": 0.81, "w": 0.22, "h": 0.03}, {"id": "k4", "type": "key", "action": "end", "x": 0.756, "y": 0.81, "w": 0.22, "h": 0.03}]}, "frontDpad": {"canvas": {"w": 1080, "h": 2520}, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.07, "y": -0.002, "w": 0.22, "h": 0.03}, {"id": "screen", "type": "screen", "x": 0, "y": 0.0375, "w": 1, "h": 0.7625}, {"id": "dpad", "type": "dpad", "x": 0.308, "y": 0.83, "w": 0.4, "h": 0.15}, {"id": "ok", "type": "key", "action": "ok", "x": 0.728, "y": 0.87, "w": 0.22, "h": 0.05}, {"id": "start", "type": "key", "action": "start", "x": 0.068, "y": 0.87, "w": 0.22, "h": 0.05}, {"id": "app1", "type": "key", "action": "app1", "x": 0.068, "y": 0.83, "w": 0.22, "h": 0.03}, {"id": "end", "type": "key", "action": "end", "x": 0.728, "y": 0.93, "w": 0.22, "h": 0.05}, {"id": "talk", "type": "key", "action": "talk", "x": 0.068, "y": 0.93, "w": 0.22, "h": 0.05}, {"id": "app2", "type": "key", "action": "app2", "x": 0.728, "y": 0.83, "w": 0.22, "h": 0.03}]}, "inside": {"canvas": {"w": 2184, "h": 1968}, "crease": 50, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.87, "y": 0, "w": 0.08, "h": 0.03}, {"id": "screen", "type": "screen", "x": 0.04, "y": 0, "w": 0.78, "h": 0.486525}, {"id": "talk", "type": "key", "action": "talk", "x": 0.925, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "ok", "type": "key", "action": "ok", "x": 0.855, "y": 0.07, "w": 0.06, "h": 0.085}, {"id": "dpad", "type": "dpad", "x": 0.855, "y": 0.165, "w": 0.13, "h": 0.16}, {"id": "end", "type": "key", "action": "end", "x": 0.925, "y": 0.07, "w": 0.055, "h": 0.085}, {"id": "start", "type": "key", "action": "start", "x": 0.855, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "keyboard", "type": "keyboard", "x": 0.03, "y": 0.625, "w": 0.94, "h": 0.33}, {"id": "app1", "type": "key", "action": "app1", "x": 0.855, "y": 0.43, "w": 0.06, "h": 0.055}, {"id": "app2", "type": "key", "action": "app2", "x": 0.925, "y": 0.43, "w": 0.06, "h": 0.055}]}, "insideIme": {"canvas": {"w": 2184, "h": 1968}, "crease": 50, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.87, "y": 0, "w": 0.08, "h": 0.03}, {"id": "screen", "type": "screen", "x": 0.04, "y": 0, "w": 0.78, "h": 0.486525}, {"id": "talk", "type": "key", "action": "talk", "x": 0.925, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "ok", "type": "key", "action": "ok", "x": 0.855, "y": 0.07, "w": 0.06, "h": 0.085}, {"id": "dpad", "type": "dpad", "x": 0.855, "y": 0.165, "w": 0.13, "h": 0.16}, {"id": "end", "type": "key", "action": "end", "x": 0.925, "y": 0.07, "w": 0.055, "h": 0.085}, {"id": "start", "type": "key", "action": "start", "x": 0.855, "y": 0.335, "w": 0.06, "h": 0.085}, {"id": "app1", "type": "key", "action": "app1", "x": 0.855, "y": 0.43, "w": 0.06, "h": 0.055}, {"id": "app2", "type": "key", "action": "app2", "x": 0.925, "y": 0.43, "w": 0.06, "h": 0.055}, {"id": "keyboard", "type": "keyboard", "x": 0.03, "y": 0.505, "w": 0.94, "h": 0.06}]}, "snap": 1, "standard": {"canvas": {"w": 1080, "h": 2520}, "items": [{"id": "lock", "type": "lock", "action": "lock", "x": 0.07, "y": 0, "w": 0.22, "h": 0.022}, {"id": "screen", "type": "screen", "x": 0, "y": 0.0375, "w": 1, "h": 0.565}, {"id": "soft1", "type": "key", "action": "soft1", "x": 0.03, "y": 0.612, "w": 0.27, "h": 0.042}, {"id": "home", "type": "key", "action": "home", "x": 0.32, "y": 0.612, "w": 0.17, "h": 0.042}, {"id": "back", "type": "key", "action": "back", "x": 0.51, "y": 0.612, "w": 0.17, "h": 0.042}, {"id": "soft2", "type": "key", "action": "soft2", "x": 0.7, "y": 0.612, "w": 0.27, "h": 0.042}, {"id": "talk", "type": "key", "action": "talk", "x": 0.03, "y": 0.677, "w": 0.27, "h": 0.075}, {"id": "dpad", "type": "dpad", "x": 0.35, "y": 0.662, "w": 0.3, "h": 0.105}, {"id": "end", "type": "key", "action": "end", "x": 0.7, "y": 0.677, "w": 0.27, "h": 0.075}, {"id": "n1", "type": "key", "action": "1", "x": 0.03, "y": 0.776, "w": 0.3, "h": 0.045}, {"id": "n2", "type": "key", "action": "2", "x": 0.35, "y": 0.776, "w": 0.3, "h": 0.045}, {"id": "n3", "type": "key", "action": "3", "x": 0.67, "y": 0.776, "w": 0.3, "h": 0.045}, {"id": "n4", "type": "key", "action": "4", "x": 0.03, "y": 0.827, "w": 0.3, "h": 0.045}, {"id": "n5", "type": "key", "action": "5", "x": 0.35, "y": 0.827, "w": 0.3, "h": 0.045}, {"id": "n6", "type": "key", "action": "6", "x": 0.67, "y": 0.827, "w": 0.3, "h": 0.045}, {"id": "n7", "type": "key", "action": "7", "x": 0.03, "y": 0.878, "w": 0.3, "h": 0.045}, {"id": "n8", "type": "key", "action": "8", "x": 0.35, "y": 0.878, "w": 0.3, "h": 0.045}, {"id": "n9", "type": "key", "action": "9", "x": 0.67, "y": 0.878, "w": 0.3, "h": 0.045}, {"id": "nstar", "type": "key", "action": "star", "x": 0.03, "y": 0.929, "w": 0.3, "h": 0.045}, {"id": "n0", "type": "key", "action": "0", "x": 0.35, "y": 0.929, "w": 0.3, "h": 0.045}, {"id": "npound", "type": "key", "action": "pound", "x": 0.67, "y": 0.929, "w": 0.3, "h": 0.045}]}};
+  const SIDES = { front: "Front", frontDpad: "Front + D-pad", inside: "Foldable", insideIme: "Foldable + phone keyboard", insideMax: "Foldable Max", insideMaxIme: "Foldable Max _ Keyboard", standard: "Standard keypad" };
+  // Foldable Max: the screen is as large as the landscape picture allows, across the fold.
+  // Foldable Max _ Keyboard: the same, in the space above the phone keyboard.
+  Object.assign(DEFAULT_SKIN, {
+    insideMax: {"canvas": {"w": 2184, "h": 1968}, "crease": 50, "items": [
+      {"id": "lock", "type": "lock", "action": "lock", "x": 0.46, "y": 0, "w": 0.08, "h": 0.028},
+      {"id": "screen", "type": "screen", "x": 0.02, "y": 0.045, "w": 0.96, "h": 0.5988},
+      {"id": "dock", "type": "dock", "x": 0.04, "y": 0.66, "w": 0.92, "h": 0.1},
+      {"id": "talk", "type": "key", "action": "talk", "x": 0.02, "y": 0.8, "w": 0.12, "h": 0.07},
+      {"id": "start", "type": "key", "action": "start", "x": 0.16, "y": 0.8, "w": 0.1, "h": 0.07},
+      {"id": "dpad", "type": "dpad", "x": 0.3, "y": 0.785, "w": 0.13, "h": 0.144},
+      {"id": "ok", "type": "key", "action": "ok", "x": 0.46, "y": 0.8, "w": 0.1, "h": 0.07},
+      {"id": "end", "type": "key", "action": "end", "x": 0.58, "y": 0.8, "w": 0.12, "h": 0.07},
+      {"id": "app1", "type": "key", "action": "app1", "x": 0.74, "y": 0.8, "w": 0.1, "h": 0.07},
+      {"id": "app2", "type": "key", "action": "app2", "x": 0.86, "y": 0.8, "w": 0.1, "h": 0.07}
+    ]},
+    insideMaxIme: {"canvas": {"w": 2184, "h": 1968}, "crease": 50, "items": [
+      {"id": "lock", "type": "lock", "action": "lock", "x": 0.91, "y": 0, "w": 0.08, "h": 0.028},
+      {"id": "screen", "type": "screen", "x": 0.099, "y": 0.02, "w": 0.802, "h": 0.5},
+      {"id": "keyboard", "type": "keyboard", "x": 0.03, "y": 0.545, "w": 0.94, "h": 0.055}
+    ]}
+  });
   const isInside = s => s.startsWith("inside");
 
-  const STORE = "wmdroid.skin.designer.v3";
+  const STORE = "wmdroid.skin.designer.v4";
   let doc;
   try { doc = JSON.parse(localStorage.getItem(STORE)) || defaults(); } catch { doc = defaults(); }
-  let side = "front", sel = null, wallUrl = null;
+  let side = "front", sel = null, picked = [], wallUrl = null;
   const $ = id => document.getElementById(id);
   const phone = $("phone"), wrap = $("stageWrap");
   const page = () => {
@@ -194,7 +254,7 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
       const cr = document.createElement("div"); cr.className = "crease";
       cr.style.top = (page().crease ?? 50) + "%"; cr.innerHTML = "<span>fold</span>"; phone.appendChild(cr);
     }
-    if (side === "insideIme") {
+    if (side === "insideIme" || side === "insideMaxIme") {
       // Where the phone's keyboard usually covers (for reference; its height varies by keyboard).
       const ime = document.createElement("div"); ime.className = "crease ime";
       ime.style.top = "58%"; ime.style.bottom = "0"; ime.style.height = "auto";
@@ -212,16 +272,22 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
 
   function itemEl(it, c, k) {
     const e = document.createElement("div");
-    e.className = "item " + (it.type === "screen" ? "screen" : it.type === "keyboard" ? "kbd key" : it.type === "dpad" ? "dpad key" : "key");
+    e.className = "item " + (it.type === "screen" ? "screen" : it.type === "led" ? "led" : it.type === "keyboard" ? "kbd key" : it.type === "dpad" ? "dpad key" : it.type === "rect" ? "rect" : it.type === "image" ? "logo" : it.type === "dock" ? "dockarea" : "key");
     if (it.type === "lock") e.classList.add("lock");
     const a = ACTIONS[it.action];
     if (a && a[2]) e.classList.add(a[2]);
-    Object.assign(e.style, { left: it.x * c.w * k + "px", top: it.y * c.h * k + "px", width: it.w * c.w * k + "px", height: it.h * c.h * k + "px" });
+    const rw = it.w * c.w * k, rh = it.h * c.h * k;
+    Object.assign(e.style, { left: it.x * c.w * k + "px", top: it.y * c.h * k + "px", width: rw + "px", height: rh + "px" });
+    if (it.type === "rect" || it.type === "image") e.style.borderRadius = (Math.min(rw, rh) * (it.radius || 0)) + "px";
+    if (it.type === "rect") e.style.background = it.color || "#8a9098";
+    if (it.type === "image" && it.image) e.style.backgroundImage = "url(" + it.image + ")";
     if (it.type === "screen") e.innerHTML = `<div class="bar">Start</div><div class="body">Windows Mobile</div><div class="soft"></div>`;
     else if (it.type === "dpad") e.innerHTML = `<i></i><i>▲</i><i></i><i>◀</i><i class="c"></i><i>▶</i><i></i><i>▼</i><i></i>`;
     else if (it.type === "keyboard") e.innerHTML = ["⊞QWERTYUIOP⌫", "⇥ASDFGHJKL↵", "⇧@ZXCVBNM.,⇧", "●S⌃ ␣ *#K"].map(r => `<div>${[...r].map(ch => `<b>${ch}</b>`).join("")}</div>`).join("");
+    else if (it.type === "dock") e.textContent = "Dock";
     else e.textContent = it.label || (a ? a[3] : "");
-    if (it === sel) e.classList.add("sel");
+    if (picked.includes(it)) e.classList.add("sel");
+    if (it === sel) e.classList.add("primary");
     const h = document.createElement("div"); h.className = "handle"; e.appendChild(h);
     e.addEventListener("pointerdown", ev => startDrag(ev, it, ev.target === h));
     return e;
@@ -231,18 +297,29 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
 
   function startDrag(ev, it, resize) {
     ev.preventDefault(); ev.stopPropagation();
+    if (ev.shiftKey && !resize) {
+      picked = picked.includes(it) ? picked.filter(x => x !== it) : picked.concat(it);
+      sel = picked.includes(it) ? it : (picked[picked.length - 1] || null);
+      render();
+      return;
+    }
+    if (!picked.includes(it)) picked = [it];
     sel = it;
     const c = page().canvas, k = scale();
     const x0 = ev.clientX, y0 = ev.clientY, s = { ...it };
-    const lockAspect = it.type === "screen" || it.type === "dpad";
+    const group = !resize && picked.length > 1 ? picked.map(p => ({ it: p, x: p.x, y: p.y })) : null;
+    const lockAspect = it.type === "screen" || it.type === "led";
     const move = e => {
       const dx = (e.clientX - x0) / (c.w * k), dy = (e.clientY - y0) / (c.h * k);
       if (resize) {
-        it.w = Math.max(0.02, snapV(s.w + dx));
+        const minW = it.type === "led" ? 0.012 : 0.02;
+        it.w = Math.max(minW, snapV(s.w + dx));
         if (lockAspect) {
           const ar = it.type === "screen" ? (isInside(side) ? 1 / SCREEN_ASPECT : side === "standard" ? STANDARD_ASPECT : SCREEN_ASPECT) : 1;
           it.h = it.w * c.w / c.h * ar;
         } else it.h = Math.max(0.01, snapV(s.h + dy));
+      } else if (group) {
+        for (const g of group) { g.it.x = snapV(g.x + dx); g.it.y = snapV(g.y + dy); }
       } else { it.x = snapV(s.x + dx); it.y = snapV(s.y + dy); }
       render();
     };
@@ -251,30 +328,84 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
     render();
   }
 
+  function selectionBounds(items) {
+    const l = Math.min(...items.map(i => i.x)), t = Math.min(...items.map(i => i.y));
+    const r = Math.max(...items.map(i => i.x + i.w)), b = Math.max(...items.map(i => i.y + i.h));
+    return { l, t, r, b, w: r - l, h: b - t };
+  }
+
+  function alignSelection(mode) {
+    const items = picked.filter(i => page().items.includes(i));
+    if (!items.length) return;
+    const box = selectionBounds(items);
+    const move = (dx, dy) => items.forEach(i => { i.x = snapV(i.x + dx); i.y = snapV(i.y + dy); });
+    if (mode === "left") move(-box.l, 0);
+    else if (mode === "right") move(1 - box.r, 0);
+    else if (mode === "cx") move((1 - box.w) / 2 - box.l, 0);
+    else if (mode === "top") move(0, -box.t);
+    else if (mode === "bottom") move(0, 1 - box.b);
+    else if (mode === "cy") move(0, (1 - box.h) / 2 - box.t);
+    else if (mode === "edges-left") items.forEach(i => { i.x = snapV(box.l); });
+    else if (mode === "edges-right") items.forEach(i => { i.x = snapV(box.r - i.w); });
+    else if (mode === "edges-cx") { const m = (box.l + box.r) / 2; items.forEach(i => { i.x = snapV(m - i.w / 2); }); }
+    else if (mode === "edges-top") items.forEach(i => { i.y = snapV(box.t); });
+    else if (mode === "edges-bottom") items.forEach(i => { i.y = snapV(box.b - i.h); });
+    else if (mode === "edges-cy") { const m = (box.t + box.b) / 2; items.forEach(i => { i.y = snapV(m - i.h / 2); }); }
+    else if (mode === "dist-x" && items.length >= 3) {
+      const sorted = items.slice().sort((a, b) => a.x - b.x);
+      const gap = (box.w - sorted.reduce((s, i) => s + i.w, 0)) / (sorted.length - 1);
+      let x = sorted[0].x;
+      for (const i of sorted) { i.x = snapV(x); x += i.w + gap; }
+    } else if (mode === "dist-y" && items.length >= 3) {
+      const sorted = items.slice().sort((a, b) => a.y - b.y);
+      const gap = (box.h - sorted.reduce((s, i) => s + i.h, 0)) / (sorted.length - 1);
+      let y = sorted[0].y;
+      for (const i of sorted) { i.y = snapV(y); y += i.h + gap; }
+    }
+    render();
+  }
+
   function props() {
     const p = $("props");
-    if (!sel || !page().items.includes(sel)) { sel = null; p.className = "hint"; p.innerHTML = "Tap an element on the phone. Drag to move, drag the blue corner to resize, arrow keys nudge (Shift = 10×)."; return; }
+    picked = picked.filter(i => page().items.includes(i));
+    if (!sel || !page().items.includes(sel)) { sel = picked[picked.length - 1] || null; }
+    if (!sel) { p.className = "hint"; p.innerHTML = "Tap an element on the phone. Shift-click to select more. Drag to move, drag the blue corner to resize, arrow keys nudge (Shift = 10×)."; return; }
     p.className = "";
     const pct = v => (v * 100).toFixed(2);
     const actionSel = (sel.type === "key" || sel.type === "lock")
       ? `<label>Action <select data-f="action">${Object.entries(ACTIONS).map(([k, a]) => `<option value="${k}" ${k === sel.action ? "selected" : ""}>${a[0]}</option>`).join("")}</select></label>
          <label>Label <input type="text" data-f="label" value="${sel.label ?? ""}" placeholder="(default mark)"></label>` : "";
-    p.innerHTML = `<label>Type <input type="text" value="${sel.type}" disabled></label>${actionSel}
+    const count = picked.length > 1 ? `<p class="hint">${picked.length} selected. The fields edit the one with the corner handle.</p>` : "";
+    const ledNote = sel.type === "led" ? `<p class="hint">The first light on this layout is the notification LED.</p>` : "";
+    const dockNote = sel.type === "dock" ? `<p class="hint">The Android app dock is drawn in this rectangle. One per layout. Keep it off the screen.</p>` : "";
+    const radiusField = (sel.type === "rect" || sel.type === "image")
+      ? `<label>Radius % <input type="number" step="1" min="0" max="50" data-f="radius" value="${Math.round((sel.radius || 0) * 100)}"></label>` : "";
+    const colorField = sel.type === "rect"
+      ? `<label>Color <input type="color" data-f="color" value="${sel.color || "#8a9098"}"></label>` : "";
+    p.innerHTML = `${count}${ledNote}${dockNote}<label>Type <input type="text" value="${sel.type}" disabled></label>${actionSel}${radiusField}${colorField}
       <label>X % <input type="number" step="0.1" data-f="x" value="${pct(sel.x)}"></label>
       <label>Y % <input type="number" step="0.1" data-f="y" value="${pct(sel.y)}"></label>
       <label>Width % <input type="number" step="0.1" data-f="w" value="${pct(sel.w)}"></label>
       <label>Height % <input type="number" step="0.1" data-f="h" value="${pct(sel.h)}"></label>`;
     p.querySelectorAll("[data-f]").forEach(inp => inp.addEventListener("change", () => {
       const f = inp.dataset.f;
-      if (f === "action" || f === "label") sel[f] = inp.value || undefined;
-      else sel[f] = parseFloat(inp.value) / 100;
+      if (f === "action" || f === "label" || f === "color") sel[f] = inp.value || undefined;
+      else if (f === "radius") sel.radius = Math.max(0, Math.min(0.5, parseFloat(inp.value) / 100 || 0));
+      else {
+        sel[f] = parseFloat(inp.value) / 100;
+        if (sel.type === "led" && (f === "w" || f === "h")) {
+          const c = page().canvas;
+          if (f === "w") sel.h = sel.w * c.w / c.h;
+          else sel.w = sel.h * c.h / c.w;
+        }
+      }
       render();
     }));
   }
 
   // Toolbar.
   document.querySelectorAll("[data-side]").forEach(b => b.onclick = () => {
-    side = b.dataset.side; sel = null;
+    side = b.dataset.side; sel = null; picked = [];
     document.querySelectorAll("[data-side]").forEach(x => x.classList.toggle("on", x === b));
     render();
   });
@@ -286,14 +417,37 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
     const c = page().canvas;
     doc[side] = JSON.parse(JSON.stringify(doc[from]));
     if (isInside(side) !== isInside(from)) doc[side].canvas = c;  // keep this screen's size
-    sel = null; render();
+    sel = null; picked = []; render();
   };
   let n = 0;
-  $("addKey").onclick = () => { sel = { id: "key" + Date.now() + n++, type: "key", action: "back", x: 0.4, y: 0.4, w: 0.18, h: 0.03 }; page().items.push(sel); render(); };
-  $("addDpad").onclick = () => { const c = page().canvas; sel = { id: "dpad" + Date.now(), type: "dpad", x: 0.4, y: 0.4, w: 0.2, h: 0.2 * c.w / c.h }; page().items.push(sel); render(); };
-  $("dup").onclick = () => { if (!sel) return; const d = { ...sel, id: sel.id + "_" + n++, x: sel.x + 0.02, y: sel.y + 0.02 }; page().items.push(d); sel = d; render(); };
-  $("del").onclick = () => { if (!sel || sel.type === "screen") return; page().items = page().items.filter(i => i !== sel); sel = null; render(); };
-  $("reset").onclick = () => { if (confirm("Reset both layouts to the current WMDroid skin?")) { doc = defaults(); sel = null; render(); } };
+  const take = it => { sel = it; picked = [it]; page().items.push(it); render(); };
+  $("addKey").onclick = () => take({ id: "key" + Date.now() + n++, type: "key", action: "back", x: 0.4, y: 0.4, w: 0.18, h: 0.03 });
+  $("addDpad").onclick = () => { const c = page().canvas; take({ id: "dpad" + Date.now(), type: "dpad", x: 0.4, y: 0.4, w: 0.2, h: 0.2 * c.w / c.h }); };
+  $("addLed").onclick = () => { const c = page().canvas, w = 0.028; take({ id: "led", type: "led", x: 0.71, y: 0.004, w, h: w * c.w / c.h }); };
+  $("addRect").onclick = () => take({ id: "rect" + Date.now(), type: "rect", x: 0.02, y: 0.8, w: 0.96, h: 0.012, radius: 0.5, color: "#8a9098" });
+  $("addDock").onclick = () => {
+    const have = page().items.find(i => i.type === "dock");
+    if (have) { sel = have; picked = [have]; render(); return; }
+    take({ id: "dock", type: "dock", x: 0.04, y: 0.86, w: 0.92, h: 0.1 });
+  };
+  $("addImage").onclick = () => $("imageFile").click();
+  $("imageFile").onchange = e => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => take({ id: "logo" + Date.now(), type: "image", x: 0.3, y: 0.012, w: 0.4, h: 0.03, radius: 0, image: String(r.result || "") });
+    r.readAsDataURL(f);
+  };
+  document.querySelectorAll("[data-align]").forEach(b => b.onclick = () => alignSelection(b.dataset.align));
+  $("dup").onclick = () => { if (!sel) return; const d = { ...sel, id: sel.id + "_" + n++, x: sel.x + 0.02, y: sel.y + 0.02 }; page().items.push(d); sel = d; picked = [d]; render(); };
+  $("del").onclick = () => {
+    const drop = picked.filter(i => i.type !== "screen");
+    if (!drop.length) return;
+    page().items = page().items.filter(i => !drop.includes(i));
+    picked = []; sel = null; render();
+  };
+  $("reset").onclick = () => { if (confirm("Reset both layouts to the current WMDroid skin?")) { doc = defaults(); sel = null; picked = []; render(); } };
   $("cw").onchange = e => { page().canvas.w = +e.target.value || page().canvas.w; render(); };
   $("ch").onchange = e => { page().canvas.h = +e.target.value || page().canvas.h; render(); };
   $("crease").onchange = e => { page().crease = +e.target.value; render(); };
@@ -303,14 +457,14 @@ textarea { width: 100%; height: 160px; font: 11px/1.3 ui-monospace, monospace; b
   $("wallFile").onchange = e => { const f = e.target.files[0]; if (f) { wallUrl = URL.createObjectURL(f); render(); } };
   $("copy").onclick = async () => { try { await navigator.clipboard.writeText($("json").value); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy JSON", 1200); } catch { $("json").select(); } };
   $("download").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([$("json").value], { type: "application/json" })); a.download = "skin.json"; a.click(); };
-  $("load").onclick = () => { try { doc = JSON.parse($("json").value); sel = null; render(); } catch (err) { alert("Not valid JSON: " + err.message); } };
+  $("load").onclick = () => { try { doc = JSON.parse($("json").value); sel = null; picked = []; render(); } catch (err) { alert("Not valid JSON: " + err.message); } };
   $("theme").onclick = () => { const r = document.documentElement; r.dataset.theme = r.dataset.theme === "dark" ? "light" : "dark"; };
-  phone.addEventListener("pointerdown", e => { if (e.target === phone || e.target.id === "wall" || e.target.id === "tint") { sel = null; render(); } });
+  phone.addEventListener("pointerdown", e => { if (e.target === phone || e.target.id === "wall" || e.target.id === "tint") { sel = null; picked = []; render(); } });
   addEventListener("keydown", e => {
-    if (!sel || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    if (!picked.length || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
     const st = (e.shiftKey ? 10 : 1) * 0.001;
     const d = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];
-    if (d) { sel.x += d[0]; sel.y += d[1]; e.preventDefault(); render(); }
+    if (d) { for (const t of picked) { t.x += d[0]; t.y += d[1]; } e.preventDefault(); render(); }
     if (e.key === "Delete" || e.key === "Backspace") $("del").click();
   });
   addEventListener("resize", render);

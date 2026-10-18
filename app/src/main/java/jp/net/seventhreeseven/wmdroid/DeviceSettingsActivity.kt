@@ -2,16 +2,21 @@ package jp.net.seventhreeseven.wmdroid
 
 import android.content.Intent
 import android.os.Bundle
+import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
 
 /**
- * Device Settings: the same pages and settings as WMDroid's settings app inside Windows Mobile,
- * built from one catalogue (GuestSettings), so both stay in step. Changes apply at once; settings
- * that need a restart wait for the Apply button. Result OK = restart Windows Mobile.
+ * Emergency copy of the settings Windows Mobile can change, for when that app can't be opened.
+ * Phone and Infrared are edited only inside Windows Mobile. Built from one catalogue
+ * (GuestSettings). Changes apply at once; settings that need a restart wait for the Apply button.
+ * Result OK = restart Windows Mobile.
  */
 class DeviceSettingsActivity : SettingsPage() {
     private val pending = LinkedHashMap<String, String>()
     private lateinit var apply: MaterialButton
+    private var resumed = false
+    private var batteryShown = false
+    private var unrestricted = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,7 +36,13 @@ class DeviceSettingsActivity : SettingsPage() {
             }
         }
         var page = ""
-        val catalogue = GuestSettings.entriesFor(settings)  // Standard: no touch-only settings
+        // Phone and Infrared are edited in Windows Mobile. This screen is the emergency copy.
+        unrestricted = settings.backgroundMode == Settings.BG_RUN
+        val catalogue = GuestSettings.entriesFor(settings).filter {
+            it.page != "Phone" && it.page != "Infrared" &&
+                !(unrestricted && (it.key == "bgtimer" || it.key == "resume"))
+        }
+        batteryShown = catalogue.any { it.key == "batteryopt" }
         for (e in catalogue) {
             if (e.page != page) {
                 page = e.page
@@ -46,6 +57,7 @@ class DeviceSettingsActivity : SettingsPage() {
                     e.options.indexOfFirst { it.first == value }.coerceAtLeast(0)) { change(e, e.options[it].first) }
                 GuestSettings.Kind.SLIDER -> slider(e.label, e.min, e.max, value.toIntOrNull() ?: e.min) { change(e, it.toString()) }
                 GuestSettings.Kind.COLOR -> colorRow(e, value)
+                GuestSettings.Kind.TEXT -> textRow(e, value)
                 GuestSettings.Kind.ACTION -> button(e.label) {
                     @Suppress("DEPRECATION")
                     if (value == "local:storage") startActivityForResult(Intent(this, StorageFoldersActivity::class.java), REQ_FOLDERS)
@@ -55,6 +67,21 @@ class DeviceSettingsActivity : SettingsPage() {
                         PimSync.requested = true
                         android.widget.Toast.makeText(this, "Syncs the next time Windows Mobile is on screen", android.widget.Toast.LENGTH_SHORT).show()
                     }
+                    else if (value == GuestSettings.CMD_SMS_LOAD) {
+                        val note = SmsBridge.loadHistory(this)
+                        android.widget.Toast.makeText(this,
+                            if (note == "permission") "Allow messages, then press Load Messages again" else note,
+                            android.widget.Toast.LENGTH_SHORT).show()
+                        if (note == "permission") {
+                            val missing = SmsBridge.permissions().filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
+                            if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_SMS)
+                        }
+                    }
+                    else if (value.startsWith("widget ")) {
+                        settings.requestWidget(value.removePrefix("widget ").trim())
+                        android.widget.Toast.makeText(this, "Installs the next time Windows Mobile is on screen",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    }
                     else GuestSettings.screenFor(this, value)?.let { startActivity(it) }
                 }
             }
@@ -62,11 +89,37 @@ class DeviceSettingsActivity : SettingsPage() {
         show(apply)
     }
 
+    override fun onResume() {
+        super.onResume()
+        val show = !GuestSettings.batteryExempt(this)
+        if (!resumed) { resumed = true; return }
+        if (show != batteryShown) recreate()
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         // The folder mapping was applied: restart Windows Mobile with it.
         if (requestCode == REQ_FOLDERS && resultCode == RESULT_OK) { setResult(RESULT_OK); finish() }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_SMS && grantResults.any { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) {
+            val note = SmsBridge.loadHistory(this)
+            if (note != "permission") android.widget.Toast.makeText(this, note, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun textRow(e: GuestSettings.Entry, value: String) {
+        label(e.label)
+        card.addView(android.widget.EditText(this).apply {
+            setText(value)
+            isSingleLine = true
+            if (e.options.any { it.first == "password" })
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            doAfterTextChanged { change(e, it?.toString() ?: "") }
+        }, android.widget.LinearLayout.LayoutParams(-1, -2))
     }
 
     /** A colour: the presets, plus "Custom…" with hue / saturation / brightness sliders. */
@@ -129,10 +182,14 @@ class DeviceSettingsActivity : SettingsPage() {
             return
         }
         e.set(settings, value)
+        // Unrestricted drops the timer and the hibernation toggle; another mode brings them back.
+        // The spinner reports its current row once as it is attached, which is not a change.
+        if (e.key == "bgkind" && (settings.backgroundMode == Settings.BG_RUN) != unrestricted) recreate()
     }
 
     companion object {
         const val REQ_FOLDERS = 61
         const val REQ_ROLE = 62
+        private const val REQ_SMS = 63
     }
 }

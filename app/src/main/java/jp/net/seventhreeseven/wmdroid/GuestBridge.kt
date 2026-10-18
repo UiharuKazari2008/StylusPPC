@@ -27,8 +27,17 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestPatched()
         /** The helper runs on a patched system. */
         fun onGuestReady()
-        /** What the guest is sounding: "media", "alert" or "ring". */
+        /** What the guest is sounding: "media", "notify" (or "alert") or "ring". */
         fun onGuestAudio(kind: String) {}
+        /** Windows Mobile's own sliders, 0–100: media, ringtone, notification. */
+        fun onGuestVolume(media: Int, ring: Int, notify: Int) {}
+        /** Window title of the media player, when one is running (AudioClass). */
+        fun onGuestTrack(title: String) {}
+        /**
+         * Now playing from the Windows Media Player plug-in (guest/WmpHook): [state] is
+         * "playing", "paused" or "stopped", positions are milliseconds.
+         */
+        fun onGuestMeta(state: String, posMs: Long, durMs: Long, title: String, artist: String, album: String) {}
         /** "Send via Bluetooth": [name] is in the mailbox's send folder (BluetoothBridge). */
         fun onGuestShare(name: String) {}
         /** WM 6 / 6.1 / 6.1.4: the helper named the network for the RIL; the modem re-announces registration. */
@@ -39,6 +48,10 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestPim(line: String) {}
         /** Infrared: an "irda ..." line from the helper, without the prefix (InfraredBridge). */
         fun onGuestIrda(line: String) {}
+        /** InfraLobby is open (false) or closed (true). InfraredBridge writes lobby.txt. */
+        fun onGuestLobby(stop: Boolean) {}
+        /** The Today item is showing (false) or unloaded (true). Same list as InfraLobby. */
+        fun onGuestLobbyToday(stop: Boolean) {}
         /** Text messages: a "sms ..." line from the helper, without the prefix (SmsBridge). */
         fun onGuestSms(line: String) {}
         /** "clip": Windows Mobile's clipboard text is in clip_out.txt (ClipboardBridge). */
@@ -84,9 +97,9 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         outDir.listFiles()?.forEach { it.delete() }
         // autorun.exe is a small native bootstrap (guest/Autorun): it installs .NET CF 3.5 from the CAB
         // when the image lacks it (WM 5, 6.0, 6.1), then starts the helper, helper.exe, with the same
-        // arguments. Plus the other guest programs the helper installs (GPS Test, Send via Bluetooth).
+        // arguments. Plus the other guest programs the helper installs (GPS Test, InfraLobby, Send via Bluetooth).
         for ((asset, name) in listOf("Autorun.exe" to "autorun.exe", "WMDroid.exe" to "helper.exe",
-                "GpsTest.exe" to "GpsTest.exe", "SendBluetooth.exe" to "SendBluetooth.exe",
+                "GpsTest.exe" to "GpsTest.exe", "InfraLobby.exe" to "InfraLobby.exe", "SendBluetooth.exe" to "SendBluetooth.exe",
                 "NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab",
                 "MAPIlib.dll" to "MAPIlib.dll", "OpenNETCF.dll" to "OpenNETCF.dll")) {  // texts on WM 6.5.3 (Sms.cs)
             val exe = File(autorunDir, name)
@@ -97,11 +110,13 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
                     exe.writeBytes(bytes)
             }
         }
+        File(autorunDir, "WmpHook.dll").delete()  // the player plug-in is no longer shipped
         writeState()
         // A restored session already has its helper running and won't say hello by itself: ask, so an
         // outdated helper is noticed (one too old to know "hello" answers "unknown").
         helloSeq = "%08d".format(seq)
         helloSeen = false
+        synchronized(held) { held.clear(); running = false }  // this session's commands start when it is up
         markAlive()  // a new session: its helper gets its full time to answer
         send("hello")
         return overlays()
@@ -141,8 +156,36 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         StorageGuest.write(box, ctx, settings)
     }
 
+    /**
+     * Commands wait here until Windows Mobile is running (booted, not paused). Writing them onto
+     * the card earlier leaves a mailbox the helper is not reading, which the next open treats as
+     * a dead helper.
+     */
+    private val held = ArrayDeque<String>()
+    private var running = false
+
+    /** The guest is up and its helper can read the mailbox. Queued commands go out in order. */
+    fun setRunning(on: Boolean) {
+        val queued = ArrayList<String>()
+        synchronized(held) {
+            if (running == on) return
+            running = on
+            if (!on) return
+            queued.addAll(held)
+            held.clear()
+        }
+        queued.forEach { writeCmd(it) }
+    }
+
     fun send(command: String) {
-        val name = "%08d".format(seq++)
+        synchronized(held) {
+            if (!running) { held.addLast(command); return }
+        }
+        writeCmd(command)
+    }
+
+    private fun writeCmd(command: String) {
+        val name = synchronized(held) { "%08d".format(seq++) }
         val tmp = File(inDir, "$name.tmp")
         tmp.writeText(command)
         tmp.renameTo(File(inDir, "$name.cmd"))
@@ -190,9 +233,30 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         return System.currentTimeMillis() - oldest < 10_000
     }
 
+    /** "40 70 55" media, ringtone and notification percents from AudioClass. */
+    private fun parseVol(body: String) {
+        val n = body.split(' ')
+        if (n.size < 3) return
+        val media = n[0].toIntOrNull() ?: return
+        val ring = n[1].toIntOrNull() ?: return
+        val notify = n[2].toIntOrNull() ?: return
+        listener.onGuestVolume(media, ring, notify)
+    }
+
+    /** "playing 1234 180000 title\tartist\talbum" from AudioClass.ReadMeta. */
+    private fun parseMeta(body: String) {
+        val parts = body.split(' ', limit = 4)
+        if (parts.size < 4) return
+        val pos = parts[1].toLongOrNull() ?: return
+        val dur = parts[2].toLongOrNull() ?: return
+        val fields = parts[3].split('\t', limit = 3)
+        listener.onGuestMeta(parts[0], pos, dur, fields.getOrElse(0) { "" }, fields.getOrElse(1) { "" }, fields.getOrElse(2) { "" })
+    }
+
     private fun handle(line: String) {
         if (line.isEmpty()) return
         lastHeard = android.os.SystemClock.uptimeMillis()
+        if (line == "alive") return  // watchdog pulse while a command is slow; not a command result
         Log.i(TAG, "guest: $line")
         when {
             line.startsWith("hello") -> {
@@ -220,12 +284,23 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             line == "open allfiles" -> listener.onOpenAllFiles()
             line.startsWith("patched ") -> listener.onGuestPatched()
             line.startsWith("ready ") -> listener.onGuestReady()
-            line.startsWith("audio ") -> listener.onGuestAudio(line.removePrefix("audio ").trim())
+            line.startsWith("audio ") -> {
+                val rest = line.removePrefix("audio ").trim()
+                if (rest.startsWith("meta ")) parseMeta(rest.removePrefix("meta "))
+                else if (rest.startsWith("title ")) listener.onGuestTrack(rest.removePrefix("title ").trim())
+                else if (rest == "title") listener.onGuestTrack("")
+                else if (rest.startsWith("vol ")) parseVol(rest.removePrefix("vol ").trim())
+                else listener.onGuestAudio(rest)
+            }
             line.startsWith("share ") -> listener.onGuestShare(line.removePrefix("share ").trim())
             line == "radio refresh" -> listener.onGuestRadioRefresh()  // virtual modem (core/src/board/modem.h)
             line.startsWith("call ") -> listener.onGuestCall(line.removePrefix("call ").trim())  // CallBridge
             line.startsWith("pim ") -> listener.onGuestPim(line.removePrefix("pim ").trim())  // PimSync
             line.startsWith("irda ") -> listener.onGuestIrda(line.removePrefix("irda ").trim())  // InfraredBridge
+            line == "lobby" -> listener.onGuestLobby(false)  // InfraLobby is open (guest/InfraLobby)
+            line == "lobby stop" -> listener.onGuestLobby(true)
+            line == "lobby today" -> listener.onGuestLobbyToday(false)  // Today item (guest/Today)
+            line == "lobby today stop" -> listener.onGuestLobbyToday(true)
             line.startsWith("sms ") -> listener.onGuestSms(line.removePrefix("sms ").trim())  // SmsBridge
             line == "clip" -> listener.onGuestClip()  // ClipboardBridge
             line == "remount" -> listener.onGuestRemount()

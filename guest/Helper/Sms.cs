@@ -25,6 +25,8 @@ static class Sms
     const string SeenFile = @"\Application Data\PocketStylus\sms-seen.txt";
     static System.Threading.Thread watcher;
     static int outSeq;
+    // Entry ids of messages this process filed (the watcher must not send them).
+    static Dictionary<string, bool> filed = new Dictionary<string, bool>();
 
     public static string Command(string args)
     {
@@ -100,26 +102,37 @@ static class Sms
             IMAPIMsgStore store = SmsStore(mapi);
             if (store == null) return "no SMS store";
             MAPIFolder inbox = (MAPIFolder)store.OpenFolder(store.ReceiveFolder);
+            MAPIFolder sent = (MAPIFolder)store.OpenFolder(store.SentMailFolder);
+            // A whole history in one pass blocks the mailbox long enough for the watchdog to kill
+            // this process and for the app to pull the storage card. A short batch, then the app
+            // sends the next.
+            int filed = 0;
             foreach (Dictionary<string, string> m in ReadRecords(path))
             {
-                string id, from, text, time;
+                if (filed >= 8) break;
+                string id, from, text, time, box, readFlag;
                 m.TryGetValue("id", out id); m.TryGetValue("from", out from);
                 m.TryGetValue("text", out text); m.TryGetValue("time", out time);
+                m.TryGetValue("box", out box); m.TryGetValue("read", out readFlag);
+                Helper.Beat();
                 try
                 {
                     long ms = time != null ? long.Parse(time) : 0;
                     ulong ft = (ulong)((ms + 11644473600000L) * 10000L);
-                    cemapi.IMessage msg = inbox.Raw.CreateMessage();
+                    MAPIFolder folder = box == "out" ? sent : inbox;
+                    cemapi.IMessage msg = folder.Raw.CreateMessage();
                     msg.SetProps(new cemapi.PropTags[] {
                         cemapi.PropTags.PR_MESSAGE_CLASS, cemapi.PropTags.PR_SUBJECT, cemapi.PropTags.PR_SENDER_EMAIL_ADDRESS,
                         cemapi.PropTags.PR_SENDER_NAME, cemapi.PropTags.PR_SENDER_ADDRTYPE, cemapi.PropTags.PR_MESSAGE_DELIVERY_TIME,
                         cemapi.PropTags.PR_MESSAGE_FLAGS },
-                        new object[] { "IPM.SMStext", text ?? "", from ?? "", from ?? "", "SMS", ft, 0u });
+                        new object[] { "IPM.SMStext", text ?? "", from ?? "", from ?? "", "SMS", ft, readFlag == "1" ? 1u : 0u });
                     msg.SaveChanges(0);
+                    Remember(msg);
                     msg.Release();
                     delivered.Append(' ').Append(id);
+                    filed++;
                 }
-                catch (Exception e) { Helper.Log("sms: deliver " + id + ": " + e.Message); }
+                catch (Exception e) { Helper.Log("sms: deliver " + id + ": " + e.Message); filed++; }
             }
         }
         File.Delete(path);
@@ -177,11 +190,13 @@ static class Sms
                                 foreach (IMAPIMessage m in msgs)
                                 {
                                     string key = Hex(m.MessageID.AsByteArray);
-                                    if (seen.ContainsKey(key)) continue;
+                                    if (seen.ContainsKey(key) || filed.ContainsKey(key)) { seen[key] = true; continue; }
                                     seen[key] = true;
                                     changed = true;
                                     // The first look only learns what is already there (no old texts resent).
-                                    if (!first) Report(m);
+                                    // A message filed from the phone's history carries its original time, so it
+                                    // is not sent again. A text Windows Mobile just composed is recent.
+                                    if (!first && IsFresh(m)) Report(m);
                                 }
                         }
                         if (changed || first) SaveSeen(seen);
@@ -193,6 +208,31 @@ static class Sms
             catch (Exception e) { Helper.Log("sms: watch " + e.GetType().Name + " " + e.Message); }
             System.Threading.Thread.Sleep(3000);
         }
+    }
+
+    static bool IsFresh(IMAPIMessage m)
+    {
+        try
+        {
+            DateTime when = m.LocalDeliveryTime;
+            return when.Year < 2000 || when > DateTime.Now.AddMinutes(-10);
+        }
+        catch (Exception) { return true; }
+    }
+
+    // So the outbox watcher does not treat a message we just filed as one Windows Mobile sent.
+    static void Remember(cemapi.IMessage msg)
+    {
+        try
+        {
+            byte[] id = msg.GetProps(new cemapi.PropTags[] { cemapi.PropTags.PR_ENTRYID })[0].AsBinary;
+            var seen = LoadSeen();
+            string hex = Hex(id);
+            seen[hex] = true;
+            filed[hex] = true;
+            SaveSeen(seen);
+        }
+        catch (Exception) { }
     }
 
     static void Report(IMAPIMessage m)

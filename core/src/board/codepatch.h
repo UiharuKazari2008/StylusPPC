@@ -9,6 +9,12 @@
 //   - fakeril.dll (WM 6.5.3): the dial thread "answers" every call after 2 s. The gate patch keeps
 //     the call dialling until the helper says the real (Android) call is active
 //     (docs/research-phone-calls-pim.md, section E). Only while the helper arms it.
+//   - cprog.exe (WM 6.1.4): the phone skin blits each bitmap at the bitmap's own size. The
+//     portrait background is 480x696 and the landscape one is 800x376, which is the client
+//     area of a 480x800 screen (192 dpi bars are 52 px). On a taller or wider display the
+//     control is the real client and the bitmap no longer fills it, so the keypad sits in
+//     a gap. The blit destination is now the control rectangle; the source stays the
+//     bitmap, so StretchBlt scales. At 480x800 the rectangle is the bitmap and nothing changes.
 //   - fakeril.dll (WM 6.5.3, WM 5): its default SIM holds the fake own number 14250010001 /
 //     14250010002 ("This is a Fake Number"), which WM shows in Phone > Options. celltsp reads it once
 //     when the phone stack starts, so the number has to be in FakeRIL's default table (.data) before
@@ -56,6 +62,7 @@ public:
     static constexpr uint32_t ST_NLED = 1u << 1;       // nleddrvr accepts notification blinks
     static constexpr uint32_t ST_GATE_ARMED = 1u << 2; // the helper armed the FakeRIL gate
     static constexpr uint32_t ST_GATE = 1u << 3;       // ...and it is in FakeRIL's code now
+    static constexpr uint32_t ST_DIALER = 1u << 4;     // cprog draws the phone skin to the client rect
 
     CodePatcher(Cpu &cpu, Bus &bus) : cpu(cpu), bus(bus) {}
     const char *name() const override { return "codepatch"; }

@@ -8,10 +8,10 @@ import android.widget.TextView
 import com.google.android.material.button.MaterialButton
 
 /**
- * WMDroid's phone-side settings: the operating system, skin, storage card, phone calls and the
- * hardware bridges. Everything Windows Mobile can also change from inside (display, design,
- * hardware, power, device) is under Device Settings, built from the same catalogue as the guest's
- * settings app. Result OK = restart Windows Mobile; otherwise live changes are applied in place.
+ * Emergency settings for when Windows Mobile itself can't be used: the operating system, skin and
+ * storage card. Display, design, hardware, power and device live under Device Settings. Phone and
+ * Infrared are changed inside Windows Mobile (Settings > System > PocketStylus). Result OK =
+ * restart Windows Mobile; otherwise live changes are applied in place.
  */
 class SettingsActivity : SettingsPage() {
     private lateinit var picker: OsPicker
@@ -57,6 +57,14 @@ class SettingsActivity : SettingsPage() {
             android.widget.Toast.makeText(this, "Saved states of this OS deleted", android.widget.Toast.LENGTH_SHORT).show()
         }
 
+        // ---- HTC apps (HtcAppsActivity): from an HD2 ROM the user owns ----
+        group("HTC HD2 apps")
+        note("Install apps such as Teeter from an HTC HD2 ROM file you own.")
+        button("HTC HD2 apps…") {
+            @Suppress("DEPRECATION")
+            startActivityForResult(Intent(this, HtcAppsActivity::class.java), REQ_HTC)
+        }
+
         // ---- Skin ----
         section("Skin")
         skinNote = note("")
@@ -68,7 +76,7 @@ class SettingsActivity : SettingsPage() {
         }
         button("Paste skin JSON…", outlined = false) { pasteSkin() }
         button("Use the built-in skin", outlined = false) { settings.customSkin = ""; showSkin() }
-        note("Design skins with tools/skin-designer.html (Front, Front + D-pad, Foldable, Foldable + phone keyboard).")
+        note("Design skins with tools/skin-designer.html (Front, Front + D-pad, Foldable, Foldable + phone keyboard, Foldable Max, Foldable Max _ Keyboard). A Dock rectangle sets where the app dock sits.")
 
         // ---- Storage card ----
         section("Storage card")
@@ -112,15 +120,12 @@ class SettingsActivity : SettingsPage() {
         updateAccessNote()
 
         // ---- Phone ----
+        // Calls and infrared are the Phone and Infrared tabs inside Windows Mobile.
         section("Phone")
-        group("Phone calls")
-        button("Phone calls…") { startActivity(Intent(this, CallSettingsActivity::class.java)) }
         group("Contacts & calendar")
         button("Contacts & calendar…") { startActivity(Intent(this, PimSettingsActivity::class.java)) }
         group("Bluetooth")
         button("Bluetooth…") { startActivity(Intent(this, BluetoothSettingsActivity::class.java)) }
-        group("Infrared")  // IrDA beams over Bluetooth LE or an InfraWAN relay (InfraredSettings.kt)
-        button("Infrared…") { startActivity(Intent(this, InfraredSettingsActivity::class.java)) }
         group("Phone hardware")
         note("Your phone's hardware bridged into Windows Mobile. Each switches on here once it is implemented.")
         for ((key, label) in bridges) switch(label, settings.bridgeEnabled(key) || key in available).isEnabled = false
@@ -199,7 +204,7 @@ class SettingsActivity : SettingsPage() {
                     ?.let { useSkin(it) }
             }
             // Device Settings or the folder mapping asked for a restart.
-            REQ_DEVICE, REQ_FOLDERS -> if (resultCode == RESULT_OK) { setResult(RESULT_OK); finish() }
+            REQ_DEVICE, REQ_FOLDERS, REQ_HTC -> if (resultCode == RESULT_OK) { setResult(RESULT_OK); finish() }
             else -> picker.onActivityResult(requestCode, resultCode, data)
         }
     }
@@ -209,5 +214,6 @@ class SettingsActivity : SettingsPage() {
         const val REQ_SKIN = 53
         const val REQ_DEVICE = 54
         const val REQ_FOLDERS = 55
+        const val REQ_HTC = 56
     }
 }

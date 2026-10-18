@@ -93,15 +93,18 @@ class SettingsForm : Form
             first = false;
             string command = e.Value == "local:storage" ? "open storage" : e.Value;  // the phone's page
             var item = new MenuItem { Text = e.Label };
-            item.Click += delegate { Helper.Send(command); };
+            item.Click += delegate { RunAction(command); };
             more.MenuItems.Add(item);
         }
         more.MenuItems.Add(new MenuItem { Text = "-" });
         more.MenuItems.Add(phoneItem);
     }
 
+    string currentPage;
+
     void ShowPage(string name)
     {
+        currentPage = name;
         Text = "PocketStylus: " + name;
         PageMenu(name);
         SuspendLayout();
@@ -114,7 +117,19 @@ class SettingsForm : Form
         foreach (Entry e in entries)
         {
             if (e.Page != name) continue;
+            if (BgKind() == "run" && (e.Key == "resume" || e.Key == "bgtimer")) continue;
             if (e.Kind == "action") { actions = true; continue; }
+            if (e.Kind == "text")
+            {
+                y = AddLine(new Label { Text = e.Label, Left = S(4), Top = y, Width = w, Height = S(18) }, y) - S(4);
+                var box = new TextBox { Left = S(4), Width = w, Text = e.Value };
+                if (e.Extra == "password") box.PasswordChar = '*';
+                Entry typed = e;
+                box.TextChanged += delegate { Changed(typed, box.Text, true); };
+                y = AddLine(box, y);
+                if (first == null) first = box;
+                continue;
+            }
             var cb = new ComboBox { Left = S(4), Width = w, DropDownStyle = ComboBoxStyle.DropDownList };
             var values = new List<string>();
             if (e.Kind == "bool")
@@ -153,7 +168,7 @@ class SettingsForm : Form
     int AddLine(Control c, int y)
     {
         // Keep the focused line on screen: the form scrolls with the keypad focus.
-        if (c is ComboBox) c.GotFocus += delegate { ScrollTo(c); };
+        if (c is ComboBox || c is TextBox) c.GotFocus += delegate { ScrollTo(c); };
         Controls.Add(c);
         pageControls.Add(c);
         return y + c.Height + S(4);
@@ -234,6 +249,7 @@ class SettingsForm : Form
             if (e.Kind == "bool") y = AddBool(p, e, y, w);
             else if (e.Kind == "choice") y = AddChoice(p, e, y, w);
             else if (e.Kind == "slider") y = AddSlider(p, e, y, w);
+            else if (e.Kind == "text") y = AddText(p, e, y, w);
             else if (e.Kind == "action") y = AddAction(p, e, y, w);
             ys[e.Page] = y;
         }
@@ -252,11 +268,36 @@ class SettingsForm : Form
                 p.Controls.Add(apply);
             }
         Controls.Add(tabs);
+        if (BgKind() == "run") ApplyRunRows(true);
+    }
+
+    string BgKind()
+    {
+        foreach (Entry e in entries) if (e.Key == "bgkind") return e.Value;
+        return "suspend";
+    }
+
+    // Unrestricted has no timer, and hibernation stays on, so those two rows are hidden.
+    readonly List<Control> runRows = new List<Control>();
+
+    void TagRun(Control c, Entry e)
+    {
+        if (e.Key == "resume" || e.Key == "bgtimer") { c.Tag = e.Key; runRows.Add(c); }
+    }
+
+    void ApplyRunRows(bool run)
+    {
+        foreach (Control c in runRows) c.Visible = !run;
+        if (!run) return;
+        foreach (Control c in runRows)
+            if ((c.Tag as string) == "resume" && c is CheckBox && !((CheckBox)c).Checked)
+                ((CheckBox)c).Checked = true;
     }
 
     int AddBool(Panel p, Entry e, int y, int w)
     {
         var c = new CheckBox { Text = e.Label, Checked = e.Value == "1", Left = S(6), Top = y, Width = w, Height = S(26) };
+        TagRun(c, e);
         c.CheckStateChanged += delegate { Changed(e, c.Checked ? "1" : "0", false); };
         p.Controls.Add(c);
         return y + S(28);
@@ -264,9 +305,12 @@ class SettingsForm : Form
 
     int AddChoice(Panel p, Entry e, int y, int w)
     {
-        p.Controls.Add(new Label { Text = e.Label, Left = S(6), Top = y, Width = w, Height = S(20) });
+        var caption = new Label { Text = e.Label, Left = S(6), Top = y, Width = w, Height = S(20) };
+        TagRun(caption, e);
+        p.Controls.Add(caption);
         y += S(20);
         var cb = new ComboBox { Left = S(6), Top = y, Width = w, DropDownStyle = ComboBoxStyle.DropDownList };
+        TagRun(cb, e);
         var values = new List<string>();
         foreach (string opt in e.Extra.Split(';'))
         {
@@ -307,19 +351,46 @@ class SettingsForm : Form
         return y + S(34);
     }
 
+    int AddText(Panel p, Entry e, int y, int w)
+    {
+        p.Controls.Add(new Label { Text = e.Label, Left = S(6), Top = y, Width = w, Height = S(20) });
+        y += S(20);
+        var box = new TextBox { Left = S(6), Top = y, Width = w, Text = e.Value };
+        if (e.Extra == "password") box.PasswordChar = '*';
+        box.TextChanged += delegate { Changed(e, box.Text, true); };
+        p.Controls.Add(box);
+        return y + S(32);
+    }
+
     // A button that sends its command to the phone app (e.g. "open storage").
     int AddAction(Panel p, Entry e, int y, int w)
     {
         var b = new Button { Text = e.Label, Left = S(6), Top = y + S(4), Width = w, Height = S(30) };
         string command = e.Value;
-        // "local:storage" opens the Storage Card page here; anything else goes to the phone app.
-        b.Click += delegate
-        {
-            if (command == "local:storage") { using (var f = new StorageForm()) f.ShowDialog(); }
-            else Helper.Send(command);
-        };
+        // "local:storage" opens the Storage Card page here. "widget ..." installs that Today item.
+        // Anything else goes to the phone app.
+        b.Click += delegate { RunAction(command); };
         p.Controls.Add(b);
         return y + S(40);
+    }
+
+    // A settings button. Storage and Today widgets are handled here; other commands go to the phone.
+    void RunAction(string command)
+    {
+        if (command == "local:storage") { using (var f = new StorageForm()) f.ShowDialog(); return; }
+        if (command.StartsWith("widget "))
+        {
+            string result = Helper.InstallWidget(command.Substring(7));
+            string text;
+            if (result.StartsWith("installed "))
+                text = result.Substring(10) + " is on the Today screen. Settings > Today can turn it off.";
+            else if (result.StartsWith("same "))
+                text = result.Substring(5) + " is already installed. A newer copy is put in place with the helper.";
+            else text = "That widget is not available.";
+            MessageBox.Show(text, "PocketStylus");
+            return;
+        }
+        Helper.Send(command);
     }
 
     // Live settings go to the phone at once (sliders once they stop moving); restart ones wait for Done.
@@ -336,6 +407,11 @@ class SettingsForm : Form
             return;
         }
         Helper.Send("set " + e.Key + "=" + value);
+        if (e.Key == "bgkind")
+        {
+            if (Edition.Smartphone) { if (currentPage != null) ShowPage(currentPage); }
+            else ApplyRunRows(value == "run");
+        }
     }
 
     void Finish()

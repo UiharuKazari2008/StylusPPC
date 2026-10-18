@@ -12,7 +12,7 @@ CXX="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/${ARCH}-linux-android29-cl
 cd "$HERE"
 OUT="build-cli/$ARCH"
 mkdir -p "$OUT"
-SRCS="core/src/arm/cpu.cpp core/src/arm/disasm.cpp core/src/arm/jit.cpp core/src/board/bus.cpp core/src/board/s3c2410.cpp core/src/board/devices.cpp core/src/board/de_devices.cpp core/src/board/nled.cpp core/src/board/modem.cpp core/src/board/irda.cpp core/src/board/audio.cpp core/src/board/folder_share.cpp core/src/board/pcmcia.cpp core/src/board/camera.cpp core/src/board/codepatch.cpp core/src/board/motion.cpp core/src/net/usernet.cpp core/src/net/tlsproxy.cpp core/src/net/mwsgate.cpp core/src/board/snapshot.cpp core/src/board/machine.cpp core/src/util/log.cpp core/cli/main.cpp core/cli/irda_link.cpp core/cli/mws_test.cpp"
+SRCS="core/src/arm/cpu.cpp core/src/arm/disasm.cpp core/src/arm/jit.cpp core/src/board/bus.cpp core/src/board/s3c2410.cpp core/src/board/devices.cpp core/src/board/de_devices.cpp core/src/board/nled.cpp core/src/board/modem.cpp core/src/board/irda.cpp core/src/board/audio.cpp core/src/board/folder_share.cpp core/src/board/pcmcia.cpp core/src/board/camera.cpp core/src/board/codepatch.cpp core/src/board/motion.cpp core/src/net/usernet.cpp core/src/net/tlsproxy.cpp core/src/net/mwsgate.cpp core/src/board/snapshot.cpp core/src/board/machine.cpp core/src/util/log.cpp core/cli/main.cpp core/cli/irda_link.cpp core/cli/mws_test.cpp core/cli/thumb_test.cpp"
 # BoringSSL for the secure web proxy (tools/build-boringssl.sh); compiled out when missing for this ABI
 case "$ARCH" in aarch64) ABI=arm64-v8a ;; *) ABI=$ARCH ;; esac
 BSSL=third_party/boringssl

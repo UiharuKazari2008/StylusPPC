@@ -10,8 +10,8 @@
 //   +0x04 OPEN    w   the driver's open-handle count (a hint: the host sensor starts at once)
 //   +0x08 SEQ     r   samples received from the host so far
 //   +0x0C X       r   gravity in HTC's units and frame (1000 = 1 g; the panel held portrait:
-//   +0x10 Y       r     x to the right, y to the top, z out of the screen; gravity points down,
-//   +0x14 Z       r     so a phone lying face up reads 0, 0, -1000)
+//   +0x10 Y       r     x to the right, y toward the bottom, z out of the screen; a phone lying
+//   +0x14 Z       r     face up reads 0, 0, -1000; left edge down gives x < 0, top edge down y < 0)
 //   +0x18 FLAGS   r   bit 0: a host sensor feeds the values (else they stay at face up)
 //   +0x1C IOCTL   w   an IOCTL code the driver doesn't know (logged once per code, for research)
 //

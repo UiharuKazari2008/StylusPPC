@@ -46,6 +46,19 @@ class InfraWanTransport(private val ir: InfraredSettings, private val listener: 
     private val outbox = LinkedBlockingQueue<ByteArray>(512)
     private val rng = SecureRandom()
     private val peers = HashMap<Int, String>()
+    @Volatile private var up = false
+    @Volatile private var statusText = "Connecting…"
+
+    fun isUp() = up
+    fun statusText() = statusText
+
+    /** Other devices in the room, in a stable order. The same display name twice keeps its id. */
+    fun peerNames(): List<String> {
+        val list = synchronized(peers) { peers.entries.map { it.value to it.key }.sortedBy { it.second } }
+        val counts = HashMap<String, Int>()
+        for ((name, _) in list) counts[name] = (counts[name] ?: 0) + 1
+        return list.map { (name, id) -> if ((counts[name] ?: 0) > 1) "$name (#$id)" else name }
+    }
 
     override fun start() {
         if (running) return
@@ -70,12 +83,12 @@ class InfraWanTransport(private val ir: InfraredSettings, private val listener: 
             val err = runCatching { session() }.exceptionOrNull()
             lastError = err?.message
             if (!running) break
-            listener.onState(false, "InfraWAN: " + (err?.message ?: "disconnected") + "; retrying")
+            report(false, "InfraWAN: " + (err?.message ?: "disconnected") + "; retrying")
             Log.i(TAG, "session ended: ${err?.message}")
             try { Thread.sleep(backoff) } catch (e: InterruptedException) { break }
             backoff = (backoff * 2).coerceAtMost(30000)
         }
-        listener.onState(false, "InfraWAN: " + (lastError ?: "off"))
+        report(false, "InfraWAN: " + (lastError ?: "off"))
     }
 
     @Volatile private var lastError: String? = null
@@ -148,9 +161,15 @@ class InfraWanTransport(private val ir: InfraredSettings, private val listener: 
         }
     }
 
+    private fun report(isUp: Boolean, text: String) {
+        up = isUp
+        statusText = text
+        listener.onState(isUp, text)
+    }
+
     private fun announce() {
         val names = synchronized(peers) { peers.values.toList() }
-        listener.onState(true, "InfraWAN: room ${ir.room}, " + when (names.size) {
+        report(true, "InfraWAN: room ${ir.room}, " + when (names.size) {
             0 -> "nobody else here yet"
             1 -> "with ${names[0]}"
             else -> "${names.size} others (${names.take(3).joinToString(", ")}${if (names.size > 3) ", …" else ""})"

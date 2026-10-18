@@ -29,6 +29,7 @@ add_library(wmcore STATIC
   src/net/tlsproxy.cpp  # secure web proxy (HTTPS for WM's old TLS), BoringSSL below
   src/net/mwsgate.cpp  # Windows Live Mobile gateway for the built-in WM 6.x client (MSNP to Escargot)
   src/board/snapshot.cpp
+  src/htc/romkit.cpp  # apps from the user's HTC ROM (NBH/IMGFS reader, package staging)
   src/board/machine.cpp
   src/util/log.cpp
 )
@@ -47,6 +48,8 @@ if(ANDROID AND EXISTS ${BSSL_DIR}/lib/${ANDROID_ABI}/libssl.a)
 endif()
 
 if(WMCORE_CLI)
-  add_executable(wmcore-cli cli/main.cpp cli/irda_link.cpp cli/mws_test.cpp)
+  add_executable(wmcore-cli cli/main.cpp cli/irda_link.cpp cli/mws_test.cpp cli/thumb_test.cpp)
   target_link_libraries(wmcore-cli wmcore)
+  add_executable(htcrom cli/htcrom.cpp)
+  target_link_libraries(htcrom wmcore)
 endif()

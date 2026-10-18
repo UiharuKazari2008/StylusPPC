@@ -18,12 +18,9 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 
 /**
- * Windows Mobile's screen as a floating card over other apps while a call rings and PocketStylus
- * is in the background: the emulator draws into the card's surface (NativeBridge.setSurface), and
- * taps go to Windows Mobile, so its own incoming-call screen (Answer / Ignore) is the UI. When the
- * call is answered the card goes and the full emulator comes to the front (CallBridge).
- * Needs "Display over other apps" (Settings.canDrawOverlays); without it the phone's dialer keeps
- * the call as before.
+ * A floating card of Windows Mobile's screen. Incoming calls no longer use it: they open the
+ * emulator activity (CallBridge). The card is only removed if one was still up.
+ * [enabled] is "Ring Windows Mobile while PocketStylus is in the background".
  */
 class CallOverlay(private val ctx: Context) {
     private var root: FrameLayout? = null
@@ -104,7 +101,7 @@ class CallOverlay(private val ctx: Context) {
         private const val TAG = "WMDroidCall"
 
         /** "Ring Windows Mobile while PocketStylus is in the background" (Settings > Phone calls). */
-        fun enabled(ctx: Context) = Settings.global(ctx).getBoolean("calls.background", true) && AndroidSettings.canDrawOverlays(ctx)
+        fun enabled(ctx: Context) = Settings.global(ctx).getBoolean("calls.background", true)
         fun setEnabled(ctx: Context, on: Boolean) = Settings.global(ctx).edit().putBoolean("calls.background", on).apply()
     }
 }

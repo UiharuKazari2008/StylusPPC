@@ -12,8 +12,8 @@
  *               out size of 0, so the size is not checked
  *   0x02000001  read the light sensor
  *   0x02000000|n, 0x01000000|n  other light/tilt requests: accepted, out buffer zeroed
- * Gravity comes from the PocketStylus motion device (core/src/board/motion.h): x right, y up,
- * z out of the screen, 1000 = 1 g, face up = 0, 0, -1000. On a board without it (Microsoft's
+ * Gravity comes from the PocketStylus motion device (core/src/board/motion.h) in HTC's frame:
+ * 1000 = 1 g, face up = 0, 0, -1000, left edge down x < 0, top edge down y < 0. On a board without it (Microsoft's
  * Device Emulator) the phone reads as lying face up.
  *
  * Built by tools/make-htcsensor.py (NDK clang, freestanding ARMv4T; the script makes the PE DLL

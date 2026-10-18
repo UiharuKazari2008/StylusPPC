@@ -101,6 +101,7 @@ struct Session {
     std::atomic<uint64_t> audioFrames{0};   // output frames since the last status read
     std::atomic<uint64_t> lastCaptureNs{0};
     std::atomic<uint64_t> lastPlayNs{0};
+    uint64_t ioUntilNs = 0;  // storage-card use lifts the background cap until this guest time
     // Hang detection: the battery driver's poll stopped while the CPU stays busy (a crashed guest
     // spinning in an exception loop; a sleeping or idle one is idle).
     uint64_t heartbeatReads = 0, heartbeatNs = 0;
@@ -163,8 +164,10 @@ struct Session {
                     }
                 }
                 inputs.erase(inputs.begin(), inputs.begin() + (long)i);
-                // COM1 is the radio once the guest's RIL talks to the virtual modem: no GPS bytes then.
-                if (!m->modem->claimed()) for (uint8_t b : serialIn) m->uart0.feed(b);
+                // COM1 is the radio once the guest's RIL talks to the virtual modem. GPS is COM4
+                // (UART1) on those images, and COM1 (UART0) otherwise.
+                Uart &gpsUart = m->modem->claimed() ? m->uart1 : m->uart0;
+                for (uint8_t b : serialIn) gpsUart.feed(b);
                 serialIn.clear();
                 if (powerPress) { m->gpio.powerButton(); powerPress = false; }
                 pumpNet();
@@ -183,6 +186,16 @@ struct Session {
             // Sound playing (music in the background): no step-down, or decoding starves and the
             // audio breaks up. Two seconds of grace bridges gaps between buffers and tracks.
             bool sounding = m->nowNs() - lastPlayNs.load(std::memory_order_relaxed) < 2000000000ull;
+            // The background share follows the work. Storage-card access (and a short tail after it)
+            // runs at full speed so a folder listing is not stretched out. A quiet guest drops below
+            // the floor. A guest that is busy with no such work keeps the floor, so a spin cannot
+            // drain the battery.
+            if (m->folderShare->takeOps()) ioUntilNs = m->nowNs() + 2000000000ull;
+            int smart = lim;
+            if (lim < 100 && !boosted && !sounding) {
+                if (m->nowNs() < ioUntilNs) smart = 100;
+                else if (busy < 1000000ull) smart = lim < 10 ? lim : 10;
+            }
             {
                 uint64_t now = m->nowNs();
                 bool quiet = !boosted && !sounding && busy < 1000000;  // < 1 ms of a 16 ms frame
@@ -197,10 +210,10 @@ struct Session {
                     setpriority(PRIO_PROCESS, (id_t)gettid(), raised ? -10 : 0);
                 }
             }
-            if (lim < 100 && busy > 0 && !boosted && !sounding) {
-                // Stretch busy time so the guest gets about `lim`% of a core in the background:
+            if (smart < 100 && busy > 0 && !boosted && !sounding) {
+                // Stretch busy time so the guest gets about `smart`% of a core in the background:
                 // music and timers keep running, a runaway guest app can't drain the battery.
-                uint64_t pauseNs = busy * (100 - lim) / lim;
+                uint64_t pauseNs = busy * (100 - smart) / (uint64_t)smart;
                 if (pauseNs > 200000000ull) pauseNs = 200000000ull;
                 std::this_thread::sleep_for(std::chrono::nanoseconds(pauseNs));
             }
@@ -332,8 +345,11 @@ JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_seri
     Session *s = S(h);
     if (!s) return false;
     // The serial driver turns RX interrupts on at boot; only opening the port unmasks them.
+    // 6.5: COM1 (UART0), and only while the modem has not claimed it. 6 / 6.1 / 6.1.4: COM4 (UART1).
     const IntController &ic = s->m->intc;
-    return s->m->uart0.rxEnabled() && !(ic.intsubmsk & 1u) && !(ic.intmsk & (1u << IRQ_UART0)) && !s->m->modem->claimed();
+    bool com1 = s->m->uart0.rxEnabled() && !(ic.intsubmsk & (1u << SUB_RXD0)) && !(ic.intmsk & (1u << IRQ_UART0));
+    bool com4 = s->m->uart1.rxEnabled() && !(ic.intsubmsk & (1u << SUB_RXD1)) && !(ic.intmsk & (1u << IRQ_UART1));
+    return s->m->modem->claimed() ? com4 : com1;
 }
 
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_serialWrite(JNIEnv *env, jobject, jlong h,
@@ -386,6 +402,16 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setSurfa
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setFilter(JNIEnv *, jobject, jlong h, jint f) {
     Session *s = S(h);
     if (s) s->gl.setFilter(f);
+}
+
+// Guest audio reached the speaker within the last ms. The emulation thread uses the same clock
+// (lastPlayNs, two seconds) to keep the CPU cap off between buffers.
+JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_playedWithin(JNIEnv *, jobject, jlong h,
+                                                                                          jint ms) {
+    Session *s = S(h);
+    if (!s || ms <= 0) return false;
+    uint64_t last = s->lastPlayNs.load(std::memory_order_relaxed);
+    return last && s->m->nowNs() - last < (uint64_t)ms * 1000000ull;
 }
 
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setAudioUsage(JNIEnv *, jobject, jlong h, jint u) {

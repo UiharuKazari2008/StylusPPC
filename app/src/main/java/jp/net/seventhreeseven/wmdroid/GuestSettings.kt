@@ -13,7 +13,7 @@ import java.io.File
  *   options (value=label;...) for a choice, min:max for a slider; an action's value is its command
  */
 object GuestSettings {
-    enum class Kind(val id: String) { BOOL("bool"), CHOICE("choice"), SLIDER("slider"), ACTION("action"), COLOR("color") }
+    enum class Kind(val id: String) { BOOL("bool"), CHOICE("choice"), SLIDER("slider"), ACTION("action"), COLOR("color"), TEXT("text") }
 
     class Entry(
         val page: String, val key: String, val kind: Kind, val label: String,
@@ -48,6 +48,14 @@ object GuestSettings {
     /** A button: the guest sends [command] (handled by the app like any mailbox message). */
     private fun action(page: String, key: String, label: String, command: String) =
         Entry(page, key, Kind.ACTION, label, { command }, { _, _ -> })
+
+    /** A line of text. Tabs and line breaks are spaces, so the catalogue line stays one row. */
+    private fun text(page: String, key: String, label: String, get: (Settings) -> String, set: (Settings, String) -> Unit,
+                     password: Boolean = false) =
+        Entry(page, key, Kind.TEXT, label, { plain(get(it)) }, { s, v -> set(s, plain(v)) },
+            options = if (password) listOf("password" to "1") else emptyList())
+
+    private fun plain(s: String) = s.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ')
 
     private val keyActions = Keymap.KeyAction.entries.map { it.id to it.label }
 
@@ -89,6 +97,8 @@ object GuestSettings {
             else -> if (minutes > 0) Settings.BG_SUSPEND_AFTER else Settings.BG_SUSPEND
         }
         if (minutes > 0) s.backgroundMinutes = minutes
+        // Unrestricted keeps the session, so hibernation stays on and the timer does not apply.
+        if (kind == "run") s.resumeSession = true
     }
 
     val entries: List<Entry> = listOf(
@@ -113,6 +123,10 @@ object GuestSettings {
         bool("Design", "theme", "Sync Android's Color Theme", { it.syncTheme }, { s, v -> s.syncTheme = v }),
         bool("Design", "homewall", "Sync Android's Wallpaper", { it.syncWallpaper }, { s, v -> s.syncWallpaper = v }),
         slider("Design", "keyopacity", "Key Opacity", 0, 100, { it.keyOpacity }, { s, v -> s.keyOpacity = v }),
+        slider("Design", "keyoutline", "Key Outline", 0, 100, { it.keyOutline }, { s, v -> s.keyOutline = v }),
+        slider("Design", "keyglyph", "Key Glyph", 0, 100, { it.keyGlyph }, { s, v -> s.keyGlyph = v }),
+        choice("Design", "keytheme", "Key Style", listOf("glass" to "Glass", "flat" to "Flat",
+            "bubbled" to "Bubbled", "metallic" to "Metallic"), { it.keyTheme }, { s, v -> s.keyTheme = v }),
         slider("Design", "keyblur", "Key Blur", 0, 25, { it.keyBlur }, { s, v -> s.keyBlur = v }),
         color("Design", "keycolor", "Key Color", { it.keyColor }, { s, v -> s.keyColor = v }),
         bool("Design", "shine", "Enable Gyro Key Shine", { it.keyShine }, { s, v -> s.keyShine = v }),
@@ -153,6 +167,7 @@ object GuestSettings {
             { s, v -> s.volumeUp = Keymap.KeyAction.of(v, s.volumeUp) }),
         choice("Hardware", "voldown", "Phone Volume Down Key", keyActions, { it.volumeDown.id },
             { s, v -> s.volumeDown = Keymap.KeyAction.of(v, s.volumeDown) }),
+        bool("Hardware", "lockclose", "Lock Button Closes App", { it.lockClosesApp }, { s, v -> s.lockClosesApp = v }),
         // Windows Mobile's Buttons 1-4 (the skin's keys send them; applied by buttonsCommand)
         hwButton(1, "button1", "Button 1 (Start key)"),
         hwButton(2, "button2", "Button 2 (App Launch 1)"),
@@ -169,7 +184,8 @@ object GuestSettings {
         bool("Power", "displayoff", "Lock Android on Screen Off", { it.mirrorDisplayOff }, { s, v -> s.mirrorDisplayOff = v }),
         bool("Power", "lockoff", "Lock Device when Android Screen's Off", { it.lockOnScreenOff }, { s, v -> s.lockOnScreenOff = v }),
         bool("Power", "lockleave", "Lock when Device closes", { it.lockOnLeave }, { s, v -> s.lockOnLeave = v }),
-        bool("Power", "resume", "Enable Hibernation", { it.resumeSession }, { s, v -> s.resumeSession = v }),
+        bool("Power", "resume", "Enable Hibernation", { it.resumeSession },
+            { s, v -> s.resumeSession = if (s.backgroundMode == Settings.BG_RUN) true else v }),
         choice("Power", "bgkind", "Run in Background", listOf("run" to "Unrestricted", "suspend" to "Suspend", "hibernate" to "Hibernate"),
             { bgKind(it) }, { s, v -> setBg(s, v, bgTimer(s)) }),
         choice("Power", "bgtimer", "After timer",
@@ -186,9 +202,11 @@ object GuestSettings {
         action("Launcher", "pinnedapps", "Pinned Shortcuts…", AndroidApps.CMD_PINS),
         // ---- Dock: Android apps on the skin (DeviceSkin dock, LauncherBridge) ----
         bool("Dock", "dockon", "Show Android App Dock", { it.dockOn }, { s, v -> s.dockOn = v }),
+        bool("Dock", "dockunfold", "Disable Dock in Unfolded Mode", { it.dockHideUnfolded }, { s, v -> s.dockHideUnfolded = v }),
         bool("Dock", "dockresize", "Resize Screen for Dock", { it.dockResizeScreen }, { s, v -> s.dockResizeScreen = v }, restart = true),
         choice("Dock", "dockpos", "Position", listOf(Settings.DOCK_AUTO to "Auto (free space on the skin)",
-            Settings.DOCK_TOP to "Top of Screen", Settings.DOCK_BOTTOM to "Bottom of Screen"),
+            Settings.DOCK_TOP to "Top of Screen", Settings.DOCK_BOTTOM to "Bottom of Screen",
+            Settings.DOCK_FLOOR to "Very Bottom"),
             { it.dockPlace }, { s, v -> s.dockPlace = v }),
         slider("Dock", "docksize", "Number of Apps", 4, 8, { it.dockSize }, { s, v -> s.dockSize = v }),
         action("Dock", "dockapps", "Dock Apps…", AndroidApps.CMD_DOCK),
@@ -201,12 +219,13 @@ object GuestSettings {
         bool("Phone", "calls", "Phone Calls in Windows Mobile", { CallBridge.enabled(it.context) },
             { s, v -> CallBridge.setEnabled(s.context, v) }),
         bool("Phone", "wmringer", "Use Phone's Ringer", { CallBridge.wmRinger(it.context) }, { s, v -> CallBridge.setWmRinger(s.context, v) }),
-        // (the stored choice: ringing in the background also needs "Display over other apps")
         bool("Phone", "callbg", "Ring Windows Mobile in the Background", { Settings.global(it.context).getBoolean("calls.background", true) },
             { s, v -> CallOverlay.setEnabled(s.context, v) }),
         bool("Phone", "sms", "Text Messages in Windows Mobile", { SmsBridge.enabled(it.context) }, { s, v -> SmsBridge.setEnabled(s.context, v) }),
         bool("Phone", "smsdefer", "Defer Incoming SMS Messages", { SmsBridge.defer(it.context) }, { s, v -> SmsBridge.setDefer(s.context, v) }),
-        action("Phone", "phonemore", "Phone Number, Call Screen…", CMD_CALLS),
+        action("Phone", "smsload", "Load Messages", CMD_SMS_LOAD),
+        text("Phone", "mynumber", "My Phone Number", { it.myNumber }, { s, v -> s.myNumber = v.trim() }),
+        action("Phone", "callrole", "Use Windows Mobile's Call Screen…", CMD_CALL_ROLE),
         // ---- Contacts & calendar sync (PimSync; shared by every OS) ----
         bool("Contacts", "pimcontacts", "Sync Contacts", { Settings.global(it.context).getBoolean("pim.contacts", false) },
             { s, v -> PimSync.setOn(s.context, PimSync.KIND_CONTACT, v) }),
@@ -221,10 +240,25 @@ object GuestSettings {
             { InfraredSettings(it.context).mode }, { s, v -> InfraredSettings(s.context).mode = v }),
         bool("Infrared", "irlisten", "Stay Reachable while PocketStylus is Open", { InfraredSettings(it.context).listen },
             { s, v -> InfraredSettings(s.context).listen = v }),
-        action("Infrared", "irmore", "InfraWAN Account, Test…", CMD_INFRARED),
+        text("Infrared", "irname", "This Phone's Name for Others", { InfraredSettings(it.context).name },
+            { s, v -> InfraredSettings(s.context).name = v.trim() }),
+        text("Infrared", "irserver", "InfraWAN Server", { InfraredSettings(it.context).server },
+            { s, v -> InfraredSettings(s.context).server = v.trim() }),
+        text("Infrared", "irroom", "InfraWAN Room", { InfraredSettings(it.context).room },
+            { s, v -> InfraredSettings(s.context).room = v.trim().ifEmpty { "lobby" } }),
+        text("Infrared", "iruser", "InfraWAN User", { InfraredSettings(it.context).user },
+            { s, v -> InfraredSettings(s.context).user = v.trim() }),
+        text("Infrared", "irtoken", "InfraWAN Token", { InfraredSettings(it.context).token },
+            { s, v -> InfraredSettings(s.context).token = v.trim() }, password = true),
+        action("Infrared", "irble", "Allow Nearby Devices", CMD_IR_BLE),
+        action("Infrared", "irtest", "Test InfraWAN Connection", CMD_IR_TEST),
+        // Today items are not installed with the helper. Each button installs that one package.
+        // A later helper update replaces a widget that is already in \Windows.
+        action("Today", "widgetweather", "Install Weather", "widget weather"),
+        action("Today", "widgetinfra", "Install InfraWAN", "widget infrawan"),
         // ---- Device (applies on restart) ----
         choice("Device", "res", "Screen resolution", listOf(Settings.SCREEN_AUTO to "Phone shape (auto)",
-            "480x854" to "480×854 (FWVGA)", "480x800" to "480×800 (WVGA)", "480x640" to "480×640 (VGA)",
+            "480x854" to "480×854 (FWVGA)", "480x800" to "480×800 (WVGA; HTC games)", "480x640" to "480×640 (VGA)",
             "480x480" to "480×480 (square)"), { it.screenRes }, { s, v -> s.screenRes = v }, restart = true),
         // Sizes per release (entriesFor, OsProfile.memSizes); 256 MB is the board's ceiling.
         choice("Device", "ram", "Memory", memOptions(null), { it.memMB.toString() }, { s, v -> s.memMB = v.toInt() }, restart = true),
@@ -245,13 +279,13 @@ object GuestSettings {
      */
     fun entriesFor(settings: Settings): List<Entry> {
         val profile = settings.profile
-        if (profile == null) return entries
+        if (profile == null) return liveEntries(settings, entries)
         val ram = memOptions(profile)
         val ramEntry: (Entry) -> Entry = { e ->
             choice(e.page, e.key, e.label, ram, { s -> s.memMB.toString().takeIf { v -> ram.any { it.first == v } } ?: "0" },
                 { s, v -> s.memMB = v.toInt() }, restart = true)
         }
-        if (profile.touch) return entries.map { if (it.key == "ram") ramEntry(it) else it }
+        if (profile.touch) return liveEntries(settings, entries.map { if (it.key == "ram") ramEntry(it) else it })
         val res = listOf(Settings.SCREEN_AUTO to "Phone shape (auto)") + profile.screens.map { it.id to it.label }
         return entries.filter { it.key !in TOUCH_ONLY }.map { e ->
             when (e.key) {
@@ -264,7 +298,29 @@ object GuestSettings {
                     { if (it.keysOn) "full" else "none" }, { s, v -> s.keysOn = v != "none" })
                 else -> e
             }
-        }
+        }.let { liveEntries(settings, it) }
+    }
+
+    /** Call audio's choices are the outputs connected right now (CallAudio). */
+    private fun liveEntries(settings: Settings, list: List<Entry>): List<Entry> {
+        if (settings.backgroundMode == Settings.BG_RUN && !settings.resumeSession) settings.resumeSession = true
+        val outs = CallAudio.outputs(settings.context).map { it.id to it.name.replace(';', ',').replace('=', '-') }
+            .ifEmpty { listOf(CallAudio.EARPIECE to "Earpiece") }
+        val audio = choice("Phone", "callaudio", "Call Audio", outs,
+            { CallAudio.saved(it.context)?.takeIf { id -> outs.any { o -> o.first == id } } ?: outs.first().first },
+            { s, v -> CallAudio.select(s.context, v) })
+        val at = list.indexOfFirst { it.key == "wmringer" }
+        val withAudio = if (at < 0) list else list.toMutableList().apply { add(at + 1, audio) }
+        if (batteryExempt(settings.context)) return withAudio
+        val power = withAudio.indexOfFirst { it.page == "Power" }
+        val row = action("Power", "batteryopt", "Disable Battery Optimization", CMD_BATTERY)
+        return withAudio.toMutableList().apply { add(if (power < 0) size else power, row) }
+    }
+
+    /** Android is not allowed to defer this app. The Power page shows a button until this is true. */
+    fun batteryExempt(ctx: android.content.Context): Boolean {
+        val pm = ctx.getSystemService(android.os.PowerManager::class.java) ?: return true
+        return pm.isIgnoringBatteryOptimizations(ctx.packageName)
     }
 
     /** Memory choices: the release's default and the sizes it runs with (OsProfile.memSizes). */
@@ -279,17 +335,25 @@ object GuestSettings {
     // Buttons whose screens are Android's (role requests, permissions, text entry, a connection
     // test): the guest sends the command, EmulatorActivity / DeviceSettingsActivity open the screen.
     const val CMD_CALLS = "open calls"
+    const val CMD_CALL_ROLE = "open callrole"
     const val CMD_PIM = "open pim"
     const val CMD_INFRARED = "open infrared"
+    const val CMD_IR_TEST = "open irtest"
+    const val CMD_IR_BLE = "open irble"
     const val CMD_PIM_SYNC = "open pimsync"
+    const val CMD_SMS_LOAD = "open smsload"
+    const val CMD_BATTERY = "open battery"
     /** The commands of such buttons (GuestBridge routes them to onGuestLauncher). */
-    val ANDROID_COMMANDS = setOf(CMD_CALLS, CMD_PIM, CMD_INFRARED, CMD_PIM_SYNC)
+    val ANDROID_COMMANDS = setOf(CMD_CALLS, CMD_CALL_ROLE, CMD_PIM, CMD_INFRARED, CMD_IR_TEST, CMD_IR_BLE,
+        CMD_PIM_SYNC, CMD_SMS_LOAD, CMD_BATTERY)
 
     /** The Android screen an action's [command] opens, or null if it opens none. */
     fun screenFor(ctx: android.content.Context, command: String): android.content.Intent? = when (command) {
         CMD_CALLS -> android.content.Intent(ctx, CallSettingsActivity::class.java)
         CMD_PIM -> android.content.Intent(ctx, PimSettingsActivity::class.java)
         CMD_INFRARED -> android.content.Intent(ctx, InfraredSettingsActivity::class.java)
+        CMD_BATTERY -> android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(android.net.Uri.parse("package:" + ctx.packageName))
         else -> AndroidAppsActivity.intentFor(ctx, command)
     }
 
@@ -303,6 +367,7 @@ object GuestSettings {
                     Kind.COLOR -> (e.options + if (e.options.none { it.first.equals(value, true) }) listOf(value to "Custom $value") else emptyList())
                         .joinToString(";") { "${it.first}=${it.second}" }
                     Kind.SLIDER -> "${e.min}:${e.max}"
+                    Kind.TEXT -> if (e.options.any { it.first == "password" }) "password" else ""
                     Kind.BOOL, Kind.ACTION -> ""
                 }
                 // The guest app knows bool/choice/slider/action: a colour goes as a choice.

@@ -455,7 +455,9 @@ uint64_t Cpu::run(uint64_t count) {
             else break;
         }
         if ((irqLine && !fI) || (fiqLine && !fF)) checkInterrupts();
-        if (jitEnabled && !fT && !traceHook && !prefetchLeft) {
+        // ARM and Thumb both stay in the JIT. A mode switch comes back here so the next
+        // block is compiled for the mode the previous one actually landed in.
+        if (jitEnabled && !traceHook && !prefetchLeft) {
             uint32_t reason, executed;
             if (jitRun(jit, count - done, reason, executed)) {
                 done += executed;

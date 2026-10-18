@@ -48,3 +48,6 @@ third_party/wm6sdk/
 
 ### Prebuilt BoringSSL libraries (rebuild with tools/build-boringssl.sh; headers and licence are kept)
 third_party/boringssl/lib/
+
+# User-supplied HTC ROMs and their extracted files (copyrighted; docs/research-hd2-port.md)
+guest/HTC_HD2_WM65/

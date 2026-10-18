@@ -82,6 +82,9 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
 
     private var delivering = false
 
+    /** True while a batch is being filed into Windows Mobile. The card must stay in for that. */
+    fun isFiling() = delivering
+
     /** New messages are queued: deliver now if WM can take them, else wake it or notify. */
     fun onQueued() {
         if (foreground) { deliverPending(); return }
@@ -106,23 +109,27 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
             }
             guest.send("sms pictures")
         }
-        if (NativeBridge.modemActive(h)) {
-            for (m in q) {
-                SmsPdu.deliver(m.from, m.text, m.time, (m.id and 0xFF).toInt()).forEach { NativeBridge.modemSms(h, it) }
-                Log.i(TAG, "delivered message ${m.id} to Windows Mobile (modem)")
-            }
-            removeFromQueue(ctx, q.map { it.id }.toSet())
-        } else {
-            // WM 6.5.3: the helper files them into WM's inbox and answers "sms delivered <ids>".
+        // A live unread text on a modem image still arrives as +CMT. Everything already on the phone
+        // (read, or sent) is filed into the inbox or Sent Items, so a history import does not ring once per message.
+        val emit = if (NativeBridge.modemActive(h)) q.filter { it.box != "out" && !it.read && it.files.isEmpty() } else emptyList()
+        val file = q.filter { m -> emit.none { it.id == m.id } }.take(8)
+        for (m in emit) {
+            SmsPdu.deliver(m.from, m.text, m.time, (m.id and 0xFF).toInt()).forEach { NativeBridge.modemSms(h, it) }
+            Log.i(TAG, "delivered message ${m.id} to Windows Mobile (modem)")
+        }
+        if (emit.isNotEmpty()) removeFromQueue(ctx, emit.map { it.id }.toSet())
+        if (file.isNotEmpty()) {
             val sb = StringBuilder()
-            for (m in q) {
+            for (m in file) {
                 sb.append("#sms\nid=").append(m.id).append("\nfrom=").append(PimSync.escape(m.from))
-                    .append("\ntime=").append(m.time).append("\ntext=").append(PimSync.escape(m.text)).append('\n')
+                    .append("\ntime=").append(m.time).append("\ntext=").append(PimSync.escape(m.text))
+                    .append("\nbox=").append(if (m.box == "out") "out" else "in")
+                    .append("\nread=").append(if (m.read) "1" else "0").append('\n')
             }
             guest.boxFile("sms-in.txt").writeText(sb.toString())
             delivering = true
             guest.send("sms deliver")
-            ui.postDelayed({ delivering = false }, 30_000)
+            ui.postDelayed({ delivering = false }, if (file.size > 40) 5 * 60_000L else 30_000L)
         }
     }
 
@@ -133,6 +140,7 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
             "delivered" -> {
                 delivering = false
                 removeFromQueue(ctx, p.drop(1).mapNotNull { it.toLongOrNull() }.toSet())
+                if (queue(ctx).isNotEmpty()) deliverPending()
             }
             "sent" -> {
                 // WM 6.5.3: a message from WM's Outbox, in sms-out-<n>.txt ("to=", "text=").
@@ -210,7 +218,8 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
     // ---- Queue, settings and notifications ----
 
     /** A queued message; files: an MMS's pictures, video and sound (paths in the app's storage). */
-    class Msg(val id: Long, val from: String, val text: String, val time: Long, val files: List<String> = emptyList())
+    class Msg(val id: Long, val from: String, val text: String, val time: Long, val files: List<String> = emptyList(),
+        val box: String = "in", val read: Boolean = false)
 
     companion object {
         private const val TAG = "WMDroidSms"
@@ -243,14 +252,15 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
             return (0 until a.length()).map { a.getJSONObject(it) }.map { o ->
                 val f = o.optJSONArray("files")
                 Msg(o.getLong("id"), o.getString("from"), o.getString("text"), o.getLong("time"),
-                    if (f == null) emptyList() else (0 until f.length()).map { f.getString(it) })
+                    if (f == null) emptyList() else (0 until f.length()).map { f.getString(it) },
+                    o.optString("box", "in"), o.optBoolean("read", false))
             }
         }
 
         @Synchronized private fun write(ctx: Context, list: List<Msg>) {
             val a = JSONArray()
             for (m in list) a.put(JSONObject().put("id", m.id).put("from", m.from).put("text", m.text).put("time", m.time)
-                .put("files", JSONArray(m.files)))
+                .put("files", JSONArray(m.files)).put("box", m.box).put("read", m.read))
             val f = queueFile(ctx)
             val tmp = File(f.path + ".tmp")
             tmp.writeText(a.toString())
@@ -270,8 +280,49 @@ class SmsBridge(private val ctx: Context, private val guest: GuestBridge, privat
         }
 
         /**
+         * Copies this phone's existing texts into the queue, once per Windows image.
+         * Settings' Load Messages is what calls this. Inbox and sent, oldest first, marked read
+         * so Windows Mobile does not notify for each one. A short note for the user, or "permission".
+         */
+        fun loadHistory(ctx: Context): String {
+            if (!enabled(ctx)) return "Turn on text messages in Windows Mobile first"
+            if (ctx.checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return "permission"
+            if (Settings.prefs(ctx).getBoolean("sms.historyImported", false)) return "Those messages are already in Windows Mobile"
+            val n = importHistory(ctx)
+            if (n > 0) live?.onQueued()
+            return if (n > 0) "Loading $n messages into Windows Mobile" else "No messages on this phone"
+        }
+
+        /** The phone's existing texts. [loadHistory] is the only caller. */
+        @Synchronized fun importHistory(ctx: Context): Int {
+            if (!enabled(ctx) || ctx.checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return 0
+            val prefs = Settings.prefs(ctx)
+            if (prefs.getBoolean("sms.historyImported", false)) return 0
+            val added = ArrayList<Msg>()
+            val ok = runCatching {
+                ctx.contentResolver.query(Telephony.Sms.CONTENT_URI,
+                    arrayOf(Telephony.Sms._ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE),
+                    null, null, "${Telephony.Sms.DATE} ASC")?.use { c ->
+                    while (c.moveToNext()) {
+                        val type = c.getInt(4)
+                        if (type != Telephony.Sms.MESSAGE_TYPE_INBOX && type != Telephony.Sms.MESSAGE_TYPE_SENT) continue
+                        added += Msg(c.getLong(0), c.getString(1).orEmpty(), c.getString(2).orEmpty(), c.getLong(3),
+                            emptyList(), if (type == Telephony.Sms.MESSAGE_TYPE_SENT) "out" else "in", read = true)
+                    }
+                }
+            }.onFailure { Log.w(TAG, "reading existing messages failed", it) }.isSuccess
+            if (!ok) return 0
+            val have = queue(ctx).map { it.id }.toSet()
+            val q = queue(ctx).toMutableList()
+            for (m in added) if (m.id !in have) q += m
+            write(ctx, q)
+            prefs.edit().putBoolean("sms.historyImported", true).apply()
+            return added.count { it.id !in have }
+        }
+
+        /**
          * New MMS in the phone's inbox since the last look (the first look only remembers where it is,
-         * so turning texts on does not import old messages). Returns how many were queued.
+         * so turning texts on does not import old picture messages). Returns how many were queued.
          */
         @Synchronized fun scanMms(ctx: Context): Int {
             if (ctx.checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return 0

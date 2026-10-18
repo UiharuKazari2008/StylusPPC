@@ -15,15 +15,17 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * The phone's GPS as an NMEA receiver on the guest's COM1, where Windows Mobile's GPS
- * Intermediate Driver reads it. Location is only requested while the guest has the port open.
- * Sentences are built from Android's fix and satellite status ($GP talker, GGA/GSA/GSV/RMC once a
- * second), since GPSID only understands GPS-talker sentences.
+ * The phone's GPS as an NMEA receiver. Windows Mobile 6.5 reads it on COM1. On 6 / 6.1 / 6.1.4
+ * COM1 is the radio, so the same sentences go to COM4 (UART1), which GPS programs open directly.
+ * The radio is switched on only for a short while after the port opens. After that, sentences
+ * keep going out from the last fix, so a port GPSID leaves open does not hold location on.
+ * Sentences are $GP GGA/GSA/GSV/RMC once a second; GPSID only understands the GPS talker.
  */
 class GpsBridge(private val ctx: Context, private val handle: () -> Long) {
     private val lm = ctx.getSystemService(LocationManager::class.java)
     private val ui = Handler(Looper.getMainLooper())
     private var running = false
+    private var listening = false
     private var fix: Location? = null
     private var sats: List<Sat> = emptyList()
 
@@ -33,58 +35,99 @@ class GpsBridge(private val ctx: Context, private val handle: () -> Long) {
 
     private val listener = LocationListener { fix = it }
 
+    private var loggedSats = -1
+
     private val gnss = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(s: GnssStatus) {
-            val list = ArrayList<Sat>()
+            // GPS keeps its PRN. Everything else is packed into 33-99: GPSID only accepts those,
+            // and dropping Galileo / BeiDou left the sky view empty on phones that barely use GPS.
+            class Raw(val elev: Int, val azim: Int, val snr: Int, val used: Boolean, val gps: Int)
+            val raw = ArrayList<Raw>()
             for (i in 0 until s.satelliteCount) {
-                // GPS keeps its PRN; other systems go to 33-99 so old parsers accept them.
-                val prn = when (s.getConstellationType(i)) {
-                    GnssStatus.CONSTELLATION_GPS -> s.getSvid(i)
-                    GnssStatus.CONSTELLATION_SBAS -> s.getSvid(i).let { if (it in 33..64) it else 0 }
-                    GnssStatus.CONSTELLATION_GLONASS -> 64 + s.getSvid(i).coerceIn(1, 24)
-                    else -> 0
-                }
-                if (prn !in 1..99) continue
-                list += Sat(prn, s.getElevationDegrees(i).toInt(), s.getAzimuthDegrees(i).toInt(),
-                    s.getCn0DbHz(i).toInt().coerceIn(0, 99), s.usedInFix(i))
+                val id = s.getSvid(i)
+                val gps = if (s.getConstellationType(i) == GnssStatus.CONSTELLATION_GPS && id in 1..32) id else 0
+                raw += Raw(s.getElevationDegrees(i).toInt(), s.getAzimuthDegrees(i).toInt(),
+                    s.getCn0DbHz(i).toInt().coerceIn(0, 99), s.usedInFix(i), gps)
             }
-            sats = list.sortedByDescending { it.snr }.take(16)
+            raw.sortByDescending { it.snr }
+            val list = ArrayList<Sat>()
+            var next = 33
+            for (r in raw) {
+                val prn = if (r.gps != 0) r.gps else if (next <= 99) next++ else continue
+                if (prn !in 1..99) continue
+                list += Sat(prn, r.elev, r.azim, r.snr, r.used)
+                if (list.size == 16) break
+            }
+            if (list.size != loggedSats) {
+                loggedSats = list.size
+                android.util.Log.i("WMDroid", "gps: ${list.size} satellites in view")
+            }
+            sats = list
         }
     }
 
     private val tick = object : Runnable {
         override fun run() {
             val h = handle()
-            if (running && h != 0L) NativeBridge.serialWrite(h, sentences().toByteArray(Charsets.US_ASCII))
+            if (h != 0L) NativeBridge.serialWrite(h, sentences().toByteArray(Charsets.US_ASCII))
             if (running) ui.postDelayed(this, 1000)
         }
     }
 
-    /** Starts or stops the receiver to follow whether the guest has the port open. */
+    /** Starts or stops the receiver to follow whether Windows Mobile has the GPS port open. */
     fun setActive(on: Boolean) {
         if (on == running) return
         android.util.Log.i("WMDroid", "gps: guest port ${if (on) "opened" else "closed"}")
         if (on) {
             if (!hasPermission()) return
             running = true
-            runCatching {
-                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, listener, Looper.getMainLooper())
-                lm.registerGnssStatusCallback(gnss, ui)
-            }
-            fix = runCatching { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()
+            fix = lastKnown()
             ui.post(tick)
+            // One short listen when something opens the port, then the radio goes off.
+            acquire()
         } else {
             running = false
             ui.removeCallbacks(tick)
-            runCatching { lm.removeUpdates(listener) }
-            runCatching { lm.unregisterGnssStatusCallback(gnss) }
+            ui.removeCallbacks(stopListen)
+            stopListening()
             fix = null
             sats = emptyList()
+            loggedSats = -1
         }
     }
 
+    /** Newest fix any provider already has. Does not turn the radio on. */
+    private fun lastKnown(): Location? {
+        val providers = buildList {
+            add(LocationManager.GPS_PROVIDER)
+            add(LocationManager.NETWORK_PROVIDER)
+            if (Build.VERSION.SDK_INT >= 31) add(LocationManager.FUSED_PROVIDER)
+        }
+        return providers.mapNotNull { p -> runCatching { lm.getLastKnownLocation(p) }.getOrNull() }.maxByOrNull { it.time }
+    }
+
+    private fun acquire() {
+        if (listening || !hasPermission()) return
+        if (!runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) return
+        listening = true
+        runCatching { lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, listener, Looper.getMainLooper()) }
+            .onFailure { android.util.Log.w("WMDroid", "gps: updates refused", it); listening = false; return }
+        runCatching { lm.registerGnssStatusCallback(gnss, ui) }
+            .onFailure { android.util.Log.w("WMDroid", "gps: satellite status refused", it) }
+        ui.postDelayed(stopListen, 20_000L)
+    }
+
+    private val stopListen = Runnable { stopListening() }
+
+    private fun stopListening() {
+        if (!listening) return
+        listening = false
+        runCatching { lm.removeUpdates(listener) }
+        runCatching { lm.unregisterGnssStatusCallback(gnss) }
+    }
+
     private fun sentences(): String {
-        val f = fix?.takeIf { System.currentTimeMillis() - it.time < 10_000 }
+        val f = fix?.takeIf { System.currentTimeMillis() - it.time < 30 * 60_000 }
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = f?.time ?: System.currentTimeMillis() }
         val time = String.format(Locale.US, "%02d%02d%02d.%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE),
             cal.get(Calendar.SECOND), cal.get(Calendar.MILLISECOND) / 10)

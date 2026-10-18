@@ -4,18 +4,24 @@ import android.content.Context
 import org.json.JSONObject
 
 /**
- * A skin as made in tools/skin-designer.html: up to four layouts (the cover screen, the cover
- * screen with the D-pad on, the open foldable, and the open foldable with the phone's own
- * keyboard), each a list of items placed in fractions of
- * the window, so one skin fits any phone of that shape.
+ * A skin as made in tools/skin-designer.html: the cover screen, the cover screen with the D-pad
+ * on, the open foldable, the open foldable with the phone's own keyboard, Foldable Max (the
+ * screen fills the open phone), Foldable Max with that keyboard, and the Standard keypad. Each
+ * layout is a list of items placed in fractions of the window, so one skin fits any phone of
+ * that shape.
  *
  * The "standard" layout is the keypad phone for Windows Mobile Standard (no touch screen): soft
  * keys, Home, Back, Talk / End, the D-pad with its action button and the number pad.
  *
+ * A "dock" item is the rectangle the Android app dock is drawn in. Layouts without one keep the
+ * automatic placement.
+ *
  * JSON: {"version":1, "backdrop":"silver", "opacity":40,
- *        "front"|"frontDpad"|"inside" (or "foldable")|"insideIme" (or "foldableIme")|"standard":
+ *        "front"|"frontDpad"|"inside" (or "foldable")|"insideIme" (or "foldableIme")|
+ *        "insideMax" (or "foldableMax")|"insideMaxIme" (or "foldableMaxIme")|"standard":
  *            {"canvas":{"w","h"}, "crease":50,
- *            "items":[{"id","type":"screen|key|dpad|lock|keyboard","action","label","x","y","w","h"}]}}
+ *            "items":[{"id","type":"screen|key|dpad|lock|keyboard|led|rect|image|dock","action","label",
+ *                      "x","y","w","h","radius","color","image"}]}}
  */
 class SkinSpec(
     val backdrop: String?,
@@ -27,12 +33,22 @@ class SkinSpec(
     val foldableIme: Layout?,
     /** Windows Mobile Standard's keypad phone (a skin without one gets the built-in skin's). */
     val standard: Layout? = null,
+    /** Open foldable, maximized: the screen takes most of the window. The hinge is not drawn. */
+    val foldableMax: Layout? = null,
+    /** Maximized, with the phone's own keyboard: the screen fills the area above that keyboard. */
+    val foldableMaxIme: Layout? = null,
 ) {
     class Layout(val items: List<Item>)
 
     class Item(
         val id: String, val type: String, val action: String?, val label: String?,
         val x: Float, val y: Float, val w: Float, val h: Float,
+        /** Corner radius as a fraction of the item's shorter side, 0..0.5. */
+        val radius: Float = 0f,
+        /** Fill for a rect, #RRGGBB or #AARRGGBB. */
+        val color: Int = 0xFF8A9098.toInt(),
+        /** A logo, as a data URL or raw base64. */
+        val image: String? = null,
     )
 
     companion object {
@@ -49,6 +65,9 @@ class SkinSpec(
                         it.optString("action").ifEmpty { null }, it.optString("label").ifEmpty { null },
                         it.optDouble("x", 0.0).toFloat(), it.optDouble("y", 0.0).toFloat(),
                         it.optDouble("w", 0.0).toFloat(), it.optDouble("h", 0.0).toFloat(),
+                        it.optDouble("radius", 0.0).toFloat().coerceIn(0f, 0.5f),
+                        colorOf(it.optString("color")),
+                        it.optString("image").ifEmpty { null },
                     )
                 }
                 if (items.none { it.type == "screen" }) throw IllegalArgumentException("a layout has no screen")
@@ -60,6 +79,8 @@ class SkinSpec(
                 layout("front"), layout("frontDpad", "front-dpad", "front_dpad"), layout("foldable", "inside"),
                 layout("foldableIme", "foldable-ondevkeyboard", "insideIme", "inside-ime"),
                 layout("standard", "keypad"),
+                layout("foldableMax", "insideMax", "foldable-max", "inside-max"),
+                layout("foldableMaxIme", "insideMaxIme", "foldable-max-keyboard", "inside-max-ime"),
             )
             if (spec.front == null && spec.frontDpad == null && spec.foldable == null && spec.standard == null)
                 throw IllegalArgumentException("no front, frontDpad, inside or standard layout")
@@ -72,12 +93,28 @@ class SkinSpec(
             settings.customSkin.takeIf { it.isNotBlank() }?.let {
                 runCatching {
                     val own = parse(it)
-                    // A skin made before the Standard keypad existed keeps the built-in keypad.
-                    return if (own.standard != null || builtIn?.standard == null) own
-                    else SkinSpec(own.backdrop, own.opacity, own.front, own.frontDpad, own.foldable, own.foldableIme, builtIn.standard)
+                    // Layouts added after a skin was made (the Standard keypad, Foldable Max) stay
+                    // the built-in ones until that skin defines its own.
+                    return SkinSpec(
+                        own.backdrop, own.opacity, own.front, own.frontDpad, own.foldable, own.foldableIme,
+                        own.standard ?: builtIn?.standard,
+                        own.foldableMax ?: builtIn?.foldableMax,
+                        own.foldableMaxIme ?: builtIn?.foldableMaxIme,
+                    )
                 }
             }
             return builtIn
+        }
+
+        /** #RRGGBB or #AARRGGBB. Anything else is the default border grey. */
+        fun colorOf(s: String?): Int {
+            val h = s?.removePrefix("#") ?: return 0xFF8A9098.toInt()
+            val n = runCatching { h.toLong(16) }.getOrNull() ?: return 0xFF8A9098.toInt()
+            return when (h.length) {
+                6 -> (0xFF000000 or n).toInt()
+                8 -> n.toInt()
+                else -> 0xFF8A9098.toInt()
+            }
         }
 
         /** Windows virtual key for a designer action (0 = none). */

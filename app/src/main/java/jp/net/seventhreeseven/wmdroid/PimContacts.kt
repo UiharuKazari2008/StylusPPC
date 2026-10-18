@@ -3,8 +3,12 @@ package jp.net.seventhreeseven.wmdroid
 import android.content.ContentProviderOperation
 import android.content.ContentUris
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.ContactsContract
+import android.util.Base64
+import java.io.ByteArrayOutputStream
 import android.provider.ContactsContract.CommonDataKinds.Email
 import android.provider.ContactsContract.CommonDataKinds.Event
 import android.provider.ContactsContract.CommonDataKinds.Im
@@ -12,6 +16,7 @@ import android.provider.ContactsContract.CommonDataKinds.Nickname
 import android.provider.ContactsContract.CommonDataKinds.Note
 import android.provider.ContactsContract.CommonDataKinds.Organization
 import android.provider.ContactsContract.CommonDataKinds.Phone
+import android.provider.ContactsContract.CommonDataKinds.Photo
 import android.provider.ContactsContract.CommonDataKinds.Relation
 import android.provider.ContactsContract.CommonDataKinds.StructuredName
 import android.provider.ContactsContract.CommonDataKinds.StructuredPostal
@@ -64,7 +69,7 @@ class PimContacts(private val ctx: Context) {
         }
         val out = HashMap<String, Item>()
         for ((cid, info) in contacts) {
-            val item = build("c:" + info.first, info.second, names[cid].orEmpty(), rows[cid].orEmpty())
+            val item = build("c:" + info.first, cid, info.second, names[cid].orEmpty(), rows[cid].orEmpty())
             if (item.rec.isNotEmpty()) out[item.key] = item
         }
         return out
@@ -72,7 +77,7 @@ class PimContacts(private val ctx: Context) {
 
     fun read(key: String): Item? = runCatching { readAll()[key] }.getOrNull()
 
-    private fun build(key: String, nameRawId: Long, displayName: String, rows: List<Row>): Item {
+    private fun build(key: String, contactId: Long, nameRawId: Long, displayName: String, rows: List<Row>): Item {
         val rec = LinkedHashMap<String, String>()
         val src = HashMap<String, Long>()
         fun put(f: String, v: String?) { if (!v.isNullOrBlank() && f !in rec) rec[f] = v.trim() }
@@ -137,6 +142,7 @@ class PimContacts(private val ctx: Context) {
             .forEachIndexed { i, r -> rec["Email${i + 1}Address"] = r.s(1).trim(); src["Email${i + 1}Address"] = r.id }
         rows.filter { it.mime == Im.CONTENT_ITEM_TYPE && it.s(1).isNotBlank() }.take(3)
             .forEachIndexed { i, r -> rec["IM${i + 1}Address"] = r.s(1).trim(); src["IM${i + 1}Address"] = r.id }
+        photoJpeg(contactId)?.let { rec["Picture"] = it }
         val rawId = nameRawId.takeIf { it > 0 } ?: rows.firstOrNull()?.rawId ?: 0L
         return Item(key, rec, src, rawId)
     }
@@ -192,7 +198,35 @@ class PimContacts(private val ctx: Context) {
             if ("IM${i}Address" in changed) row("IM${i}Address", Im.CONTENT_ITEM_TYPE, mapOf(Im.DATA to v("IM${i}Address")),
                 mapOf(Im.TYPE to Im.TYPE_OTHER, Im.PROTOCOL to Im.PROTOCOL_CUSTOM, Im.CUSTOM_PROTOCOL to "IM"))
         }
+        if ("Picture" in changed && item.rawId > 0) {
+            val bytes = v("Picture").let { if (it.isEmpty()) null else Base64.decode(it, Base64.DEFAULT) }
+            cr.delete(Data.CONTENT_URI, "${Data.RAW_CONTACT_ID}=? AND ${Data.MIMETYPE}=?",
+                arrayOf(item.rawId.toString(), Photo.CONTENT_ITEM_TYPE))
+            if (bytes != null) {
+                val cv = android.content.ContentValues()
+                cv.put(Data.RAW_CONTACT_ID, item.rawId)
+                cv.put(Data.MIMETYPE, Photo.CONTENT_ITEM_TYPE)
+                cv.put(Photo.PHOTO, bytes)
+                cr.insert(Data.CONTENT_URI, cv)
+            }
+        }
         if (ops.isNotEmpty()) cr.applyBatch(ContactsContract.AUTHORITY, ops)
+    }
+
+    /** The contact's photo as a 96×96 JPEG, the size Windows Mobile's contact picture holds. */
+    private fun photoJpeg(contactId: Long): String? {
+        if (contactId <= 0) return null
+        val uri = ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, contactId)
+        val bmp = ContactsContract.Contacts.openContactPhotoInputStream(cr, uri, true)?.use { BitmapFactory.decodeStream(it) } ?: return null
+        val side = minOf(bmp.width, bmp.height).coerceAtLeast(1)
+        val crop = Bitmap.createBitmap(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side)
+        val scaled = if (crop.width == 96) crop else Bitmap.createScaledBitmap(crop, 96, 96, true)
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 70, out)
+        if (scaled !== crop) scaled.recycle()
+        if (crop !== bmp) crop.recycle()
+        bmp.recycle()
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
     /** A contact made in Windows Mobile: a new phone-local contact. Returns its key. */

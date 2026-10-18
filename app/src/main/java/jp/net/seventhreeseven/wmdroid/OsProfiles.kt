@@ -69,6 +69,10 @@ object OsProfiles {
                 // One image: the board gives Windows Mobile its screen size at boot, so it runs at
                 // any resolution (Settings > Device > Screen resolution).
                 ImageVariant("fwvga", "FWVGA 480×854", "PPC_USA_GSM_FWVGA_VR.BIN", 480, 854),
+                // Optional: the FWVGA image's Start menu sticks (the button stays pressed) when WM
+                // runs at 480×800, e.g. under "Resize screen for dock". 480×800 boots this image
+                // instead when it is installed (GuestStates.resolve).
+                ImageVariant("wvga", "WVGA 480×800", "PPC_USA_GSM_WVGA_VR.BIN", 480, 800),
             ),
             defaultMemMB = 256,
             minMemMB = 128,  // at 96 MB only ~3 MB program memory is left with a few programs open

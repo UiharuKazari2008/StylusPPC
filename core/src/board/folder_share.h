@@ -1,9 +1,13 @@
 // Device Emulator folder sharing (0x500F4000): exposes host folders to the guest as \Storage Card.
 // Behaviour follows docs/folder-sharing-protocol.md; operations complete synchronously.
 #pragma once
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
+#include <unordered_map>
 #include <vector>
 
 namespace wm {
@@ -35,6 +39,8 @@ public:
 
     // Register interface used by DePage.
     uint32_t call(uint32_t code, uint32_t pbPa);
+    // Operations since the last take (the background CPU cap rises while the card is in use).
+    uint32_t takeOps() { return ops.exchange(0, std::memory_order_relaxed); }
     bool traceCalls = false;
 
 private:
@@ -47,6 +53,23 @@ private:
     };
     struct Entry {
         std::string name, host;
+        bool have = false;     // stat taken while the directory was listed
+        bool dir = false;
+        uint64_t size = 0;
+        time_t mtime = 0, ctime = 0;
+        mode_t mode = 0;
+    };
+    struct Meta {
+        std::string name;
+        bool dir = false;
+        uint64_t size = 0;
+        time_t mtime = 0, ctime = 0;
+        mode_t mode = 0;
+    };
+    struct Snap {
+        std::chrono::steady_clock::time_point at{};
+        bool valid = false;
+        std::vector<Meta> items;
     };
     struct Find {
         bool used = false;
@@ -60,8 +83,15 @@ private:
     std::vector<Mount> mounts, overlays;
     Handle handles[40];
     Find finds[40];
+    std::unordered_map<std::string, Snap> dirCache;
+    std::chrono::steady_clock::time_point spaceAt{};
+    uint64_t spaceFree = 0, spaceTotal = 0;
+    bool spaceOk = false;
+    std::atomic<uint32_t> ops{0};
 
     void closeAll();
+    void dropCache(const std::string &path);
+    const Snap &snapshot(const std::string &dir);
     uint32_t dispatch(uint32_t code, uint8_t *pb);
     uint8_t *ram(uint32_t pa, uint32_t len);
     // Path resolution: guest "\a\b" -> host path. Returns 0 or an error code (0x7B, 3).
@@ -70,6 +100,7 @@ private:
     std::string matchCase(const std::string &dir, const std::string &name);
     uint32_t errnoToCode(int err, bool parentKnown = true);
     void fillInfo(uint8_t *pb, const std::string &host, bool isVirtualDir);
+    void fillInfo(uint8_t *pb, const Entry &e, bool isVirtualDir);
     void listDir(const std::string &host, bool virtualRoot, const std::string &pattern, std::vector<Entry> &out);
 
     uint32_t opCreate(uint8_t *pb);

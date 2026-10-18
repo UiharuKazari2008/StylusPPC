@@ -38,7 +38,7 @@ static class Pim
         "HomeAddressStreet", "HomeAddressCity", "HomeAddressState", "HomeAddressPostalCode", "HomeAddressCountry",
         "BusinessAddressStreet", "BusinessAddressCity", "BusinessAddressState", "BusinessAddressPostalCode", "BusinessAddressCountry",
         "OtherAddressStreet", "OtherAddressCity", "OtherAddressState", "OtherAddressPostalCode", "OtherAddressCountry",
-        "Birthday", "Anniversary", "Spouse", "Children", "Body",
+        "Birthday", "Anniversary", "Spouse", "Children", "Body", "Picture",
     };
 
     // Appointment fields: Start/End are UTC "yyyyMMddTHHmmssZ", or dates "yyyyMMdd" (End exclusive)
@@ -126,25 +126,23 @@ static class Pim
         string path = Path.Combine(Helper.Box, "pim-apply.txt");
         int gen = -1;
         List<Op> ops = new List<Op>();
-        using (StreamReader r = new StreamReader(path, Encoding.UTF8))
+        Op cur = null;
+        // Read the bytes ourselves. CF's UTF-8 reader throws ArgumentException on an emoji
+        // (a 4-byte sequence), and that aborted the whole sync.
+        foreach (string line in ReadLines(path))
         {
-            string line;
-            Op cur = null;
-            while ((line = r.ReadLine()) != null)
+            if (line.StartsWith("#"))
             {
-                if (line.StartsWith("#"))
-                {
-                    string[] p = line.Substring(1).Split(' ');
-                    cur = new Op { Verb = p[0], Kind = p.Length > 1 ? p[1] : "" };
-                    ops.Add(cur);
-                    continue;
-                }
-                int eq = line.IndexOf('=');
-                if (eq <= 0) continue;
-                string k = line.Substring(0, eq), v = Unescape(line.Substring(eq + 1));
-                if (cur == null) { if (k == "gen") gen = int.Parse(v); }
-                else cur.Values[k] = v;
+                string[] p = line.Substring(1).Split(' ');
+                cur = new Op { Verb = p[0], Kind = p.Length > 1 ? p[1] : "" };
+                ops.Add(cur);
+                continue;
             }
+            int eq = line.IndexOf('=');
+            if (eq <= 0) continue;
+            string k = line.Substring(0, eq), v = Unescape(line.Substring(eq + 1));
+            if (cur == null) { if (k == "gen") gen = int.Parse(v); }
+            else cur.Values[k] = v;
         }
         // Items by key and by item id, for both kinds.
         Dictionary<string, PimItem> byKey = new Dictionary<string, PimItem>();
@@ -176,18 +174,30 @@ static class Pim
                     else if (op.Verb == "put" || op.Verb == "setkey")
                     {
                         if (item == null && op.Verb == "setkey") throw new Exception("no item " + oid);
-                        if (item == null) item = op.Kind == "contact" ? (PimItem)new Contact() : new Appointment();
-                        if (op.Verb == "put")
-                            foreach (string f in fields)
-                            {
-                                string v;
-                                op.Values.TryGetValue(f, out v);
-                                // One field POOM refuses does not cost the item (the app sees it in the result).
-                                try { Set(item, f, v ?? ""); }
-                                catch (Exception e) { Helper.Log("pim: " + op.Kind + " " + key + " " + f + ": " + e.GetType().Name); }
-                            }
-                        if (key != null) SetKey(item, key);
-                        Save(item, s, op.Kind);
+                        // new Contact() is not in the store: its id is a sentinel and Update() does not
+                        // insert it, so the next dump still sees nothing. AddNew() does.
+                        bool fresh = item == null;
+                        if (fresh) item = op.Kind == "contact" ? (PimItem)s.Contacts.Items.AddNew() : s.Appointments.Items.AddNew();
+                        try
+                        {
+                            if (op.Verb == "put")
+                                foreach (string f in fields)
+                                {
+                                    string v;
+                                    op.Values.TryGetValue(f, out v);
+                                    // One field POOM refuses does not cost the item (the app sees it in the result).
+                                    try { Set(item, f, v ?? ""); }
+                                    catch (Exception e) { Helper.Log("pim: " + op.Kind + " " + key + " " + f + ": " + e.GetType().Name); }
+                                }
+                            if (key != null) SetKey(item, key);
+                            if (item is Contact) ((Contact)item).Update();
+                            else ((Appointment)item).Update();
+                        }
+                        catch (Exception)
+                        {
+                            if (fresh) try { Delete(item); } catch (Exception) { }
+                            throw;
+                        }
                         WriteRecord(w, "#ok " + op.Verb + " " + op.Kind, item, fields);
                     }
                     else continue;
@@ -215,18 +225,6 @@ static class Pim
         string key = KeyOf(item);
         if (key.Length > 0) byKey[kind + "|" + key] = item;
         byOid[kind + "|" + OidOf(item)] = item;
-    }
-
-    static void Save(PimItem item, OutlookSession s, string kind)
-    {
-        // A new item is added to its folder; an existing one saved in place.
-        if (OidOf(item) == "0")
-        {
-            if (kind == "contact") s.Contacts.Items.Add((Contact)item);
-            else s.Appointments.Items.Add((Appointment)item);
-        }
-        else if (item is Contact) ((Contact)item).Update();
-        else ((Appointment)item).Update();
     }
 
     static void Delete(PimItem item)
@@ -285,6 +283,17 @@ static class Pim
             if (f == "WebPage") return c.WebPage == null ? "" : c.WebPage.ToString();
             if (f == "Birthday") return DateText(c.Birthday);
             if (f == "Anniversary") return DateText(c.Anniversary);
+            if (f == "Picture")
+            {
+                // Contact.Picture is a read-only Image. JPEG so the sync can compare it.
+                System.Drawing.Image img = c.Picture;
+                if (img == null) return "";
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    img.Save(ms, System.Drawing.Imaging.ImageFormat.Jpeg);
+                    return Convert.ToBase64String(ms.ToArray());
+                }
+            }
             string v = (string)typeof(Contact).GetProperty(f).GetValue(c, null) ?? "";
             return f == "Body" ? v.Replace("\r\n", "\n") : v;
         }
@@ -328,6 +337,17 @@ static class Pim
             }
             if (f == "Birthday") { c.Birthday = ParseDate(v); return; }
             if (f == "Anniversary") { c.Anniversary = ParseDate(v); return; }
+            if (f == "Picture")
+            {
+                // The property is read-only; SetPicture takes a file (PocketOutlook).
+                if (v.Length == 0) return;
+                string path = Path.Combine(Path.GetTempPath(), "wmdroid-contact.jpg");
+                byte[] jpeg = Convert.FromBase64String(v);
+                using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write)) fs.Write(jpeg, 0, jpeg.Length);
+                c.SetPicture(path);
+                try { File.Delete(path); } catch (Exception) { }
+                return;
+            }
             if (f == "Body") v = v.Replace("\r\n", "\n").Replace("\n", "\r\n");
             PropertyInfo p = typeof(Contact).GetProperty(f);
             if ((string)p.GetValue(c, null) != v) p.SetValue(c, v, null);
@@ -381,6 +401,34 @@ static class Pim
         if (v.Length < 15) return d;
         d = d.AddHours(int.Parse(v.Substring(9, 2))).AddMinutes(int.Parse(v.Substring(11, 2))).AddSeconds(int.Parse(v.Substring(13, 2)));
         return new DateTime(d.Ticks, DateTimeKind.Utc).ToLocalTime();
+    }
+
+    /** UTF-8 lines. A 4-byte sequence (an emoji) is skipped: the reader in this runtime throws on it. */
+    static List<string> ReadLines(string path)
+    {
+        byte[] b;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+        {
+            b = new byte[fs.Length];
+            int n = 0;
+            while (n < b.Length) { int g = fs.Read(b, n, b.Length - n); if (g <= 0) break; n += g; }
+        }
+        List<string> lines = new List<string>();
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        while (i < b.Length)
+        {
+            int c = b[i];
+            if (c == '\n') { lines.Add(sb.ToString()); sb.Length = 0; i++; continue; }
+            if (c == '\r') { i++; continue; }
+            if (c < 0x80) { sb.Append((char)c); i++; }
+            else if ((c & 0xE0) == 0xC0 && i + 1 < b.Length) { sb.Append((char)(((c & 0x1F) << 6) | (b[i + 1] & 0x3F))); i += 2; }
+            else if ((c & 0xF0) == 0xE0 && i + 2 < b.Length) { sb.Append((char)(((c & 0x0F) << 12) | ((b[i + 1] & 0x3F) << 6) | (b[i + 2] & 0x3F))); i += 3; }
+            else if ((c & 0xF8) == 0xF0 && i + 3 < b.Length) i += 4;
+            else i++;
+        }
+        if (sb.Length > 0) lines.Add(sb.ToString());
+        return lines;
     }
 
     static string Escape(string v)
