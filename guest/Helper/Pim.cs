@@ -1,3 +1,18 @@
+#if CF2
+using System;
+// WM 2003's pimstore.dll is the Pocket Outlook COM server. It does not export the Do* entry
+// points Microsoft.WindowsMobile.PocketOutlook.dll (WM 5 and later) calls, so contacts and
+// calendar sync have no store to talk to here.
+static class Pim
+{
+    public static string Command(string args)
+    {
+        string verb = args.Length == 0 ? "pim" : args.Split(' ')[0];
+        Helper.Send("pim error " + verb + " unsupported");
+        return "unsupported";
+    }
+}
+#else
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -469,3 +484,4 @@ static class Pim
         return sb.ToString();
     }
 }
+#endif

@@ -13,6 +13,9 @@ using Microsoft.Win32;
 //   \Windows\HDRAW.dll             DirectDraw with the display caps HTC games check for
 //                                  (guest/DdShim/hdraw.c, HdrawDll.cs); an HTC game's DDRAW.dll
 //                                  import is renamed to it when the game is staged.
+//   \Windows\HTCFlashlightLib.dll  the camera LED for HTC Flashlight (guest/Flash/flashlight.c,
+//                                  FlashDll.cs). HTC's own library needs a Qualcomm chip, so a
+//                                  staged copy of it is replaced with this one.
 //
 // Apps from the user's HTC ROM: the app (HtcAppsActivity, core/src/htc/romkit.h) stages a ROM
 // package as \Storage Card\.wmdroid\htc\<package>\ with install.ini written last; InstallStaged
@@ -34,13 +37,15 @@ static class HtcCompat
         // registry remembers the version written. Staged ROM apps install only when the app asks
         // ("htcinstall"), never at boot: every OS shares the card's htc folder.
         if (!Is65) return;
-        string want = SensorDll.Base64.Length + "/" + HdrawDll.Base64.Length;
+        string want = SensorDll.Base64.Length + "/" + HdrawDll.Base64.Length + "/" + FlashDll.Base64.Length;
         using (RegistryKey k = Registry.LocalMachine.CreateSubKey(MarkKey))
         {
-            if (want == k.GetValue("dlls") as string && File.Exists(@"\Windows\HTCSensorService.dll") && File.Exists(@"\Windows\HDRAW.dll"))
+            if (want == k.GetValue("dlls") as string && File.Exists(@"\Windows\HTCSensorService.dll")
+                && File.Exists(@"\Windows\HDRAW.dll") && File.Exists(@"\Windows\HTCFlashlightLib.dll"))
                 return;
             Put(@"\Windows\HTCSensorService.dll", SensorDll.Base64);
             Put(@"\Windows\HDRAW.dll", HdrawDll.Base64);
+            Put(@"\Windows\HTCFlashlightLib.dll", FlashDll.Base64);
             k.SetValue("dlls", want);
         }
     }
@@ -116,6 +121,13 @@ static class HtcCompat
                 switch (key)
                 {
                     case "file":
+                        // HTC's flashlight library talks to a Qualcomm chip and jumps to address 0 here.
+                        if (v.ToLower() == "htcflashlightlib.dll")
+                        {
+                            Put(@"\Windows\HTCFlashlightLib.dll", FlashDll.Base64);
+                            files++;
+                            break;
+                        }
                         File.Copy(dir + "\\" + v, @"\Windows\" + v, true);
                         files++;
                         if (v.ToLower().EndsWith(".exe")) exe = true;

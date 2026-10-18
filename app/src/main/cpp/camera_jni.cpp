@@ -25,6 +25,12 @@ JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_came
     return c && c->wanted();
 }
 
+/** Guest flash request: low byte 0 off / 1 on / 2 auto, bit 8 an app holding the LED on. */
+JNIEXPORT jint JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_cameraFlash(JNIEnv *, jobject, jlong h) {
+    wm::Camera *c = cam(h);
+    return c ? c->flash() : 0;
+}
+
 /** hostCamera: a phone camera feeds the guest (else it sees a test pattern); era: 2009 look, 0..100. */
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_cameraConfig(JNIEnv *, jobject, jlong h,
                                                                                     jboolean hostCamera,

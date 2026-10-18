@@ -1,6 +1,8 @@
 using System;
+using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 
@@ -20,37 +22,59 @@ static class Wallpaper
     // the current orientation, then redraw the home screen and Start menu.
     public static string Apply(string box)
     {
+        if (Environment.OSVersion.Version.Major < 5) return ApplyCe42(box);
         int w, h;
         Size(out w, out h);
         string portrait = Path.Combine(box, "wall_portrait.jpg"), landscape = Landscape(box, degrees);
         int p = Install(portrait, Name(w, h)), l = Install(landscape, Name(h, w));
         int done = p + l;
         var sb = System.Windows.Forms.Screen.PrimaryScreen.Bounds;
+        // A picture chosen in Windows Mobile is Today\Wall. It is drawn instead of stwater, and it
+        // stays there when the theme files already match the phone's wallpaper, so the home screen
+        // has to be told to drop it even though nothing was copied.
+        bool chosen = (File.Exists(portrait) || File.Exists(landscape)) && UserPicture();
         Helper.Log("wallpaper: portrait " + (p > 0 ? "new" : "same") + ", landscape " + (l > 0 ? "new" : "same") +
-            " (" + Path.GetFileName(landscape) + "), screen " + sb.Width + "x" + sb.Height + ", turned " + degrees);
-        if (done == 0) return File.Exists(portrait) || File.Exists(landscape) ? "unchanged" : "no pictures";
+            " (" + Path.GetFileName(landscape) + "), screen " + sb.Width + "x" + sb.Height + ", turned " + degrees +
+            (chosen ? ", replacing a chosen picture" : ""));
+        if (done == 0 && !chosen) return File.Exists(portrait) || File.Exists(landscape) ? "unchanged" : "no pictures";
         Refresh(Name(w, h));
-        return "ok " + done;
+        return done == 0 ? "cleared picture" : "ok " + done;
     }
 
-    // rotate N: put the landscape picture for N (turned so it stays still on the panel) in place
-    // before the display turns; the size change then makes the shell load it with no extra redraw.
+    // Today\Wall set: the user picked a picture, which hides the theme wallpaper.
+    static bool UserPicture()
+    {
+        try
+        {
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(Today))
+            {
+                if (k == null) return false;
+                string v = k.GetValue("Wall") as string;
+                return v != null && v.Length > 0;
+            }
+        }
+        catch (Exception) { return false; }
+    }
+
+    // rotate N [sync]: turn the display. "sync" is sent only while Android wallpaper sync is on.
+    // Then the landscape picture for N is put in place first, and Today is refreshed when the
+    // picture it last showed this way round is not the one now in place (also 90 <-> 270, which
+    // keeps the size). Without sync the theme's own picture is already right, and a Today refresh
+    // would only flash the home screen.
     public static string Rotate(string box, string args)
     {
-        int deg = int.Parse(args.Trim());
+        string[] parts = args.Trim().Split(' ');
+        int deg = int.Parse(parts[0]);
+        bool sync = false;
+        for (int i = 1; i < parts.Length; i++) if (parts[i] == "sync") sync = true;
         int w, h;
         Size(out w, out h);
-        bool wasLandscape = System.Windows.Forms.Screen.PrimaryScreen.Bounds.Width > System.Windows.Forms.Screen.PrimaryScreen.Bounds.Height;
         bool landscape = deg == 90 || deg == 270;
-        bool changed = landscape && Install(Landscape(box, deg), Name(h, w)) > 0;
-        int before = degrees;
+        bool changed = sync && landscape && Install(Landscape(box, deg), Name(h, w)) > 0;
         degrees = deg;
-        string r = Display.Rotate(args);
-        // The size change makes shell32 load the new size's picture (the lock screen and the bars
-        // show it), but the home screen keeps its own copy from the last time it was this way round
-        // until it is refreshed: refresh when what it last showed this way round is not the
-        // picture now in place (also covers 90 <-> 270, which keeps the size).
-        if (r.StartsWith("ok") && (changed || ShownHere() != Hash(CurrentFile())))
+        string r = Display.Rotate(deg.ToString());
+        if (!sync) return r;
+        if (r.StartsWith("ok") && (changed || UserPicture() || ShownHere() != Hash(CurrentFile())))
         {
             Thread.Sleep(500);  // let the shell finish the turn first
             Refresh(Name(w, h));
@@ -170,6 +194,109 @@ static class Wallpaper
         // Only this orientation's picture is on screen now; the other is refreshed on the next turn.
         uint shown = Hash(CurrentFile());
         if (IsLandscape()) shownLandscape = shown; else shownPortrait = shown;
+    }
+
+    // WM 2003 SE draws \Windows\stwater.gif (and stwater*.gif) behind the Start menu and
+    // \Windows\tdywater.gif on Today. Today\Wall is the picture the user picked; the shell
+    // copies that role onto \Windows\tdycust.gif. It wants GIF, so the JPEG from the phone
+    // is rewritten as a 256-colour GIF.
+    static string ApplyCe42(string box)
+    {
+        int w, h;
+        Size(out w, out h);
+        string portrait = Path.Combine(box, "wall_portrait.jpg");
+        string src = File.Exists(portrait) ? portrait : Landscape(box, degrees);
+        if (!File.Exists(src)) return "no pictures";
+        string cust = @"\Windows\tdycust.gif";
+        int n = 0;
+        try
+        {
+            using (Bitmap bmp = new Bitmap(src))
+            {
+                if (WriteGif(bmp, cust)) n++;
+                if (WriteGif(bmp, @"\Windows\stwater.gif")) n++;
+                if (WriteGif(bmp, @"\Windows\tdywater.gif")) n++;
+                if (WriteGif(bmp, @"\Windows\stwater_" + w + "_" + h + ".gif")) n++;
+            }
+        }
+        catch (Exception e)
+        {
+            Helper.Log("wallpaper ce42 " + e.Message);
+            return "failed";
+        }
+        using (RegistryKey k = Registry.CurrentUser.CreateSubKey(Today))
+        {
+            k.SetValue("Wall", cust);
+            k.SetValue("Watermark", @"\Windows\stwater.gif");
+        }
+        PostMessage(new IntPtr(0xFFFF), 0x001A /* WM_SETTINGCHANGE */, new IntPtr(0xF2), IntPtr.Zero);
+        PostMessage(new IntPtr(0xFFFF), 0x001A, IntPtr.Zero, IntPtr.Zero);
+        return n > 0 ? "ok " + n : "failed";
+    }
+
+    // GIF89a, 3-3-2 palette. LZW stays at 9-bit codes: a clear follows every 254 pixels.
+    static bool WriteGif(Bitmap bmp, string path)
+    {
+        SetFileAttributes(path, 0x80);
+        int w = bmp.Width, h = bmp.Height;
+        MemoryStream o = new MemoryStream();
+        byte[] magic = Encoding.ASCII.GetBytes("GIF89a");
+        o.Write(magic, 0, 6);
+        GifWord(o, w); GifWord(o, h);
+        o.WriteByte(0xF7); o.WriteByte(0); o.WriteByte(0);
+        for (int i = 0; i < 256; i++)
+        {
+            o.WriteByte((byte)(((i >> 5) & 7) * 255 / 7));
+            o.WriteByte((byte)(((i >> 2) & 7) * 255 / 7));
+            o.WriteByte((byte)((i & 3) * 255 / 3));
+        }
+        o.WriteByte(0x2C);
+        GifWord(o, 0); GifWord(o, 0); GifWord(o, w); GifWord(o, h);
+        o.WriteByte(0);
+        o.WriteByte(8);
+        MemoryStream data = new MemoryStream();
+        GifBits bits = new GifBits(data);
+        bits.Write(256);
+        int run = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                Color c = bmp.GetPixel(x, y);
+                int idx = ((c.R >> 5) << 5) | ((c.G >> 5) << 2) | (c.B >> 6);
+                if (run == 254) { bits.Write(256); run = 0; }
+                bits.Write(idx);
+                run++;
+            }
+        bits.Write(257);
+        bits.Flush();
+        byte[] d = data.ToArray();
+        for (int i = 0; i < d.Length; i += 255)
+        {
+            int n = Math.Min(255, d.Length - i);
+            o.WriteByte((byte)n);
+            o.Write(d, i, n);
+        }
+        o.WriteByte(0);
+        o.WriteByte(0x3B);
+        byte[] all = o.ToArray();
+        using (FileStream f = File.Create(path)) f.Write(all, 0, all.Length);
+        return true;
+    }
+
+    static void GifWord(Stream s, int v) { s.WriteByte((byte)v); s.WriteByte((byte)(v >> 8)); }
+
+    class GifBits
+    {
+        MemoryStream data;
+        int acc, bits;
+        public GifBits(MemoryStream d) { data = d; }
+        public void Write(int c)
+        {
+            acc |= c << bits;
+            bits += 9;
+            while (bits >= 8) { data.WriteByte((byte)acc); acc >>= 8; bits -= 8; }
+        }
+        public void Flush() { if (bits > 0) data.WriteByte((byte)acc); }
     }
 
     [DllImport("coredll.dll", SetLastError = true)] static extern bool SetFileAttributes(string name, uint attr);

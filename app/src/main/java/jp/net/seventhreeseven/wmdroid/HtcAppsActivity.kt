@@ -177,6 +177,6 @@ class HtcAppsActivity : SettingsPage() {
         private const val REQ_ROM = 61
         private const val KEY_ROM = "rom"
         /** Packages known to run (docs/research-hd2-port.md). */
-        private val WORKING = listOf("Teeter_")
+        private val WORKING = listOf("Teeter_", "Flashlight", "HTC_Flashlight", "HTCFlashlight")
     }
 }

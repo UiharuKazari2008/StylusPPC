@@ -378,10 +378,12 @@ int main(int argc, char **argv) {
         rest = c == std::string::npos ? "" : v.substr(c + 1);
         return atof(v.substr(0, c).c_str());
     };
+    uint32_t mipsCap = 0;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? argv[++i] : ""; };
         if (a == "--mem") cfg.memMB = (uint32_t)atoi(next());
+        else if (a == "--mips") mipsCap = (uint32_t)atoi(next());  // speed limit (Machine::mipsCap)
         else if (a == "--seconds") seconds = atof(next());
         else if (a == "--v4") cfg.core = CORE_ARMV4;
         else if (a == "--profile-from") profileFrom = atof(next());
@@ -547,6 +549,7 @@ int main(int argc, char **argv) {
         for (auto &o : overlays)
             if (o.name == ".wmdroid") boxDir = o.path.c_str();
     Machine m(cfg);
+    m.mipsCap = mipsCap;
     std::string err;
     if (!m.load(err)) { LOGE("load failed: %s", err.c_str()); return 1; }
     if (ownNumber) m.codePatch->setOwnNumber(ownNumber);

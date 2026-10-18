@@ -25,6 +25,9 @@ public:
     // Shows the frame turned by quarter turns clockwise (0 upright, 1 = 90 degrees, 3 = 270),
     // e.g. a landscape Windows Mobile on a phone whose window is landscape too.
     void setRotation(int q) { rotation = q; redraw = true; }
+    // Passive-matrix (CSTN) LCD look, each effect 0..100: pixel grid, washed-out contrast and tint,
+    // crosstalk streaks, uneven edge-lit backlight, and ghosting (the slow liquid crystal).
+    void setStn(bool on, int grid, int contrast, int crosstalk, int backlight, int ghost);
     ~GlRenderer();
 
     // Emulation thread. Presents only when the frame changed (or the window/filter did), uploading
@@ -44,6 +47,16 @@ private:
     EGLSurface surface = EGL_NO_SURFACE;
     EGLConfig config = nullptr;
     GLuint programs[3] = {}, tex = 0, vbo = 0;
+    // Passive-matrix look: the crystal's state (guest resolution, ping-pong), the frame's row and
+    // column load for crosstalk, and the backlight's brightness map.
+    struct Stn { bool on = false; float grid = 0, contrast = 0, crosstalk = 0, backlight = 0, ghost = 0; };
+    Stn stnWanted, stn;  // stnWanted under mu
+    GLuint stnState = 0, stnFinal = 0, stnTex[2] = {}, stnFbo = 0, rowTex = 0, colTex = 0, lightTex = 0;
+    int stnCur = 0, stnW = 0, stnH = 0;
+    bool stnPrimed = false;
+    uint64_t stnLastNs = 0, settleUntilNs = 0;
+    float meanLoad = 0;
+    std::vector<uint8_t> rowLoad, colLoad;
     int texW = 0, texH = 0, texBpp = 0;
     int filter = SHARP;
     std::atomic<bool> redraw{true};
@@ -55,5 +68,8 @@ private:
     void applyPending();
     bool ensureContext();
     void destroySurface();
-    GLuint buildProgram(const char *fragment);
+    GLuint buildProgram(const char *fragment, const char *vertex = nullptr);
+    void stnSetup(int w, int h);
+    void stnLoad(int w, int h, int bpp);
+    void stnStep(int w, int h, uint64_t now);
 };

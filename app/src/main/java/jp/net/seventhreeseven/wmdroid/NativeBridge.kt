@@ -15,6 +15,8 @@ object NativeBridge {
     external fun setSurface(handle: Long, surface: Surface?)
     /** Upscaling filter: 0 smooth, 1 sharp pixels, 2 enhanced (bicubic). */
     external fun setFilter(handle: Long, filter: Int)
+    /** Passive-matrix LCD look (replaces the filter while on); each effect 0..100. */
+    external fun setLcdLook(handle: Long, on: Boolean, grid: Int, contrast: Int, crosstalk: Int, backlight: Int, ghost: Int)
     external fun setRotation(handle: Long, quarterTurns: Int)
     /** Ask for the fastest CPU for [ms] (a rotation or layout change is about to redraw everything). */
     external fun boost(handle: Long, ms: Int)
@@ -39,6 +41,8 @@ object NativeBridge {
     external fun softReset(handle: Long)
     /** Host CPU share for the guest while busy, 1..100 % (background "stepping"). */
     external fun setCpuLimit(handle: Long, percent: Int)
+    /** Guest speed limit in MIPS (guest instructions per microsecond), 0 = unlimited (Machine::mipsCap). */
+    external fun setSpeedLimit(handle: Long, mips: Int)
     /** Output gain applied to the guest's sound (1 = as is). */
     external fun setAudioGain(handle: Long, gain: Float)
     /** True while a program has the GPS COM port open (FIFO on, that port's interrupt unmasked, and it is reading). */
@@ -136,6 +140,11 @@ object NativeBridge {
     // ---- Camera bridge (camera_jni.cpp, CameraBridge.kt) ----
     /** True while Windows Mobile has its camera open, so the phone's camera runs only then. */
     external fun cameraWanted(handle: Long): Boolean
+    /**
+     * Flash the guest asked for. Low byte: 0 auto, 1 on, 2 off (Pictures & Videos menu order).
+     * Bit 8: an app such as HTC Flashlight is holding the LED on.
+     */
+    external fun cameraFlash(handle: Long): Int
     /** hostCamera: the phone's camera feeds the guest (otherwise a test pattern); era: 2009 look. */
     external fun cameraConfig(handle: Long, hostCamera: Boolean, eraLevel: Int)
     /** The phone's camera closed: drop its last frame. */

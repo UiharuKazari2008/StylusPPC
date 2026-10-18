@@ -37,7 +37,8 @@ static class Theme
         string hash = "";
         foreach (string l in lines) if (l.StartsWith("#hash=")) hash = l.Substring(6).Trim();
         // A different stamp there, so a theme an older helper wrote with no effect applies again.
-        if (HueOnly && hash.Length > 0) hash = "hue:" + hash;
+        if (Ce42 && hash.Length > 0) hash = "ce42:" + hash;
+        else if (HueOnly && hash.Length > 0) hash = "hue:" + hash;
         int gen;
         using (RegistryKey s = Registry.CurrentUser.CreateSubKey(StateKey))
         {
@@ -45,6 +46,7 @@ static class Theme
             object g = s.GetValue("ThemeGen");
             gen = (g is int ? (int)g : 0) + 1;
         }
+        if (Ce42) return ApplyCe42(lines, hash);
         if (HueOnly) return ApplyHue(lines, hash);
 
         // New file names per generation: registry values always change and nothing in use is overwritten.
@@ -78,6 +80,60 @@ static class Theme
         Refresh();
         DeleteOld(prefix);
         return "ok " + n;
+    }
+
+    // Windows Mobile 2003 (CE 4.2) has no BaseHue and no 6.5 theme primitives. aygshell reads
+    // Color_Highlight and the other Color_* values, and the title bar and menus follow SetSysColors.
+    static bool Ce42 { get { return Environment.OSVersion.Version.Major < 5; } }
+
+    static string ApplyCe42(string[] lines, string hash)
+    {
+        int accent = -1;
+        foreach (string raw in lines)
+        {
+            string[] p = raw.Trim().Split('|');
+            if (p.Length == 4 && p[1] == "BaseColor3" && p[2] == "dword") accent = int.Parse(p[3]);
+        }
+        if (accent < 0) return "no accent";
+        int text = Luma(accent) > 140 ? 0x000000 : 0xFFFFFF;
+        int face = Blend(accent, 0xFFFFFF, 72);
+        int bar = Blend(accent, 0x000000, 35);
+        Write(ColorKey, "Color_Highlight", accent, RegistryValueKind.DWord, true);
+        Write(ColorKey, "Color_HighlightText", text, RegistryValueKind.DWord, true);
+        Write(ColorKey, "Color_BtnFace", face, RegistryValueKind.DWord, true);
+        Write(ColorKey, "Color_BtnText", 0x000000, RegistryValueKind.DWord, true);
+        Write(ColorKey, "Color_CommandBar", bar, RegistryValueKind.DWord, true);
+        Write(ColorKey, "Color_CommandBarText", text, RegistryValueKind.DWord, true);
+        try
+        {
+            // COLOR_ACTIVECAPTION, CAPTIONTEXT, HIGHLIGHT, HIGHLIGHTTEXT, BTNFACE, BTNTEXT.
+            int[] id = new int[] { 2, 9, 13, 14, 15, 18 };
+            int[] rgb = new int[] { bar, text, accent, text, face, 0x000000 };
+            SetSysColors(id.Length, id, rgb);
+        }
+        catch (Exception e) { Helper.Log("theme syscolors " + e.Message); }
+        using (RegistryKey s = Registry.CurrentUser.CreateSubKey(StateKey)) s.SetValue("ThemeHash", hash);
+        PostMessage(new IntPtr(0xFFFF), 0x001A /* WM_SETTINGCHANGE */, new IntPtr(0xF2), IntPtr.Zero);
+        PostMessage(new IntPtr(0xFFFF), 0x001A, IntPtr.Zero, IntPtr.Zero);
+        return "ok ce42";
+    }
+
+    static int Luma(int c)
+    {
+        int r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+        return (r * 30 + g * 59 + b * 11) / 100;
+    }
+
+    // COLORREF mix: `toward` contributes `pct` percent (0..100).
+    static int Blend(int c, int toward, int pct)
+    {
+        int o = 0;
+        for (int s = 0; s <= 16; s += 8)
+        {
+            int a = (c >> s) & 0xFF, b = (toward >> s) & 0xFF;
+            o |= ((a * (100 - pct) + b * pct) / 100) << s;
+        }
+        return o;
     }
 
     // Windows Mobile 5.0-6.1.4: aygshell builds its 53 shell and system colours from built-in HSV entries,
@@ -223,4 +279,5 @@ static class Theme
     [DllImport("aygshell.dll", EntryPoint = "#371")] static extern int ReloadThemeColors();
     [DllImport("coredll.dll")] static extern void UpdateThemePrimitives();
     [DllImport("coredll.dll")] static extern bool PostMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("coredll.dll")] static extern bool SetSysColors(int count, int[] elements, int[] colors);
 }

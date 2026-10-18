@@ -1,3 +1,16 @@
+#if CF2
+using System;
+// Texts on WM 6.5.3 go through MAPIdotnet. WM 2003's messaging store is not that API.
+static class Sms
+{
+    public static string Command(string args)
+    {
+        Helper.Log("sms: unsupported on this version");
+        return "unsupported";
+    }
+    public static void Poll() { }
+}
+#else
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -334,3 +347,4 @@ static class Sms
         return sb.ToString();
     }
 }
+#endif

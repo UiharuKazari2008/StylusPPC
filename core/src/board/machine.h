@@ -112,8 +112,12 @@ public:
     uint64_t idleWakes = 0;         // host sleeps while idle (each one a wake-up)
     bool idleCoalescing = true;     // while halted, batch the 1 ms tick to the slice (see runFor)
     uint64_t virtNs = 0;            // deterministic clock
+    // Speed limit: at most this many guest instructions per microsecond (MIPS), 0 = as fast as
+    // the host goes. runFor sleeps whenever the CPU gets ahead of it.
+    std::atomic<uint32_t> mipsCap{0};
 
 private:
+    uint64_t paceStartNs = 0, paceInsns = 0;  // the speed limit's reference point (runFor)
     void writeBootArgs(bool soft);
     void serializeDevices(StateIO &s);
     void serializeWatchdog(StateIO &s);

@@ -6,12 +6,14 @@
  * (CF 2.0) do not; started there it only shows "requires a newer version of the .NET Compact
  * Framework". So this small ARM program comes first:
  *
- *   1. If \Windows\mscoree3_5.dll is missing, it installs .NET CF 3.5 silently from the CAB next
- *      to it (NETCFv35.wm.armv4i.cab, Microsoft's redistributable): copied to \Temp first (wceload
- *      deletes the CAB it installed, and the card can go away meanwhile), then
- *      "\Windows\wceload.exe /noui" on the copy, waiting for it to finish (/noui installs to the
- *      default place, the device, without asking; WM 5's wceload fails at once, E_FAIL, when also
- *      given /noaskdest or /silent).
+ *   1. If the runtime is missing, it installs one silently from the CAB next to it, copied to
+ *      \Temp first (wceload deletes the CAB it installed, and the card can go away meanwhile),
+ *      then "\Windows\wceload.exe /noui" on the copy, waiting for it to finish (/noui installs to
+ *      the default place, the device, without asking; WM 5's wceload fails at once, E_FAIL, when
+ *      also given /noaskdest or /silent).
+ *      Windows Mobile 2003 is CE 4.2, so it gets .NET CF 2.0 (NETCFv2.wce4.ARMV4.cab, marker
+ *      \Windows\mscoree2_0.dll). CE 5 and later get .NET CF 3.5 (NETCFv35.wm.armv4i.cab,
+ *      \Windows\mscoree3_5.dll).
  *   2. It starts the real helper, helper.exe from the same folder, with the same arguments
  *      ("install", "update", ...), and exits without waiting for it.
  *
@@ -61,11 +63,15 @@ IMPORT(BOOL, GetVersionExW, (OSVERSIONINFOW *v))
 #define MISSING 0xFFFFFFFFu
 
 static const WCHAR CF35[] = L"\\Windows\\mscoree3_5.dll";
-static const WCHAR CAB[] = L"NETCFv35.wm.armv4i.cab";
+static const WCHAR CF2[] = L"\\Windows\\mscoree2_0.dll";
+static const WCHAR CAB35[] = L"NETCFv35.wm.armv4i.cab";
+static const WCHAR CAB2[] = L"NETCFv2.wce4.ARMV4.cab";
 static const WCHAR TEMPDIR[] = L"\\Temp";
-static const WCHAR TEMPCAB[] = L"\\Temp\\NETCFv35.wm.armv4i.cab";
+static const WCHAR TEMP35[] = L"\\Temp\\NETCFv35.wm.armv4i.cab";
+static const WCHAR TEMP2[] = L"\\Temp\\NETCFv2.wce4.ARMV4.cab";
+static const WCHAR ARGS35[] = L"/noui \"\\Temp\\NETCFv35.wm.armv4i.cab\"";
+static const WCHAR ARGS2[] = L"/noui \"\\Temp\\NETCFv2.wce4.ARMV4.cab\"";
 static const WCHAR WCELOAD[] = L"\\Windows\\wceload.exe";
-static const WCHAR WCELOAD_ARGS[] = L"/noui \"\\Temp\\NETCFv35.wm.armv4i.cab\"";
 static const WCHAR HELPER[] = L"helper.exe";
 static const WCHAR CARD_DIR[] = L"\\Storage Card\\2577";
 
@@ -177,31 +183,25 @@ static void logLine(const char *a, const WCHAR *w, const char *b, int n)
     CloseHandle(f);
 }
 
-/* ---- .NET CF 3.5 ---- */
+/* ---- .NET CF: 2.0 on CE 4.2 (WM 2003), 3.5 on CE 5 and later ---- */
 
-static void installCf(const WCHAR *dir)
+static void installCab(const WCHAR *dir, const WCHAR *cabName, const WCHAR *tempCab, const WCHAR *argsIn,
+                       const WCHAR *marker, const char *label)
 {
-    OSVERSIONINFOW v;
-    memset(&v, 0, sizeof v);
-    v.size = sizeof v;
-    if (GetVersionExW(&v) && v.major < 5) {
-        logLine(".NET CF 3.5 is missing and needs Windows CE 5 or later; this is ", 0, "CE ", (int)v.major);
-        return;
-    }
     WCHAR cab[MAXPATH];
     wcopy(cab, dir);
     wcat(cab, L"\\");
-    wcat(cab, CAB);
-    if (!exists(cab)) { logLine(".NET CF 3.5 is missing, and so is ", cab, 0, -1); return; }
+    wcat(cab, cabName);
+    if (!exists(cab)) { logLine(label, cab, " is missing", -1); return; }
     CreateDirectoryW(TEMPDIR, 0);
-    if (!CopyFileW(cab, TEMPCAB, 0)) {
-        logLine("copying the .NET CF 3.5 CAB to \\Temp failed, error ", 0, 0, (int)GetLastError());
+    if (!CopyFileW(cab, tempCab, 0)) {
+        logLine("copying ", cab, " to \\Temp failed, error ", (int)GetLastError());
         return;
     }
-    logLine("installing .NET CF 3.5 from ", cab, 0, -1);
+    logLine("installing ", cab, 0, -1);
     DWORD start = GetTickCount(), code = MISSING;
     WCHAR args[MAXPATH];
-    wcopy(args, WCELOAD_ARGS);
+    wcopy(args, argsIn);
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof pi);
     if (!CreateProcessW(WCELOAD, args, 0, 0, 0, 0, 0, 0, 0, &pi)) {
@@ -212,11 +212,26 @@ static void installCf(const WCHAR *dir)
         CloseHandle(pi.thread);
         CloseHandle(pi.process);
     }
-    DeleteFileW(TEMPCAB);  /* wceload deletes it after a successful install */
+    DeleteFileW(tempCab);  /* wceload deletes it after a successful install */
     logLine("wceload finished, seconds: ", 0, 0, (int)((GetTickCount() - start) / 1000));
     char h[11];
     if (code != 0) logLine("wceload exit code ", 0, hex(h, code), -1);
-    logLine(exists(CF35) ? ".NET CF 3.5 installed" : ".NET CF 3.5 install FAILED", 0, 0, -1);
+    if (exists(marker)) logLine(label, 0, " installed", -1);
+    else logLine(label, 0, " install FAILED", -1);
+}
+
+static void installCf(const WCHAR *dir)
+{
+    OSVERSIONINFOW v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    if (GetVersionExW(&v) && v.major > 0 && v.major < 5) {
+        if (exists(CF2)) return;
+        installCab(dir, CAB2, TEMP2, ARGS2, CF2, ".NET CF 2.0");
+        return;
+    }
+    if (exists(CF35)) return;
+    installCab(dir, CAB35, TEMP35, ARGS35, CF35, ".NET CF 3.5");
 }
 
 /* The Windows CE loader calls an EXE's entry point as WinMain(instance, 0, arguments, show). */

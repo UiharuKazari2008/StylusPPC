@@ -738,7 +738,9 @@ static class Helper
         dog.Start();
         try { Patch.NoNetPrompt(); } catch (Exception e) { Log("net " + e.Message); }  // answer netui's network card question first (Patch.cs)
         NetLink.Start();  // 10.0.2.2:7378, for anything the sideband page does not carry (NetLink.cs)
-        Send(Hello());
+        string hello = Hello();
+        Log(hello);
+        Send(hello);
         try { Camera.Install(); } catch (Exception e) { Log("camera " + e.Message); }  // camera passthrough (Camera.cs)
         try { InputSync.RemoveBlank(); } catch (Exception e) { Log("ime " + e.Message); }  // the blank keyboard is gone (InputSync.cs)
         try { HtcCompat.Install(); } catch (Exception e) { Log("htc " + e.Message); }  // G-sensor driver + DirectDraw shim for HTC apps (HtcCompat.cs)

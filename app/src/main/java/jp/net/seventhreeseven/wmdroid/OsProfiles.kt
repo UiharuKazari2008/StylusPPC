@@ -43,9 +43,18 @@ data class OsProfile(
     /**
      * Tallest screen a Professional release boots at. 0 means the phone shape and the resolution
      * list are unlimited. Original 6.5 has no Titanium layout above 480×800, so the phone shape
-     * (852 on a tall cover) and an explicit 854 stay at 800.
+     * (852 on a tall cover) and an explicit 854 stay at 800. WM2003 SE's bootloader accepts at
+     * most 800 as well.
      */
     val maxHeight: Int = 0,
+    /**
+     * The PocketStylus helper on Windows Mobile 5 and later is .NET Compact Framework 3.5.
+     * Windows Mobile 2003 (CE 4.2) runs the CF 2.0 build instead (cf2): autorun installs
+     * NETCFv2.wce4.ARMV4.cab, then starts that helper.
+     */
+    val helper: Boolean = true,
+    /** CE 4.2: ship the CF 2.0 helper and CAB rather than the CF 3.5 ones. */
+    val cf2: Boolean = false,
 ) {
     /** The memory a stored Memory setting boots with: 0 (or a size no longer offered) = the default. */
     fun memFor(setting: Int) = if (setting >= minMemMB) setting.coerceAtMost(OsProfiles.MEM_SIZES.last()) else defaultMemMB
@@ -121,6 +130,20 @@ object OsProfiles {
             minMemMB = 128,  // at 96 MB the helper (.NET CF) crashes
             coldBootKeepsStorage = false,
         ),
+        OsProfile(
+            "wm2003se", "Windows Mobile 2003 Second Edition", "Pocket PC · touch", true,
+            "Windows Mobile 2003 SE for Pocket PC (ARMv4)",
+            listOf(
+                // One image. The board passes the screen size in CE 4.2 BOOT_ARGS, so QVGA, VGA
+                // and the other sizes at or under 800 all boot it (checked at 240×320 and 480×640).
+                ImageVariant("qvga", "QVGA 240×320", "PPC_2003_SE_WWE_ARMv4.bin", 240, 320),
+            ),
+            armv5 = false,
+            coldBootKeepsStorage = false,
+            maxHeight = 800,
+            helper = true,
+            cf2 = true,
+        ),
         // ---- Standard (Smartphone): no touch screen, driven by the keypad skin or the phone's keys ----
         OsProfile(
             "wm653std", "Windows Mobile 6.5.3 Standard", "Smartphone · keypad", false,
@@ -177,6 +200,21 @@ object OsProfiles {
                 GuestScreen(240, 400, "qvga", "240×400 (WQVGA)"),
                 GuestScreen(240, 320, "qvga", "240×320 (QVGA)"),
                 GuestScreen(320, 240, "qvga", "320×240 (landscape)"),
+            ),
+        ),
+        OsProfile(
+            "wm2003sesp", "Windows Mobile 2003 SE Smartphone", "Smartphone · keypad", false,
+            "Windows Mobile 2003 SE for Smartphone (ARMv4)",
+            listOf(
+                ImageVariant("qcif", "176×220", "SP_2003_SE_WWE_ARMv4.bin", 176, 220),
+            ),
+            armv5 = false,
+            coldBootKeepsStorage = false,
+            // This image's shell never runs \Storage Card\2577\autorun.exe (no such path in the ROM),
+            // so the helper cannot start itself. The Pocket PC 2003 release does.
+            helper = false,
+            screens = listOf(
+                GuestScreen(176, 220, "qcif", "176×220"),
             ),
         ),
     )

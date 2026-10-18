@@ -340,6 +340,12 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setCpuLi
     if (s) s->cpuLimit = percent < 1 ? 1 : percent > 100 ? 100 : percent;
 }
 
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setSpeedLimit(JNIEnv *, jobject, jlong h,
+                                                                                       jint mips) {
+    Session *s = S(h);
+    if (s) s->m->mipsCap = mips > 0 ? (uint32_t)mips : 0;
+}
+
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setAudioGain(JNIEnv *, jobject, jlong h,
                                                                                       jfloat gain) {
     Session *s = S(h);
@@ -482,6 +488,13 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setSurfa
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setFilter(JNIEnv *, jobject, jlong h, jint f) {
     Session *s = S(h);
     if (s) s->gl.setFilter(f);
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setLcdLook(JNIEnv *, jobject, jlong h, jboolean on,
+                                                                                   jint grid, jint contrast, jint crosstalk,
+                                                                                   jint backlight, jint ghost) {
+    Session *s = S(h);
+    if (s) s->gl.setStn(on, grid, contrast, crosstalk, backlight, ghost);
 }
 
 // Guest audio reached the speaker within the last ms. The emulation thread uses the same clock

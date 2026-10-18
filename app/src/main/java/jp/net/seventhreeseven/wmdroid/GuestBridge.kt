@@ -9,8 +9,8 @@ import java.util.TimeZone
  * Talks to the WMDroid helper inside Windows Mobile.
  *
  * The app adds two hidden folders to every \Storage Card (FolderShare overlays):
- *   2577\autorun.exe  WM runs it whenever the card mounts: a native bootstrap that installs .NET CF 3.5
- *                     if needed and starts the helper, 2577\helper.exe
+ *   2577\autorun.exe  WM runs it whenever the card mounts: a native bootstrap that installs .NET CF
+ *                     (3.5, or 2.0 on Windows Mobile 2003) if needed and starts the helper, 2577\helper.exe
  *   .wmdroid          mailbox: in\*.cmd (app -> guest), out\*.msg (guest -> app), state.ini
  */
 class GuestBridge(private val ctx: Context, private val settings: Settings, private val listener: Listener) {
@@ -102,21 +102,42 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         // from 0 again: start with an empty mailbox (the state is sent afresh below).
         inDir.listFiles()?.forEach { it.delete() }
         outDir.listFiles()?.forEach { it.delete() }
-        // autorun.exe is a small native bootstrap (guest/Autorun): it installs .NET CF 3.5 from the CAB
-        // when the image lacks it (WM 5, 6.0, 6.1), then starts the helper, helper.exe, with the same
-        // arguments. Plus the other guest programs the helper installs (GPS Test, InfraLobby, Send via Bluetooth).
-        for ((asset, name) in listOf("Autorun.exe" to "autorun.exe", "WMDroid.exe" to "helper.exe",
-                "GpsTest.exe" to "GpsTest.exe", "InfraLobby.exe" to "InfraLobby.exe", "SendBluetooth.exe" to "SendBluetooth.exe",
-                "NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab",
-                "MAPIlib.dll" to "MAPIlib.dll", "OpenNETCF.dll" to "OpenNETCF.dll")) {  // texts on WM 6.5.3 (Sms.cs)
+        // Windows Mobile 2003 is CE 4.2. Its helper is the CF 2.0 build (OsProfile.cf2); autorun
+        // installs NETCFv2.wce4.ARMV4.cab before starting it. Later releases get the CF 3.5 helper.
+        if (settings.profile?.helper == false) {
+            writeState()
+            synchronized(held) { held.clear(); running = false }
+            return overlays()
+        }
+        val cf2 = settings.profile?.cf2 == true
+        val guestExe = if (cf2) "WMDroid2003.exe" else "WMDroid.exe"
+        val programs = mutableListOf(
+            "Autorun.exe" to "autorun.exe", guestExe to "helper.exe",
+        )
+        for (name in listOf("GpsTest", "InfraLobby", "SendBluetooth")) {
+            val asset = if (cf2) "${name}2003.exe" else "$name.exe"
+            programs.add(asset to "$name.exe")
+        }
+        if (cf2) programs.add("NETCFv2.wce4.ARMV4.cab" to "NETCFv2.wce4.ARMV4.cab")
+        else {
+            programs.add("NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab")
+            programs.add("MAPIlib.dll" to "MAPIlib.dll")
+            programs.add("OpenNETCF.dll" to "OpenNETCF.dll")
+        }
+        for ((asset, name) in programs) {
             val exe = File(autorunDir, name)
             ctx.assets.open("guest/$asset").use { input ->
                 val bytes = input.readBytes()
-                if (asset == "WMDroid.exe") helperSum = "%08x".format(fnv(bytes))
+                if (name == "helper.exe") helperSum = "%08x".format(fnv(bytes))
                 if (!exe.exists() || exe.length() != bytes.size.toLong() || !exe.readBytes().contentEquals(bytes))
                     exe.writeBytes(bytes)
             }
         }
+        if (cf2) {
+            File(autorunDir, "NETCFv35.wm.armv4i.cab").delete()
+            File(autorunDir, "MAPIlib.dll").delete()
+            File(autorunDir, "OpenNETCF.dll").delete()
+        } else File(autorunDir, "NETCFv2.wce4.ARMV4.cab").delete()
         File(autorunDir, "WmpHook.dll").delete()  // the player plug-in is no longer shipped
         writeState()
         // A restored session already has its helper running and won't say hello by itself: ask, so an
@@ -138,7 +159,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
     fun boxFile(name: String) = File(box, name)
 
     fun overlays(): List<Pair<String, String>> = buildList {
-        add("2577" to autorunDir.path)
+        if (settings.profile?.helper != false) add("2577" to autorunDir.path)
         add(".wmdroid" to box.path)
         if (deviceWallpaper.exists()) add("device_wallpaper.bmp" to deviceWallpaper.path)
         add("Bluetooth" to BluetoothBridge.receiveDir(ctx).path)  // files received over Bluetooth
@@ -201,6 +222,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
     fun sendOnNet(line: String) = net.sendLine(line)
 
     fun send(command: String) {
+        if (settings.profile?.helper == false) return
         synchronized(held) {
             if (!running) { held.addLast(command); return }
         }

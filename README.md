@@ -2,7 +2,7 @@
 
 **Native Pocket PC and Windows Mobile hypervisor for Android.**
 
-PocketStylus boots the original, unmodified Windows Mobile ROM images that Microsoft shipped for its Device Emulator: Windows Mobile 5.0, 6.1.4, 6.5 and 6.5.3. It runs them full-screen on a modern Android phone, and your phone becomes the Windows Mobile device. Its battery, signal, carrier, Wi-Fi, GPS, camera, speaker, vibration motor, clipboard, keyboard, wallpaper, colour theme and phone line all show up inside Windows Mobile as that device's own hardware.
+PocketStylus boots the original, unmodified Windows Mobile ROM images that Microsoft shipped for its Device Emulator: Windows Mobile 2003 Second Edition, 5.0, 6.1.4, 6.5 and 6.5.3. It runs them full-screen on a modern Android phone, and your phone becomes the Windows Mobile device. On Windows Mobile 5 and later, its battery, signal, carrier, Wi-Fi, GPS, camera, speaker, vibration motor, clipboard, keyboard, wallpaper, colour theme and phone line all show up inside Windows Mobile as that device's own hardware. 2003 Second Edition Pocket PC runs the helper on .NET Compact Framework 2.0, which autorun installs on first boot. Clipboard, keyboard and backlight use the same commands as later releases, and theme and wallpaper go through that shell's Today picture and system colours. Calls, texts and contact sync are not offered: this image does not have the later phone libraries. The Smartphone image's shell does not run the storage-card autorun, so that release stays without the helper.
 
 It was built and tuned on a Galaxy Z Fold7. On a foldable, opening the phone turns it into an Xperia X1-style slider with a landscape screen above a hardware keyboard.
 
@@ -67,10 +67,12 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 | **Windows Mobile 6.5 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_320x320_VR.bin`) | Original 6.5 keypad edition. The QVGA image is landscape 320×240; the other is 320×320. Calls go through the virtual GSM modem. The home screen draws, then its items disappear and leave the wallpaper. |
 | **Windows Mobile 6.1.4 Standard** | `SP_USA_GSM_QVGA_VR.bin` | Calls through the virtual GSM modem. .NET CF 3.5 is installed automatically. |
 | **Windows Mobile 5.0 Smartphone** | `SP_USA_GSM_QVGA_VR.bin` | Runs at 240×400, 240×320 or 320×240. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM or more. |
+| **Windows Mobile 2003 Second Edition** | `PPC_2003_SE_WWE_ARMv4.bin` | Pocket PC. The board tells it the screen size, up to 480×800. Checked at 240×320 (Today and the Start menu) and 480×640. The helper is the .NET CF 2.0 build; autorun installs CF 2.0 on first boot. Calls, texts and contact sync need the later phone libraries, so they are not available. The power button does not suspend. |
+| **Windows Mobile 2003 SE Smartphone** | `SP_2003_SE_WWE_ARMv4.bin` | Keypad edition at 176×220. This image's shell does not run the storage-card autorun, so the helper does not start. The power button does not suspend. |
 
 Each Professional release needs just one image: the board tells Windows Mobile its screen size at boot, so Device Settings → **Screen resolution** runs it at your phone's shape (default), 480×854, 480×800, 480×640 or 480×480. Standard releases offer their own sizes (240×320, 320×320, 320×240, and more where an image allows). Each release keeps its own saved sessions and device settings, so you can switch between them without losing anything.
 
-**Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by the keypad: the keypad skin, the phone's hardware keys (for example on an Android flip phone), or taps on the screen (soft-key bar taps press the soft keys, swipes move the D-pad, other taps press Action). 6.5 is the original release (Titanium, virtual GSM modem); 6.5.3 is the later Developer Tool Kit (FakeRIL). Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family.
+**Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by the keypad: the keypad skin, the phone's hardware keys (for example on an Android flip phone), or taps on the screen (soft-key bar taps press the soft keys, swipes move the D-pad, other taps press Action). 6.5 is the original release (Titanium, virtual GSM modem); 6.5.3 is the later Developer Tool Kit (FakeRIL). Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family. 2003 is the Second Edition Device Emulator images, which are ARMv4.
 
 ---
 
@@ -91,7 +93,7 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Speaker / audio out | ✅ | IIS + DMA → AAudio, ringer/media routing |
 | Microphone | ✅ | Opened only while WM records |
 | Notification LED, vibration | ✅ | DE LED device → skin light, phone vibrator |
-| Camera (stills, video) | ✅ | Camera device + `wmdcam.dll`, Camera2 |
+| Camera (stills, video, flash) | ✅ | Camera device + `wmdcam.dll`, Camera2; flash uses the phone's LED |
 | GPS | ✅ | NMEA on COM1 (6.5.3, 5.0) or COM4 (6.1.4, original 6.5) |
 | Cellular radio: signal, carrier, data type | ✅ | FakeRIL (5.0, 6.5.3) / virtual GSM modem (6.1.4, 6.5) |
 | Phone calls in and out | ✅ | Through Android Telecom |
@@ -102,7 +104,7 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Infrared (IrDA) | ✅ | Emulated SIR transceiver → Bluetooth LE or InfraWAN |
 | Bluetooth | 🟡 | Send/receive files via Android; WM's Bluetooth stack (headsets, pairing) ❌ |
 | Storage card | ✅ | Folder share of phone storage |
-| Standby / resume | 🟡 | 6.1.4, 6.5.3 ✅; WM 5.0's own standby ❌ (hidden) |
+| Standby / resume | 🟡 | 6.1.4, 6.5.3 ✅; WM 5.0's standby ❌ (hidden); 2003 SE's power button does not suspend ❌ (hidden) |
 | Accelerometer (G-sensor) | 🟡 | Phone accelerometer while an HTC app reads it (Teeter). Light and proximity ❌ |
 | USB / ActiveSync to a PC | ❌ | — |
 | FM radio | ❌ | — |
@@ -111,12 +113,12 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 
 | Feature | Status |
 |---|---|
-| Windows Mobile 6.5.3 Pro, 6.5 Pro, 6.1.4 Pro, 5.0 Pocket PC Phone | ✅ 6.5 Pro is new in 1.0.7 |
-| Windows Mobile 6.5.3 / 6.5 / 6.1.4 Standard, 5.0 Smartphone (keypad only, [#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) | ✅ 6.5.3, 6.1.4 and 5.0 in 1.0.4; 6.5 Standard in 1.0.7 (`docs/research-standard.md`) |
-| WM 6.0 / 6.1, 2003 SE | ❌ (6.0/6.1 run but aren't offered; 2003 SE doesn't boot) |
+| Windows Mobile 6.5.3 Pro, 6.5 Pro, 6.1.4 Pro, 5.0 Pocket PC Phone, 2003 SE | ✅ 2003 SE: Today, Start menu, VGA, and the CF 2.0 helper |
+| Windows Mobile 6.5.3 / 6.5 / 6.1.4 Standard, 5.0 Smartphone, 2003 SE Smartphone (keypad only, [#2](https://github.com/UiharuKazari2008/StylusPPC/issues/2)) | ✅ 2003 SE Smartphone boots at 176×220. Its shell does not run the card autorun, so no helper |
+| WM 6.0 / 6.1 | ❌ (they run but aren't offered) |
 | Android 8.0 or newer ([#1](https://github.com/UiharuKazari2008/StylusPPC/issues/1)) | ✅ |
 | Snapshots, quick resume, Savepoint, warm reboot | ✅ |
-| Memory 96–256 MB; storage kept when Memory or Screen resolution changes | ✅ (WM 5: screen changes only) |
+| Memory 96–256 MB; storage kept when Memory or Screen resolution changes | ✅ (WM 5 and 2003 SE: screen changes only) |
 | Material You theme, wallpaper sync | ✅ |
 | Status bar (battery, signal, carrier, G/E/3G/H or 1X/Ev, Wi-Fi) | ✅ |
 | Your own phone number in WM | ✅ |
@@ -125,11 +127,12 @@ Each Professional release needs just one image: the board tells Windows Mobile i
 | Contacts and calendar sync | ✅ |
 | Tasks and notes sync | ❌ |
 | Launcher mode, Android Apps folder, app dock | ✅ |
-| .NET Compact Framework 3.5 (auto-installed on 5.0, 6.1.4 and original 6.5) | ✅ |
+| .NET Compact Framework 3.5 (auto-installed on 5.0, 6.1.4 and original 6.5) | ✅ 2003 SE gets CF 2.0 instead (CE 4.2; CF 3.5 needs CE 5) |
 | Windows Live Messenger via Escargot: Messenger / Passport names to Escargot through the secure web proxy, for classic MSNP clients (`docs/research-escargot.md`) | 🟡 |
 | Built-in Windows Live (6.5.3, 6.1.4) on Escargot, through PocketStylus's own Windows Live Mobile gateway | 🟡 sign-in works; contacts and chat in progress |
 | Built-in Pocket MSN (5.0) on Escargot | ❌ |
-| HTC HD2 apps from a ROM you own (Teeter, [`docs/research-hd2-port.md`](docs/research-hd2-port.md)) | 🟡 new in 1.0.6. Teeter plays. Other packages install and are untested |
+| HTC HD2 apps from a ROM you own (Teeter, Flashlight, [`docs/research-hd2-port.md`](docs/research-hd2-port.md)) | 🟡 new in 1.0.6. Teeter plays; Flashlight uses the phone's LED. Other packages install and are untested |
+| Adobe Flash Lite (SWF and Flash in Internet Explorer) | ✅ already in the 6.5 and 6.5.3 Professional images |
 | Today plugins: weather, InfraWAN room count (classic Today, not Titanium) | ✅ new in 1.0.6. Installed from PocketStylus settings, not at first boot |
 
 ---
@@ -142,6 +145,7 @@ Each Professional release needs just one image: the board tells Windows Mobile i
    - `Windows Mobile 6.5 Professional/Emulation Images` (`PPC_USA_GSM_WVGA_VR.BIN` is the one a phone uses; the other sizes are optional)
    - `Windows Mobile 6.1.4 Professional/Emulation Images`
    - `Windows Mobile 5.0 (Pocket PC)/Emulation Images`
+   - `Windows Mobile 2003 SE for Pocket PC (ARMv4)/Emulation Images` and `Windows Mobile 2003 SE for Smartphone (ARMv4)/Emulation Images`
    - for the keypad editions: `Windows Mobile 6.5.3 Standard`, `Windows Mobile 6.5 Standard`, `Windows Mobile 6.1.4 Standard` and `Windows Mobile 5.0 (Smartphone)`, each in its `Emulation Images` folder
 
    (They originally shipped with the *Windows Mobile 6.5.3 Developer Tool Kit*, the *Windows Mobile 6 SDK* image packages and the *Windows Mobile 5.0 SDK*.)
@@ -225,7 +229,7 @@ Each section below expands to show how the feature works.
   - **WM 6.5:** the theme's colour table and generated Titanium primitives, then the colour engine and a `WM_SETTINGCHANGE` broadcast.
   - **WM 5.0–6.1.4:** `BaseHue` plus a theme `Skin` entry, which make the built-in colour engine recolour the whole shell live.
   - **Theme reset** restores the original theme from a backup.
-- **Wallpaper sync:** the slice of your phone's wallpaper that sits behind the Windows Mobile screen becomes Windows Mobile's own wallpaper, so the two line up. There is a separate landscape picture for the open foldable. The Today screen's own picture cache is refreshed after every turn.
+- **Wallpaper sync:** the slice of your phone's wallpaper that sits behind the Windows Mobile screen becomes Windows Mobile's own wallpaper, so the two line up. There is a separate landscape picture for the open foldable. The Today screen's own picture cache is refreshed after a turn only while wallpaper sync is on.
 - The backdrop behind the skin is the live Android wallpaper, which the system draws exactly as on the home screen, with optional blur and opacity.
 </details>
 
@@ -266,6 +270,7 @@ Each section below expands to show how the feature works.
 
 - The helper installs `wmdcam.dll`, a hand-assembled ARM DLL, as the plug-in for Windows Mobile's NullCam driver. It talks to a camera device at PA 0x5F000000, which fills frames from the phone's Camera2 stream: preview 320×240, photos 640×480, video 176×144.
 - The sensor is presented in portrait and follows Windows Mobile's rotation.
+- **Flash:** Pictures & Videos lists Auto, On and Off. Original Windows Mobile 6.5 already shows that menu (it defaults to On). 6.5.3 ships with the menu hidden, and the helper turns it on. On holds the phone's LED. Auto turns it on when the picture is dark and leaves it on until the mode changes or the camera closes. Off leaves it dark. HTC Flashlight uses the same LED.
 - The optional **2009 filter** degrades the image towards a period phone camera (noise, softness, colour cast and compression), with a strength slider.
 </details>
 
@@ -350,7 +355,7 @@ A later PocketStylus update replaces a plugin that is already installed. It does
 <details>
 <summary><b>HTC HD2 apps, including Teeter</b></summary>
 
-PocketStylus ships no HTC software. Settings → **HTC HD2 apps** opens an HD2 ROM you own (`RUU_signed.nbh`, an `os.nb`, or an IMGFS dump) and lists packages that contain a program. **Teeter** is the one that is known to run. The rest are marked untested.
+PocketStylus ships no HTC software. Settings → **HTC HD2 apps** opens an HD2 ROM you own (`RUU_signed.nbh`, an `os.nb`, or an IMGFS dump) and lists packages that contain a program. **Teeter** and **Flashlight** are the ones that are known to run. Flashlight's own library needs a Qualcomm chip, so the helper installs a small replacement that drives the phone's camera LED. The rest are marked untested.
 
 Installing stages that package onto the storage card and the helper copies it into Windows Mobile the way the ROM laid it out: files, missing DLLs, registry and the Start menu shortcut. Teeter uses the phone's accelerometer (the sensor runs only while the game is reading it, and automatic rotation pauses so the tilt is the game's). It is a 480×800 program, so the page can switch to that resolution and restart. On 6.5.3 Professional that size boots the optional WVGA image when you have imported it. HTC apps are WM 6.5 only. See `docs/research-hd2-port.md`.
 </details>
@@ -394,9 +399,9 @@ Device settings are per OS, except those about the phone itself, which every OS 
 
 | Page | Settings |
 |---|---|
-| **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android |
+| **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android · Passive Matrix LCD Filter (Pixel Grid, Washed-Out Contrast, Crosstalk Streaks, Uneven Backlight, Ghosting sliders) |
 | **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Style (glass / flat / bubbled / metallic) · Key Opacity · Key Outline · Key Glyph · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
-| **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Lock Button Closes App · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
+| **Hardware** | Limit CPU Speed · CPU Speed (MHz) · Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Lock Button Closes App · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
 | **Power** | Disable Battery Optimization (until Android allows it) · Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
 | **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts |
 | **Network** | Secure Web Proxy (modern HTTPS) · Windows Live Messenger via Escargot |
@@ -463,7 +468,7 @@ core/src/htc/     read an HTC HD2 ROM and stage one package (no HTC files are sh
 core/src/net/     user-mode NAT, secure web proxy (TLS), Escargot / Windows Live gateway
 core/cli/         headless runner
 app/              Android app (Kotlin UI + JNI: GL presenter, AAudio, sensors, bridges)
-guest/Helper/     the in-guest helper (C#, .NET CF 3.5)
+guest/Helper/     the in-guest helper (C#, .NET CF 3.5, plus a CF 2.0 build for WM 2003)
 guest/Autorun/    native .NET CF bootstrap (C, Windows CE ARM)
 guest/AppLink/    native launcher for Android apps in Windows Mobile's Start menu (C, Windows CE ARM)
 guest/Sensor/     HTC SEN0: G-sensor driver
@@ -478,4 +483,4 @@ docs/             research notes: hardware, status bar, themes, calls, camera, G
 
 ## Legal
 
-Windows Mobile, Windows CE and the Device Emulator images are Microsoft's. PocketStylus includes no ROM images: you supply your own. The text-message bridge on WM 6.5.3 uses the MAPIdotnet (`MAPIlib.dll`, source in `third_party/mapidotnet`, shared by its author to use freely) and OpenNETCF Smart Device Framework (`OpenNETCF.dll`) libraries, under their own terms. The secure web proxy uses BoringSSL (`third_party/boringssl/LICENSE`). The APK bundles Microsoft's freely redistributable .NET Compact Framework 3.5 CAB (`NETCFv35.wm.armv4i.cab`), which is installed into releases that lack it, under Microsoft's redistribution terms. PocketStylus was written without using Device Emulator source code.
+Windows Mobile, Windows CE and the Device Emulator images are Microsoft's. PocketStylus includes no ROM images: you supply your own. The text-message bridge on WM 6.5.3 uses the MAPIdotnet (`MAPIlib.dll`, source in `third_party/mapidotnet`, shared by its author to use freely) and OpenNETCF Smart Device Framework (`OpenNETCF.dll`) libraries, under their own terms. The secure web proxy uses BoringSSL (`third_party/boringssl/LICENSE`). The APK bundles Microsoft's freely redistributable .NET Compact Framework CABs, installed into releases that lack them, under Microsoft's redistribution terms: CF 3.5 (`NETCFv35.wm.armv4i.cab`) for Windows Mobile 5 and later, and CF 2.0 (`NETCFv2.wce4.ARMV4.cab`) for Windows Mobile 2003. The 2003 CAB is that CE 4.2 redistributable with Pocket PC and Smartphone removed from its unsupported-platform list, so wceload on those devices will install it; the runtime files are unchanged. PocketStylus was written without using Device Emulator source code.

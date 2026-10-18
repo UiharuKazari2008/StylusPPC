@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 // WMDroid's settings app inside Windows Mobile (Settings > System > WMDroid). Its pages are built
@@ -424,6 +426,8 @@ class SettingsForm : Form
 
 // Which Windows Mobile edition this is: Standard (Smartphone, keypad only) lacks the Compact
 // Framework's touch controls (Button, TabControl, TrackBar, ListBox...), so forms build a keypad UI.
+// SPI_GETPLATFORMTYPE is the CE query (PocketPC / SmartPhone). WinCEPlatform is CF 3.5 only, so the
+// CF 2.0 helper (WM 2003) cannot use it.
 static class Edition
 {
     static int smartphone = -1;
@@ -432,12 +436,29 @@ static class Edition
     {
         get
         {
-            if (smartphone < 0)
-            {
-                try { smartphone = Microsoft.WindowsCE.Forms.SystemSettings.Platform == Microsoft.WindowsCE.Forms.WinCEPlatform.Smartphone ? 1 : 0; }
-                catch (Exception) { smartphone = 0; }
-            }
+            if (smartphone < 0) smartphone = Query() ? 1 : 0;
             return smartphone == 1;
         }
     }
+
+    static bool Query()
+    {
+        try
+        {
+            StringBuilder b = new StringBuilder(64);
+            if (SystemParametersInfo(257 /* SPI_GETPLATFORMTYPE */, b.Capacity, b, 0))
+            {
+                string s = b.ToString();
+                if (s.Length > 0) return s.StartsWith("Smart", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch (Exception) { }
+#if !CF2
+        try { return Microsoft.WindowsCE.Forms.SystemSettings.Platform == Microsoft.WindowsCE.Forms.WinCEPlatform.Smartphone; }
+        catch (Exception) { }
+#endif
+        return false;
+    }
+
+    [DllImport("coredll.dll")] static extern bool SystemParametersInfo(int action, int param, StringBuilder buf, int winini);
 }

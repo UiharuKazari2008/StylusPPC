@@ -21,6 +21,10 @@
 //                     turned to that orientation now (its page-table entries are only reliably live
 //                     there); 0x200 from the helper, every half second: the registry is in step.
 //                     The table is only turned after 0x200 in this run: a mismatch crashes pimg.
+//   +0x1C FLASH   rw  bits 0..7: Pictures & Videos flash mode (HKCU\...\Camera\User\Flash, written
+//                     by the helper): 0 auto, 1 on, 2 off (the menu order). Bit 8: HTC Flashlight
+//                     is holding the LED on (guest/Flash/flashlight.c). The host lights the phone's
+//                     flash from these.
 //
 // Orientation: NULLCAM's formats are BI_SRCPREROTATE, so frames go onto the panel as they are,
 // whatever Windows Mobile's own screen rotation. A real phone's sensor is fixed to its panel too:
@@ -66,6 +70,11 @@ public:
     /** Strength 0..100 (0 = off): every stage of the look scales with it. */
     void setEra(int level) { era = level < 0 ? 0 : level > 100 ? 100 : level; }
     bool eraOn() const { return era > 0; }
+    /**
+     * Flash request from the guest (register +0x1C). Low byte: 0 auto, 1 on, 2 off, the
+     * Pictures & Videos menu order. Bit 8: an app such as HTC Flashlight is holding the LED on.
+     */
+    int flash() const { return flashMode.load(); }
 
     /**
      * A camera frame in YUV 420 (Android YUV_420_888: any pixel stride for the chroma planes).
@@ -128,6 +137,7 @@ private:
     std::vector<Packed> cache;
     std::atomic<bool> hostCamera{false};
     std::atomic<int> era{0};
+    std::atomic<int> flashMode{0};
     std::atomic<bool> attached{false};
     std::atomic<uint64_t> attachNs{0}, lastFillNs{0};
     std::atomic<uint64_t> renderSalt{0};

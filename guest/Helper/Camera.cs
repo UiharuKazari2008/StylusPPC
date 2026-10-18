@@ -32,6 +32,25 @@ static class Camera
             if ((k.GetValue("FunctionName") as string) != "Fill") k.SetValue("FunctionName", "Fill");
         }
         Orient();
+        Flash();
+    }
+
+    // The menu is Auto / On / Off (shellres command ids 0xA050, 0xA051, 0xA052). User\Flash stores
+    // that order: 0 auto, 1 on, 2 off. Original WM 6.5 already has EnableFlash=1 and Flash=1 (On).
+    // 6.5.3 ships EnableFlash=0, which hides the menu; setting 1 shows the same three choices.
+    // pimg's own fallback when Flash is missing is 1 (On). A missing value is written as off so
+    // the LED stays dark the first time the menu appears.
+    static void Flash()
+    {
+        using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Oem))
+        {
+            object v = k.GetValue("EnableFlash");
+            if (!(v is int) || (int)v == 0) k.SetValue("EnableFlash", 1);
+        }
+        using (RegistryKey u = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Pictures\Camera\User"))
+        {
+            if (u.GetValue("Flash") == null) u.SetValue("Flash", 2);
+        }
     }
 
     const string Oem = @"Software\Microsoft\Pictures\Camera\OEM";
@@ -42,7 +61,18 @@ static class Camera
     // driver's formats only after hearing this in the current run (a mismatch crashes pimg).
     public static void Poll()
     {
-        if (inStep && regs != IntPtr.Zero) Marshal.WriteInt32(regs, 0x18, 0x200);
+        if (!inStep || regs == IntPtr.Zero) return;
+        Marshal.WriteInt32(regs, 0x18, 0x200);
+        int mode = 0;
+        using (RegistryKey u = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Pictures\Camera\User"))
+        {
+            object v = u == null ? null : u.GetValue("Flash");
+            if (v is int) mode = (int)v;
+        }
+        // Low byte is this mode. Bit 8 is HTC Flashlight (guest/Flash/flashlight.c); leave it.
+        int cur = Marshal.ReadInt32(regs, 0x1C);
+        int next = (cur & ~0xff) | (mode & 0xff);
+        if (next != cur) Marshal.WriteInt32(regs, 0x1C, next);
     }
 
     // pimg's photo and video sizes in the sensor's orientation (the emulator's ORIENT register).

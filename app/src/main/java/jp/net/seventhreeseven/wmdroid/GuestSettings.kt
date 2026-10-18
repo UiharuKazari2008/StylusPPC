@@ -106,6 +106,12 @@ object GuestSettings {
         bool("Display", "stats", "Performance overlay", { it.showStats }, { s, v -> s.showStats = v }),
         choice("Display", "filter", "Screen scaling", listOf("0" to "Smooth", "1" to "Sharp pixels", "2" to "Enhanced"),
             { it.screenFilter.toString() }, { s, v -> s.screenFilter = v.toInt() }),
+        bool("Display", "lcd", "Passive Matrix LCD Filter", { it.lcdOn }, { s, v -> s.lcdOn = v }),
+        slider("Display", "lcdgrid", "Pixel Grid", 0, 100, { it.lcdGrid }, { s, v -> s.lcdGrid = v }),
+        slider("Display", "lcdcontrast", "Washed-Out Contrast", 0, 100, { it.lcdContrast }, { s, v -> s.lcdContrast = v }),
+        slider("Display", "lcdxtalk", "Crosstalk Streaks", 0, 100, { it.lcdCrosstalk }, { s, v -> s.lcdCrosstalk = v }),
+        slider("Display", "lcdlight", "Uneven Backlight", 0, 100, { it.lcdBacklight }, { s, v -> s.lcdBacklight = v }),
+        slider("Display", "lcdghost", "Ghosting (Persistence)", 0, 100, { it.lcdGhost }, { s, v -> s.lcdGhost = v }),
         bool("Display", "rotate", "Auto-Rotate", { it.rotateGuest }, { s, v -> s.rotateGuest = v }),
         slider("Display", "rotdelay", "Rotation Delay (ms)", 200, 3000, { it.rotationDelayMs }, { s, v -> s.rotationDelayMs = v }),
         slider("Display", "rotsens", "Rotation Sensitivity", 0, 100, { it.rotationSensitivity }, { s, v -> s.rotationSensitivity = v }),
@@ -158,6 +164,8 @@ object GuestSettings {
             { it.cameraMode }, { s, v -> s.cameraMode = v }),
         bool("Hardware", "camfilter", "Apply 2009 Filter to Camera", { it.cameraEraOn }, { s, v -> s.cameraEraOn = v }),
         slider("Hardware", "camlevel", "Filter Intensity", 1, 100, { it.cameraEraLevel }, { s, v -> s.cameraEraLevel = v }),
+        bool("Hardware", "cpulimit", "Limit CPU Speed", { it.cpuLimitOn }, { s, v -> s.cpuLimitOn = v }),
+        slider("Hardware", "cpumhz", "CPU Speed (MHz)", 50, 1000, { it.cpuMhz }, { s, v -> s.cpuMhz = v }),
         bool("Hardware", "gps", "GPS", { it.gpsOn }, { s, v -> s.gpsOn = v }),
         bool("Hardware", "btreceive", "Receive Bluetooth Files", { it.bluetoothReceive }, { s, v -> s.bluetoothReceive = v }),
         bool("Hardware", "clipboard", "Sync Clipboard", { it.syncClipboard }, { s, v -> s.syncClipboard = v }),  // ClipboardBridge
@@ -285,13 +293,13 @@ object GuestSettings {
             choice(e.page, e.key, e.label, ram, { s -> s.memMB.toString().takeIf { v -> ram.any { it.first == v } } ?: "0" },
                 { s, v -> s.memMB = v.toInt() }, restart = true)
         }
-        if (profile.touch) return liveEntries(settings, entries.map { e ->
+        if (profile.touch) return liveEntries(settings, withoutHelper(profile, entries.map { e ->
             when {
                 e.key == "ram" -> ramEntry(e)
                 e.key == "res" && profile.maxHeight > 0 -> resCapped(e, profile.maxHeight)
                 else -> e
             }
-        })
+        }))
         val res = listOf(Settings.SCREEN_AUTO to "Phone shape (auto)") + profile.screens.map { it.id to it.label }
         return entries.filter { it.key !in TOUCH_ONLY }.map { e ->
             when (e.key) {
@@ -304,7 +312,7 @@ object GuestSettings {
                     { if (it.keysOn) "full" else "none" }, { s, v -> s.keysOn = v != "none" })
                 else -> e
             }
-        }.let { liveEntries(settings, it) }
+        }.let { liveEntries(settings, withoutHelper(profile, it)) }
     }
 
     /** Call audio's choices are the outputs connected right now (CallAudio). */
@@ -347,6 +355,18 @@ object GuestSettings {
     /** Settings a Standard (keypad) release doesn't have (entriesFor). */
     private val TOUCH_ONLY = setOf("rotate", "rotdelay", "rotsens", "fold", "foldkb", "hinge", "hingestyle", "hingethick",
         "hingeloc", "hingealpha", "button1", "button2", "button3", "button4", "dpi")
+
+    /**
+     * Pages and rows that only the .NET CF 3.5 helper can apply. Windows Mobile 2003 has no helper
+     * (OsProfile.helper): the skin, screen, memory and power options stay.
+     */
+    private val HELPER_PAGES = setOf("Phone", "Contacts", "Infrared", "Today", "Launcher")
+    private val HELPER_KEYS = setOf(
+        "rotate", "rotdelay", "rotsens", "brightness", "theme", "homewall", "androidime", "netind",
+        "camera", "camfilter", "camlevel", "gps", "clipboard", "dpi", "secureproxy", "escargot", "editfolders")
+
+    private fun withoutHelper(profile: OsProfile, list: List<Entry>) =
+        if (profile.helper) list else list.filter { it.page !in HELPER_PAGES && it.key !in HELPER_KEYS }
 
     // Buttons whose screens are Android's (role requests, permissions, text entry, a connection
     // test): the guest sends the command, EmulatorActivity / DeviceSettingsActivity open the screen.

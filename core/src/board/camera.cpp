@@ -303,6 +303,7 @@ uint32_t Camera::read(uint32_t pa, int) {
         case 0x0C: return vih;
         case 0x14: return result;
         case 0x18: return panelPortrait ? 1 : 2;
+        case 0x1C: return (uint32_t)flashMode.load();
     }
     return 0;
 }
@@ -320,6 +321,7 @@ void Camera::write(uint32_t pa, uint32_t v, int) {
                 orientFormats();
             }
             break;
+        case 0x1C: flashMode = (int)v; break;
     }
 }
 

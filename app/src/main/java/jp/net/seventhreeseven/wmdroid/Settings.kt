@@ -85,6 +85,40 @@ class Settings(ctx: Context) {
         get() = p.getInt("screen.filter", 1)
         set(v) = p.edit().putInt("screen.filter", v).apply()
 
+    /** Speed limit: the guest CPU runs no faster than a phone of [cpuMhz] would. */
+    var cpuLimitOn: Boolean
+        get() = p.getBoolean("cpu.limit", false)
+        set(v) = p.edit().putBoolean("cpu.limit", v).apply()
+    var cpuMhz: Int
+        get() = p.getInt("cpu.limit.mhz", 400)
+        set(v) = p.edit().putInt("cpu.limit.mhz", v).apply()
+
+    /**
+     * The limit in guest MIPS, 0 = none. A 2008 ARM9/ARM11 ran about 0.7 instructions per clock
+     * once its slow SDRAM and small caches were counted, so 400 MHz is about 280 MIPS.
+     */
+    val cpuMipsCap: Int get() = if (cpuLimitOn) (cpuMhz * 7 + 5) / 10 else 0
+
+    /** Passive-matrix (CSTN) LCD look on the screen, with each effect's strength 0..100. */
+    var lcdOn: Boolean
+        get() = p.getBoolean("screen.lcd", false)
+        set(v) = p.edit().putBoolean("screen.lcd", v).apply()
+    var lcdGrid: Int
+        get() = p.getInt("screen.lcd.grid", 50)
+        set(v) = p.edit().putInt("screen.lcd.grid", v).apply()
+    var lcdContrast: Int
+        get() = p.getInt("screen.lcd.contrast", 50)
+        set(v) = p.edit().putInt("screen.lcd.contrast", v).apply()
+    var lcdCrosstalk: Int
+        get() = p.getInt("screen.lcd.crosstalk", 35)
+        set(v) = p.edit().putInt("screen.lcd.crosstalk", v).apply()
+    var lcdBacklight: Int
+        get() = p.getInt("screen.lcd.backlight", 50)
+        set(v) = p.edit().putInt("screen.lcd.backlight", v).apply()
+    var lcdGhost: Int
+        get() = p.getInt("screen.lcd.ghost", 60)
+        set(v) = p.edit().putInt("screen.lcd.ghost", v).apply()
+
     /** Save the session when leaving the app and continue it on the next start. */
     var resumeSession: Boolean
         get() = p.getBoolean("resume", true)

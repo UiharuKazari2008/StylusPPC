@@ -59,6 +59,20 @@ public:
     int count = 0;
 };
 
+// S3C2410 NAND controller (docs/research-de-hardware.md 3.11). WM2003 SE's flash
+// driver resets the chip and spins until NFSTAT bit0 (RnB) reads ready. There is
+// no NAND chip: Read ID returns 0xFF and the driver leaves storage in RAM.
+class NandCtrl : public RegFile {
+public:
+    NandCtrl() : RegFile("nand", 0x100) {}
+    uint32_t read(uint32_t pa, int size) override {
+        uint32_t off = pa & 0xFF;
+        if (off == 0x10) return 1;
+        if (off == 0x0C) return 0xFF;
+        return RegFile::read(pa, size);
+    }
+};
+
 uint64_t hostNs() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -237,7 +251,7 @@ bool Machine::load(std::string &err) {
     bus.mapDevice(0x4B000000, 0x100000, dma.get());
     bus.mapDevice(0x4C000000, 0x100000, &clk);
     bus.mapDevice(0x4D000000, 0x100000, lcd.get());
-    bus.mapDevice(0x4E000000, 0x100000, own(new Probe("nand", 0x100)));
+    bus.mapDevice(0x4E000000, 0x100000, own(new NandCtrl()));
     bus.mapDevice(0x50000000, 0x100000, dePage.get());
     bus.mapDevice(0x51000000, 0x100000, &pwm);
     bus.mapDevice(0x52000000, 0x100000, own(new Probe("usbdev", 0x400)));
@@ -360,6 +374,7 @@ bool Machine::runFor(uint64_t ns) {
             uint64_t next = std::min(pwmNext, dma->nextEventNs());
             if (next > end) next = end;
             uint64_t wait = next > now ? next - now : 0;
+            paceInsns = 0;  // idle time earns the speed limit no credit
             if (cfg.deterministic) {
                 virtNs += wait ? wait : 1000;
                 idleNs += wait ? wait : 1000;
@@ -376,6 +391,21 @@ bool Machine::runFor(uint64_t ns) {
         if (cfg.deterministic && (end - now) / 5 < slice) slice = (end - now) / 5 + 1;
         uint64_t ran = cpu.run(slice);
         if (cfg.deterministic) virtNs += ran * 5;
+        else if (uint32_t cap = mipsCap.load(std::memory_order_relaxed)) {
+            // Speed limit: the instructions run since the reference point take insns / cap us at
+            // the limit. Ahead of that by 2 ms or more, wait (timers keep real time, so the guest
+            // sees a slower CPU). Far behind (a slow host, a long JIT compile), start over rather
+            // than letting the guest catch up in a burst.
+            if (!paceInsns) paceStartNs = now;
+            paceInsns += ran;
+            uint64_t due = paceStartNs + paceInsns * 1000 / cap, t = nowNs();
+            if (due > t + 2000000) {
+                uint64_t wait = std::min<uint64_t>(due - t, 20000000);
+                std::this_thread::sleep_for(std::chrono::nanoseconds(wait));
+            } else if (t > due + 50000000) {
+                paceInsns = 0;
+            }
+        }
     }
     return !stopRequested;
 }

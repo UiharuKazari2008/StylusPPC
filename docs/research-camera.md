@@ -168,7 +168,11 @@ What it gives and what it costs:
 ### (b2) Registry plug-in DLL plus a hypercall: fallback if a PC trap is awkward
 
 - The Helper copies `wmdcam.dll` to `\Windows` and sets `HKLM\Drivers\Capture\NullCam`
-  `LibraryName="\Windows\wmdcam.dll"`, `FunctionName="Fill"`.
+  `LibraryName="\Windows\wmdcam.dll"`, `FunctionName="Fill"`. It sets `EnableFlash=1` when that
+  value is missing or 0 (6.5.3 ships 0 and hides the menu; original 6.5 WVGA already ships 1) and
+  copies `HKCU\...\Camera\User\Flash` to the camera device. The menu order in `shellres.dll.0409.mui`
+  is Auto, On, Off (command ids `0xA050`, `0xA051`, `0xA052`), and those are the stored values 0, 1
+  and 2. pimg's compiled-in default, and the 6.5 user hive, are 1 (On).
 - `Fill` is about 10 ARM instructions with **no imports**:
   1. touch one byte per 4 KB of the buffer, to commit the pages;
   2. execute a reserved coprocessor op (for example `mcr p7,0,r0,c0,c0,0`), which WMDroid intercepts in

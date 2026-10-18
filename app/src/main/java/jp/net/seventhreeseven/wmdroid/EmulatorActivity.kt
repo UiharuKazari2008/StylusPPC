@@ -210,7 +210,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             hingeLocation = settings.hingeLocation
             hingeOpacity = settings.hingeOpacity
             setBacklight(settings.backlightOn, settings.backlightIntensity, settings.backlightTimeout, settings.backlightColor, settings.backlightDirt)
-            spec =SkinSpec.load(this@EmulatorActivity, settings)
+            spec = SkinSpec.load(this@EmulatorActivity, settings).also { appliedSkin = settings.customSkin }
             backdrop = settings.backdrop
             wallpaperOn = settings.showWallpaper
             backdropOpacity = settings.backdropOpacity / 100f
@@ -308,6 +308,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 val mounts = StorageBridge.mounts(this, settings)
                 NativeBridge.setShareMounts(hd, mounts.map { it.first }.toTypedArray(), mounts.map { it.second }.toTypedArray())
                 NativeBridge.setFilter(hd, settings.screenFilter)
+                applyLcdLook(hd)
+                NativeBridge.setSpeedLimit(hd, settings.cpuMipsCap)
                 NativeBridge.setRotation(hd, if (foldGuest) 1 else 0)
                 NativeBridge.setAudioGain(hd, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
                 val overlays = guest.prepare()
@@ -604,7 +606,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private var guestAngle = 0
     private fun sendRotate(deg: Int) {
         guestAngle = ((deg % 360) + 360) % 360
-        guest.send("rotate $guestAngle")
+        // Today is refreshed only while the phone's wallpaper is Windows Mobile's. Otherwise the
+        // turn itself is enough: the theme picture is already the right one for the new size.
+        val sync = if (settings.syncWallpaper) " sync" else ""
+        guest.send("rotate $guestAngle$sync")
     }
 
     /**
@@ -1537,8 +1542,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                     Toast.makeText(this, if (ok) "Savepoint written" else "Couldn't write the savepoint", Toast.LENGTH_SHORT).show()
                 }
             },
-            // WM 5's standby loses a kernel page on power-off and never wakes: no Suspend there.
-            if (settings.profileId == "wm5ppcphone" || settings.profileId == "wm5sp") null
+            // WM 5's standby loses a kernel page on power-off and never wakes. WM 2003 SE ignores
+            // the power button, so it does not suspend either.
+            if (settings.profileId == "wm5ppcphone" || settings.profileId == "wm5sp" ||
+                settings.profileId == "wm2003se" || settings.profileId == "wm2003sesp") null
             else PowerMenu.Item("Suspend", "Sleep Windows Mobile and leave PocketStylus", icon = "suspend") {
                 if (userPaused) setUserPaused(false)
                 suppressWake = true
@@ -1735,9 +1742,18 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     /** A setting changed from inside Windows Mobile: apply everything that can change live. */
+    /** The passive-matrix LCD look and its effect strengths (GlRenderer::setStn). */
+    private fun applyLcdLook(h: Long) = NativeBridge.setLcdLook(h, settings.lcdOn, settings.lcdGrid,
+        settings.lcdContrast, settings.lcdCrosstalk, settings.lcdBacklight, settings.lcdGhost)
+
     private fun applyLiveSettings() {
         skin.keysOn = settings.keysOn
         skin.dpadOn = settings.dpadOn
+        val skinJson = settings.customSkin
+        if (skinJson != appliedSkin) {
+            appliedSkin = skinJson
+            skin.spec = SkinSpec.load(this, settings)
+        }
         skin.backdrop = settings.backdrop
         skin.wallpaperOn = settings.showWallpaper
         skin.backdropOpacity = settings.backdropOpacity / 100f
@@ -1761,6 +1777,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (autoRotate && foreground && !foldGuest && !motion.inUse) rotation.start() else rotation.stop()
         if (handle != 0L) {
             NativeBridge.setFilter(handle, settings.screenFilter)
+            applyLcdLook(handle)
+            NativeBridge.setSpeedLimit(handle, settings.cpuMipsCap)
             NativeBridge.setAudioGain(handle, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
             // WM's Buttons 1-4: choices WM must store (Keymap.HwButtons), only when they changed.
             val buttons = GuestSettings.buttonsCommand(settings)
@@ -2049,6 +2067,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private var wallpaperSent = false
     private var lastButtonsSent: String? = null
     private var lastWallKey: String? = null
+    /** The imported skin JSON last given to the view (empty = the built-in skin). */
+    private var appliedSkin: String? = null
 
     private val brightnessObserver = object : android.database.ContentObserver(ui) {
         override fun onChange(selfChange: Boolean) = sendBrightness()

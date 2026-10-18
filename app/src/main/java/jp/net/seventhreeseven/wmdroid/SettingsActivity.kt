@@ -160,7 +160,7 @@ class SettingsActivity : SettingsPage() {
         spec.backdrop?.let { b -> if (b in listOf("black", "gray", "silver", "white")) settings.backdrop = b }
         spec.opacity?.let { settings.backdropOpacity = it.coerceIn(0, 100) }
         showSkin()
-        android.widget.Toast.makeText(this, "Skin loaded; saving restarts the device with it", android.widget.Toast.LENGTH_SHORT).show()
+        android.widget.Toast.makeText(this, "Skin loaded. Go back to see it.", android.widget.Toast.LENGTH_SHORT).show()
         return true
     }
 

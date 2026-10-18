@@ -207,6 +207,11 @@ static class Patch
     // modem (docs/research-cellular.md sections 1.2 and 4). Takes effect at the next boot.
     static void ModemRadio()
     {
+        // WM 2003's rilgsm (when the image has that DLL name) does not speak the virtual modem
+        // the way WM 6's sample RIL does. Pointing it at COM1 and loading it stops the soft reboot
+        // in a prefetch-abort loop right after its first AT command. Leave the image's own radio
+        // setup alone; calls on this release are not driven from here.
+        if (Environment.OSVersion.Version.Major < 5) return;
         if (!ModemRil) return;
         using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"Software\Microsoft\RIL"))
         {

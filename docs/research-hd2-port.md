@@ -74,8 +74,9 @@ The stock image has ddraw, d3dm (+ the d3dmref software rasterizer), gx and imag
   install to \Windows and the .rgu imported, it starts but never shows a window and can't be
   killed (agent hangs). Probably blocked on HTC's ResProxy service (`Resource_Proxy` package),
   which ResLoader uses.
-- **HTCFlashlight**: null function call (PC=0). Likely a missing HTC service or a dynamically loaded
-  DLL; not yet analysed.
+- **HTCFlashlight**: the exe loads `HTCFlashlightLib.dll` and calls `EnableFlashLight` / `SetFlashLightDegree`.
+  HTC's library maps a Qualcomm PMIC and the call lands at address 0. PocketStylus replaces that DLL
+  (`guest/Flash/flashlight.c`) and drives the phone's camera LED. Mode 0 releases it; any other mode holds it.
 - **Turbo3D**: "E: error.not_loaded" message box.
 
 Crash triage: `Probe copy \Windows\System\DumpFiles "\Storage Card\dumps"`, then parse the .kdmp
@@ -174,6 +175,6 @@ with `--accel` tilts. The app page itself was compiled; its UI flow is not yet t
 
 1. Decode romimage's compressed relocations properly (the heuristic has worked on every DLL tried).
 2. Install HTC services in the order their packages expect (HTC_Framework, Resource_Proxy,
-   HTC_Util, htcDevService), then retry Calculator, Flashlight and Album.
+   HTC_Util, htcDevService), then retry Calculator and Album. Flashlight's LED is the phone's camera flash.
 3. Other G-sensor users: auto-rotate (HTCSensorSDK), compass (needs a magnetometer IOCTL).
 4. GL ES: pass-through `libgles_cm.dll`/`libEGL` to the host GPU → Manila / Sense home.

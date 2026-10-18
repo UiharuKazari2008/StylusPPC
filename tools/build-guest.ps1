@@ -36,3 +36,41 @@ foreach ($dir in Get-ChildItem (Join-Path $root 'guest') -Directory) {
     if ($LASTEXITCODE -ne 0) { throw "csc failed for $name ($LASTEXITCODE)" }
     Write-Host "built $exe"
 }
+
+# Windows Mobile 2003 is CE 4.2. CF 3.5 will not load there, so the same sources are built again
+# against the CF 2.0 assemblies inside NETCFv2.wce4.ARMV4.cab (/define:CF2). CF 3.5 runs that
+# binary too, but the WM 5 and later asset stays the CF 3.5 build above.
+$cab2 = Join-Path (Split-Path $out) 'NETCFv2.wce4.ARMV4.cab'
+$seven = @(
+    "$env:ProgramFiles\7-Zip\7z.exe",
+    "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
+    "$env:USERPROFILE\scoop\shims\7z.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not (Test-Path $cab2)) { Write-Host "no $cab2; skipping the CF 2.0 helper"; return }
+if (-not $seven) { throw "7z is required to read $cab2" }
+$ref2 = Join-Path $root 'build\netcf2-ref'
+New-Item -ItemType Directory -Force $ref2 | Out-Null
+$unpack = Join-Path $ref2 'cab'
+if (Test-Path $unpack) { Remove-Item $unpack -Recurse -Force }
+New-Item -ItemType Directory -Force $unpack | Out-Null
+& $seven e "-o$unpack" -y $cab2 mscorlib.007 00System.008 SYSTEM~3.009 SYSTEM~4.012 SY40C7~1.014 SY4317~1.016 MICROS~1.018 SYSTEM~1.015 | Out-Null
+$names = @{
+    'mscorlib.007' = 'mscorlib.dll'; '00System.008' = 'System.dll'; 'SYSTEM~3.009' = 'System.Drawing.dll'
+    'SYSTEM~4.012' = 'System.Windows.Forms.dll'; 'SY40C7~1.014' = 'System.Xml.dll'; 'SY4317~1.016' = 'System.Data.dll'
+    'MICROS~1.018' = 'Microsoft.WindowsCE.Forms.dll'; 'SYSTEM~1.015' = 'System.Net.IrDA.dll'
+}
+foreach ($k in $names.Keys) { Copy-Item (Join-Path $unpack $k) (Join-Path $ref2 $names[$k]) -Force }
+$refs2 = $names.Values | ForEach-Object { "/r:$(Join-Path $ref2 $_)" }
+$helper = Get-ChildItem (Join-Path $root 'guest\Helper') -Filter *.cs | ForEach-Object FullName
+$exe2 = Join-Path (Split-Path $out) 'WMDroid2003.exe'
+& $csc /nologo /noconfig /nostdlib+ /target:winexe /optimize+ /define:CF2 /nowarn:618,1030,0168,0169,0219,0414,0649 "/out:$exe2" @refs2 @helper
+if ($LASTEXITCODE -ne 0) { throw "csc failed for WMDroid2003 ($LASTEXITCODE)" }
+Write-Host "built $exe2"
+foreach ($dir in @('GpsTest','InfraLobby','SendBluetooth','IrTest')) {
+    $src = @(Get-ChildItem (Join-Path $root "guest\$dir") -Filter *.cs | ForEach-Object FullName)
+    if ($src.Count -eq 0) { continue }
+    $exe = Join-Path (Split-Path $out) "$dir`2003.exe"
+    & $csc /nologo /noconfig /nostdlib+ /target:winexe /optimize+ /define:CF2 /nowarn:618,1030,0168,0169,0219,0414,0649 "/out:$exe" @refs2 @src
+    if ($LASTEXITCODE -ne 0) { throw "csc failed for $dir CF2 ($LASTEXITCODE)" }
+    Write-Host "built $exe"
+}
