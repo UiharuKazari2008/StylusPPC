@@ -54,7 +54,8 @@ class DiscordApp : Form
     int textPt = 9;
     int imageMax = 220;
     int avatarPx = 32;
-    int refreshMs = 5000;
+    int refreshMs;
+    bool refreshUser;
     string storedToken = "";
     Page asidePage = Page.Home;
     readonly List<Row> homeAll = new List<Row>();
@@ -741,7 +742,8 @@ class DiscordApp : Form
         }
         else if (row.Id == "refresh")
         {
-            refreshMs = Step(refreshMs, new int[] { 0, 5000, 15000, 30000, 60000 }, dir);
+            refreshUser = true;
+            refreshMs = Step(refreshMs, new int[] { 0, 30000, 60000, 120000, 300000 }, dir);
             ApplyRefresh();
         }
         list.TextPt = textPt;
@@ -773,10 +775,10 @@ class DiscordApp : Form
     string RefreshName()
     {
         if (refreshMs <= 0) return "Off";
-        if (refreshMs < 10000) return "5 seconds";
-        if (refreshMs < 20000) return "15 seconds";
         if (refreshMs < 45000) return "30 seconds";
-        return "1 minute";
+        if (refreshMs < 90000) return "1 minute";
+        if (refreshMs < 180000) return "2 minutes";
+        return "5 minutes";
     }
 
     static Row Opt(string id, string name, string value)
@@ -1622,6 +1624,7 @@ class DiscordApp : Form
                 else if (line.StartsWith("text=")) textPt = ParseInt(line.Substring(5), textPt);
                 else if (line.StartsWith("image=")) imageMax = ParseInt(line.Substring(6), imageMax);
                 else if (line.StartsWith("avatar=")) avatarPx = ParseInt(line.Substring(7), avatarPx);
+                else if (line.StartsWith("refreshuser=")) refreshUser = line.Substring(12) == "1";
                 else if (line.StartsWith("refresh=")) refreshMs = ParseInt(line.Substring(8), refreshMs);
                 else if (line.StartsWith("fav="))
                 {
@@ -1638,7 +1641,7 @@ class DiscordApp : Form
             if (textPt < 8 || textPt > 16) textPt = 9;
             if (imageMax < 80 || imageMax > 480) imageMax = 220;
             if (avatarPx < 24 || avatarPx > 48) avatarPx = 32;
-            if (refreshMs < 0) refreshMs = 5000;
+            if (!refreshUser || refreshMs < 0) refreshMs = 0;
         }
         return token;
     }
@@ -1683,6 +1686,7 @@ class DiscordApp : Form
                 w.WriteLine("text=" + textPt);
                 w.WriteLine("image=" + imageMax);
                 w.WriteLine("avatar=" + avatarPx);
+                if (refreshUser) w.WriteLine("refreshuser=1");
                 w.WriteLine("refresh=" + refreshMs);
                 for (int i = 0; i < favs.Count; i++)
                 {
