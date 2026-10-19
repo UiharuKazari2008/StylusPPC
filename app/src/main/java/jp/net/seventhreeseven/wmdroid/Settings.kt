@@ -38,6 +38,11 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("stats", true)
         set(v) = p.edit().putBoolean("stats", v).apply()
 
+    /** Full-window presentation. The saved skin, keys, dock and screen size stay as they are. */
+    var incognito: Boolean
+        get() = p.getBoolean("display.incognito", false)
+        set(v) = p.edit().putBoolean("display.incognito", v).apply()
+
     var storageMode: String
         get() = p.getString("storage.mode", StorageBridge.MODE_PRIVATE)!!
         set(v) = p.edit().putString("storage.mode", v).apply()
@@ -375,6 +380,17 @@ class Settings(ctx: Context) {
         widgetRequest = cur.joinToString(" ")
     }
 
+    /** A program the phone asked to install ("discord"), empty if none. Settings > Installers. */
+    var installRequest: String
+        get() = p.getString("install.req", "")!!
+        set(v) = p.edit().putString("install.req", v).apply()
+
+    fun requestInstall(which: String) {
+        val cur = installRequest.split(' ').filter { it.isNotEmpty() }.toMutableSet()
+        cur.add(which)
+        installRequest = cur.joinToString(" ")
+    }
+
     /** WM's own Buttons assignments as the helper last reported them (Keymap.HwButtons; null = stock). */
     var hwButtonMap: String?
         get() = p.getString("hwbutton.map", null)
@@ -427,6 +443,22 @@ class Settings(ctx: Context) {
     var escargot: Boolean
         get() = p.getBoolean("net.escargot", false)
         set(v) = p.edit().putBoolean("net.escargot", v).apply()
+
+    /**
+     * Windows Marketplace stand-in (core/src/net/market.h, docs/research-marketplace.md). On by default:
+     * the old Marketplace names answer on the phone and offer the cabinets from [marketplaceHost].
+     */
+    var marketplace: Boolean
+        get() = p.getBoolean("net.marketplace", true)
+        set(v) = p.edit().putBoolean("net.marketplace", v).apply()
+
+    /**
+     * Where Marketplace installers are hosted (server/market). HTTPS when no port is given.
+     * Empty uses only the cabinets in \Storage Card\Marketplace.
+     */
+    var marketplaceHost: String
+        get() = p.getString("net.marketplace.host", "market.stylus.737.jp.net") ?: "market.stylus.737.jp.net"
+        set(v) = p.edit().putString("net.marketplace.host", v.trim()).apply()
 
     /** The phone's keyboard instead of Windows Mobile's on-screen keyboard (ImeBridge). */
     var androidIme: Boolean

@@ -1033,7 +1033,8 @@ void TlsProxy::setPromptWait(int seconds) {
     impl->waitSec = std::max(1, seconds);
 }
 
-std::string httpsExchange(const std::string &host, uint16_t port, const std::string &request, std::string *err, int timeoutMs) {
+std::string httpsExchange(const std::string &host, uint16_t port, const std::string &request, std::string *err,
+                          int timeoutMs, size_t maxBytes) {
     auto fail = [&](const std::string &why) { if (err) *err = why; ERR_clear_error(); return std::string(); };
     static std::mutex ctxMu;
     static bssl::UniquePtr<SSL_CTX> ctx;
@@ -1079,7 +1080,7 @@ std::string httpsExchange(const std::string &host, uint16_t port, const std::str
     uint64_t end = nowMs() + (uint64_t)timeoutMs;
     for (;;) {
         int r = SSL_read(s.get(), buf, sizeof buf);
-        if (r > 0) { out.append(buf, (size_t)r); if (out.size() > (8u << 20)) break; continue; }
+        if (r > 0) { out.append(buf, (size_t)r); if (out.size() > maxBytes) break; continue; }
         int e = SSL_get_error(s.get(), r);
         if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) break;
         uint64_t now = nowMs();
@@ -1119,7 +1120,7 @@ std::vector<TlsProxy::CertPrompt> TlsProxy::takePrompts() { return {}; }
 void TlsProxy::answerPrompt(uint32_t, bool) {}
 void TlsProxy::clearExceptions() {}
 void TlsProxy::setPromptWait(int) {}
-std::string httpsExchange(const std::string &, uint16_t, const std::string &, std::string *err, int) {
+std::string httpsExchange(const std::string &, uint16_t, const std::string &, std::string *err, int, size_t) {
     if (err) *err = "built without TLS support";
     return "";
 }

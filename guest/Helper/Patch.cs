@@ -338,7 +338,9 @@ static class Patch
     static void InstallApps()
     {
         string dir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().GetName().CodeBase);
-        string[][] apps = { new string[] { "GpsTest.exe", "GPS Test" }, new string[] { "InfraLobby.exe", "InfraLobby" } };
+        string[][] apps = {
+            new string[] { "GpsTest.exe", "GPS Test" }, new string[] { "InfraLobby.exe", "InfraLobby" },
+        };
         foreach (string[] a in apps)
         {
             string src = Path.Combine(@"\Storage Card\2577", a[0]);

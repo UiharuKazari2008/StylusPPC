@@ -225,7 +225,7 @@ class FoldKeyboard(ctx: Context, private val onKey: (vk: Int, down: Boolean) -> 
         context.getSystemService(InputMethodManager::class.java)?.showSoftInput(this, 0)
     }
 
-    private fun hideIme() {
+    fun hideIme() {
         context.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(windowToken, 0)
     }
 

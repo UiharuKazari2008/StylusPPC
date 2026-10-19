@@ -90,7 +90,7 @@ object GuestStates {
             if (std != null && stdVariant != null)
                 return Target(profile, stdVariant, ImageStore.find(ctx, profile, stdVariant) ?: file, std.width, std.height, mem)
         }
-        val res = Regex("""(\d+)x(\d+)""").matchEntire(screenRes)
+        val res = Regex("""(\d+)x(\d+)""").matchEntire(if (settings.incognito) Settings.SCREEN_AUTO else screenRes)
         val w = res?.groupValues?.get(1)?.toInt() ?: variant.width
         var h = res?.groupValues?.get(2)?.toInt() ?: variant.height
         if (res == null) {
@@ -104,7 +104,7 @@ object GuestStates {
         if (profile.maxHeight > 0 && h > profile.maxHeight) h = profile.maxHeight
         // "Resize screen for dock": the tall 480-wide screen (the phone's 852, or 854) gives up
         // the bottom strip and Windows Mobile boots at 480×800, which is where the dock sits.
-        if (settings.dockResizeScreen && w == 480 && h > 800) h = 800
+        if (!settings.incognito && settings.dockResizeScreen && w == 480 && h > 800) h = 800
         // An installed image built for exactly this size boots instead: 6.5.3 Pro's FWVGA image at
         // 480×800 leaves the Start button stuck pressed, its WVGA image does not.
         val exact = profile.variants.firstOrNull { it.width == w && it.height == h && it.id != variant.id }

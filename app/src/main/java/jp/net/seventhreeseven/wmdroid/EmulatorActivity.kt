@@ -61,6 +61,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private lateinit var launcher: LauncherBridge  // Android apps in WM and the dock (AndroidApps.kt)
     private lateinit var secureProxy: SecureProxy  // "Secure Web Proxy": modern HTTPS for WM (SecureProxy.kt)
     private var escargotApplied: Boolean? = null  // "Windows Live Messenger via Escargot" as set on this session
+    private var marketplaceApplied: String? = null  // "folder\nhost", or "\n" when Windows Marketplace is off
     /** Another emulator was already running: this instance only forwarded its intent (see onCreate). */
     private var duplicate = false
     /** Home was pressed (PocketStylus is the phone's launcher): WM goes to Today / Start on resume. */
@@ -204,6 +205,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         val menuLayer = FrameLayout(this)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         skin = SkinLayout(this, surface) { vk, down -> sendKey(vk, down) }.apply {
+            incognito = settings.incognito
             keysOn = settings.keysOn
             dpadOn = settings.dpadOn
             keypad = this@EmulatorActivity.keypad  // Windows Mobile Standard: the keypad phone skin
@@ -245,6 +247,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             }
         }
         setContentView(skin)
+        applyIncognito()
         clipboard = ClipboardBridge(this, settings, guest)
         ime = ImeBridge(this, settings, guest, skin)  // adds its hidden editor view to the skin
         // Android apps: WM's Android Apps folder, pinned shortcuts and the skin's dock (AndroidApps.kt).
@@ -290,6 +293,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         }
         // The cover screen decides the resolution: on a squarish (open foldable) window use the
         // aspect remembered from the cover screen, else measure it and remember it.
+        if (settings.incognito) return maxOf(ww, wh).toDouble() / minOf(ww, wh).coerceAtLeast(1)
         val tall = wh.toFloat() / ww >= 1.6f
         val target = if (tall) skin.displayAspect(ww, wh).also { settings.coverAspect = it.toFloat() }
         else settings.coverAspect.takeIf { it > 0f }?.toDouble() ?: (854.0 / 480.0)
@@ -319,6 +323,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         val mem = t.mem
         val dir = File(GuestStates.statesDir(this), t.dirName).apply { mkdirs() }
         snapshotDir = dir
+        WindowsGlyph.prepare(this, file)
 
         fun create(): Long {
             val hd = NativeBridge.create(file.path, mem, profile.armv5, w, h)
@@ -335,6 +340,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 secureProxy.attach(hd, settings.secureProxy)  // after prepare(): it queues helper commands
                 escargotApplied = settings.escargot
                 NativeBridge.setEscargot(hd, settings.escargot)  // Messenger names to Escargot (revival.h)
+                applyMarketplace(hd)
             }
             return hd
         }
@@ -396,6 +402,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         // The saved snapshots stay: deleting them is what made the next start boot the empty image.
         // Adopt already reboots, so the update stamp is written without a second reset.
         if (restored && noteAppUpdate(dir) && !adopted) {
+            // The session on disk is what the next start restores. Write it before the reset,
+            // while this machine is still the one the user was in.
+            if (settings.restoresSession) {
+                val ok = NativeBridge.saveState(handle, File(dir, RESUME).path)
+                Log.i(TAG, "snapshot before app update: ${if (ok) "saved" else "failed"}")
+            }
             Log.i(TAG, "app updated: soft-resetting Windows Mobile")
             NativeBridge.softReset(handle)
             resumeSaved = false
@@ -731,7 +743,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 skin.foldCrease = crease
                 wallpaperChecked = false  // re-cut the guest's picture for the new layout
             }
-            if (settings.foldKeyboard == "ime") skin.post { skin.foldKeyboard.showIme() }
+            if (!settings.incognito && settings.foldKeyboard == "ime") skin.post { skin.foldKeyboard.showIme() }
         }
     }
 
@@ -781,7 +793,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 if (!foldGuest && !autoRotate && landscapeGuest) {
                     if (!portraitFixSent) { portraitFixSent = true; sendRotate(0) }
                 } else portraitFixSent = false
-                stats.text = if (settings.showStats) NativeBridge.status(handle) else ""
+                stats.text = if (settings.showStats && !settings.incognito) NativeBridge.status(handle) else ""
                 updateMic()
                 updateGps()
                 checkHung()
@@ -922,6 +934,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (handle != 0L && surface.holder.surface.isValid) NativeBridge.setSurface(handle, surface.holder.surface)
         startGuest()
         flushWidgetRequest()
+        flushInstallRequest()
         if (suppressWake && !leftForSleep) {
             // Suspend just closed us; a tick before onStop must not press power and wake Windows Mobile.
         } else {
@@ -1230,6 +1243,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (!booting) guest.setRunning(true)  // still booting: held until the home screen is up
         guest.markAlive()  // the helper was stopped with the guest (or unheard in the background)
         flushWidgetRequest()
+        flushInstallRequest()
         startLedPoll()
         resumeSaved = false
     }
@@ -1241,6 +1255,15 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (which.isEmpty()) return
         settings.widgetRequest = ""
         for (w in which.split(' ')) if (w.isNotEmpty()) guest.send("widget $w")
+    }
+
+    /** Settings > Installers: copy that program into Windows Mobile once it is running. */
+    private fun flushInstallRequest() {
+        if (!::guest.isInitialized || handle == 0L) return
+        val which = settings.installRequest
+        if (which.isEmpty()) return
+        settings.installRequest = ""
+        for (w in which.split(' ')) if (w.isNotEmpty()) guest.send("install $w")
     }
 
     /** Suspend from the power menu: don't wake the display until the app has been opened again. */
@@ -1413,26 +1436,37 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         return true
     }
 
-    /** Unrestricted: write resume.wms once an hour without stopping the session. */
+    /** Write resume.wms every few minutes, in front or in the background, so a kill loses little. */
     private var hourlyArmed = false
     private val hourlySave = Runnable {
         hourlyArmed = false
-        val dir = snapshotDir
-        val ready = settings.backgroundMode == Settings.BG_RUN && handle != 0L && !booting && !suspended &&
-            !isFinishing && dir != null && saveThread?.isAlive != true
-        if (ready) saveSnapshot(File(dir, RESUME), resumeAfter = true)
+        checkpoint()
         scheduleHourlySave()
     }
 
     private fun scheduleHourlySave() {
-        if (settings.backgroundMode != Settings.BG_RUN || isFinishing) {
+        if (isFinishing || handle == 0L || !settings.restoresSession) {
             hourlyArmed = false
             ui.removeCallbacks(hourlySave)
             return
         }
         if (hourlyArmed) return
         hourlyArmed = true
-        ui.postDelayed(hourlySave, 60L * 60L * 1000L)
+        ui.postDelayed(hourlySave, CHECKPOINT_MS)
+    }
+
+    /** Pause, write resume.wms, and continue. Used on the timer and just before a helper update. */
+    private fun checkpoint() {
+        val dir = snapshotDir ?: return
+        val ready = handle != 0L && !booting && !suspended && !userPaused && !isFinishing &&
+            settings.restoresSession && saveThread?.isAlive != true
+        if (!ready) return
+        saveSnapshot(File(dir, RESUME), resumeAfter = true)
+    }
+
+    override fun onCheckpoint() {
+        checkpoint()
+        saveThread?.join()
     }
 
     /**
@@ -1820,7 +1854,22 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         android.view.SurfaceControl.Transaction().setExtendedRangeBrightness(sc, r, r).apply()
     }
 
+    /**
+     * Windows Marketplace (core/src/net/market.h). The cabinet folder is \Storage Card\Marketplace,
+     * so it follows whichever host folder the card is. Empty string turns the stand-in off.
+     */
+    private fun applyMarketplace(hd: Long) {
+        val path = if (settings.marketplace) StorageBridge.marketplacePath(this, settings) else ""
+        val host = if (settings.marketplace) settings.marketplaceHost else ""
+        val key = path + "\n" + host
+        if (key == marketplaceApplied) return
+        marketplaceApplied = key
+        if (path.isNotEmpty()) StorageBridge.prepareMarketplace(File(path))
+        NativeBridge.setMarketplace(hd, path.ifEmpty { null }, host.ifEmpty { null })
+    }
+
     private fun applyLiveSettings() {
+        applyIncognito()
         skin.keysOn = settings.keysOn
         skin.dpadOn = settings.dpadOn
         val skinJson = settings.customSkin
@@ -1876,8 +1925,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             escargotApplied = settings.escargot
             NativeBridge.setEscargot(handle, settings.escargot)
         }
+        if (handle != 0L) applyMarketplace(handle)  // Windows Marketplace; the folder follows the storage card
         ime.apply()  // Use Android IME over Device IME
-        scheduleHourlySave()  // unrestricted writes a resume point every hour
+        scheduleHourlySave()  // a resume point every few minutes
         launcher.apply()  // Android Apps folder, hidden apps, dock
         applyDockLook()
         askFeaturePermissions()  // Phone / Contacts / Infrared turned on from Windows Mobile's settings app
@@ -1887,6 +1937,40 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     private var lastDockLayout: String? = null
+    /** Null until the first apply, so opening the emulator does not rewrite the guest catalogue. */
+    private var incognitoApplied: Boolean? = null
+
+    /**
+     * Hides the skin and fills the window. The framebuffer already on screen is scaled; the guest's
+     * pixel size changes on the next boot or restore (GuestStates.resolve).
+     */
+    private fun applyIncognito() {
+        val on = settings.incognito
+        skin.incognito = on
+        if (incognitoApplied == on) return
+        val first = incognitoApplied == null
+        incognitoApplied = on
+        if (first && !on) return
+        if (on) {
+            stats.text = ""
+            if (::powerMenu.isInitialized) powerMenu.close()
+        } else if (skin.foldCrease != null && settings.foldKeyboard == "ime") {
+            skin.post { if (!settings.incognito) skin.foldKeyboard.showIme() }
+        }
+        if (Build.VERSION.SDK_INT >= 28) {
+            val attrs = window.attributes
+            attrs.layoutInDisplayCutoutMode = if (on)
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            window.attributes = attrs
+        }
+        // Same immersive bars as a normal session. A later focus hides them again after a swipe.
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+        if (!first && ::guest.isInitialized) guest.writeState()
+    }
 
     /** The dock's look (Dock page); its blurred wallpaper is built once per wallpaper and blur. */
     private fun applyDockLook() {
@@ -2059,6 +2143,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     /** Clipboard reads need window focus; the phone's keyboard shows only with it. */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && settings.incognito && ::skin.isInitialized)
+            WindowInsetsControllerCompat(window, window.decorView).hide(WindowInsetsCompat.Type.systemBars())
         clipboard.onFocus(hasFocus)
         ime.onFocus(hasFocus)
     }
@@ -2566,6 +2652,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         const val CPU_SCREEN_OFF = 15
         /** Time the guest gets to act on a lock before it is suspended or hibernated. */
         const val LOCK_GRACE_MS = 1500L
+        /** How often a running session is written to resume.wms. */
+        const val CHECKPOINT_MS = 5L * 60L * 1000L
 
         /** Deletes saved states so the next start is a cold boot. */
         /** Deletes the saved states of the chosen OS only (each OS keeps its own, see [boot]). */

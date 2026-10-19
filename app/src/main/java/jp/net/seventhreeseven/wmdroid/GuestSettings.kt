@@ -103,6 +103,7 @@ object GuestSettings {
 
     val entries: List<Entry> = listOf(
         // ---- Display ----
+        bool("Display", "incognito", "Incognito mode (full screen)", { it.incognito }, { s, v -> s.incognito = v }),
         bool("Display", "stats", "Performance overlay", { it.showStats }, { s, v -> s.showStats = v }),
         choice("Display", "filter", "Screen scaling", listOf("0" to "Smooth", "1" to "Sharp pixels", "2" to "Enhanced"),
             { it.screenFilter.toString() }, { s, v -> s.screenFilter = v.toInt() }),
@@ -201,6 +202,10 @@ object GuestSettings {
         // Messenger / Passport names to Escargot's MSN revival servers (NativeBridge.setEscargot;
         // docs/research-escargot.md: classic MSNP clients only, not the built-in mobile clients)
         bool("Network", "escargot", "Windows Live Messenger via Escargot", { it.escargot }, { s, v -> s.escargot = v }),
+        // Old Marketplace names on the phone, cabinets from Marketplace Server (NativeBridge.setMarketplace,
+        // core/src/net/market.h, server/market). The built-in client also needs Secure Web Proxy.
+        bool("Network", "marketplace", "Windows Marketplace", { it.marketplace }, { s, v -> s.marketplace = v }),
+        text("Network", "markethost", "Marketplace Server", { it.marketplaceHost }, { s, v -> s.marketplaceHost = v.trim() }),
         // ---- Power ----
         bool("Power", "displayoff", "Lock Android on Screen Off", { it.mirrorDisplayOff }, { s, v -> s.mirrorDisplayOff = v }),
         bool("Power", "lockoff", "Lock Device when Android Screen's Off", { it.lockOnScreenOff }, { s, v -> s.lockOnScreenOff = v }),
@@ -277,6 +282,9 @@ object GuestSettings {
         // A later helper update replaces a widget that is already in \Windows.
         action("Today", "widgetweather", "Install Weather", "widget weather"),
         action("Today", "widgetinfra", "Install InfraWAN", "widget infrawan"),
+        // Optional programs. The helper copies one onto the Start menu when asked (Helper.InstallApp).
+        // Discord is CF 3.5, so Windows Mobile 2003 does not list it (withoutHelper).
+        action("Installers", "installdiscord", "Install Discord", "install discord"),
         // ---- Device (applies on restart) ----
         choice("Device", "res", "Screen resolution", listOf(Settings.SCREEN_AUTO to "Phone shape (auto)",
             "480x854" to "480×854 (FWVGA)", "480x800" to "480×800 (WVGA; HTC games)", "480x640" to "480×640 (VGA)",
@@ -373,13 +381,16 @@ object GuestSettings {
      * Pages and rows that only the .NET CF 3.5 helper can apply. Windows Mobile 2003 has no helper
      * (OsProfile.helper): the skin, screen, memory and power options stay.
      */
-    private val HELPER_PAGES = setOf("Phone", "Contacts", "Infrared", "Today", "Launcher")
+    private val HELPER_PAGES = setOf("Phone", "Contacts", "Infrared", "Today", "Launcher", "Installers")
     private val HELPER_KEYS = setOf(
         "rotate", "rotdelay", "rotsens", "brightness", "theme", "homewall", "androidime", "netind",
         "camera", "camfilter", "camlevel", "gps", "clipboard", "dpi", "secureproxy", "escargot", "editfolders")
 
-    private fun withoutHelper(profile: OsProfile, list: List<Entry>) =
-        if (profile.helper) list else list.filter { it.page !in HELPER_PAGES && it.key !in HELPER_KEYS }
+    private fun withoutHelper(profile: OsProfile, list: List<Entry>): List<Entry> {
+        val helped = if (profile.helper) list else list.filter { it.page !in HELPER_PAGES && it.key !in HELPER_KEYS }
+        // Discord.exe is the CF 3.5 build. Windows Mobile 2003 only has CF 2.0.
+        return if (profile.cf2) helped.filter { it.key != "installdiscord" } else helped
+    }
 
     // Buttons whose screens are Android's (role requests, permissions, text entry, a connection
     // test): the guest sends the command, EmulatorActivity / DeviceSettingsActivity open the screen.

@@ -11,6 +11,7 @@
 #include "../src/net/usernet.h"
 #include "../src/net/revival.h"
 #include "../src/net/mwsgate.h"
+#include "../src/net/market.h"
 #include "../src/board/folder_share.h"
 #include "../src/board/camera.h"
 #include "../src/board/modem.h"
@@ -267,6 +268,7 @@ static int runCompare(MachineConfig cfg, double seconds) {
 
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--mws-selftest")) return mwsSelfTest(argc, argv);
+    if (argc >= 2 && !strcmp(argv[1], "--market-selftest")) return marketplaceSelfTest();
     if (argc >= 2 && !strcmp(argv[1], "--thumb-selftest")) return thumbJitSelfTest();
     if (argc < 2) {
         fprintf(stderr, "usage: %s <image> [--mem MB] [--seconds N] [--v4] [--dump out.ppm] [--trace N] "
@@ -306,7 +308,11 @@ int main(int argc, char **argv) {
                         "  --mws DIR        Windows Live Mobile gateway (net/mwsgate.h) at 10.0.2.4 for *.mws.mobile.live.com,\n"
                         "                   MSNP to Escargot; every exchange (secrets redacted) captured into DIR\n"
                         "  --mws-fake       the gateway signs in to a fake MSNP server on 127.0.0.1 instead (tests)\n"
-                        "  %s --mws-selftest [--probe] [--capture DIR]   the gateway without a guest\n", argv[0], argv[0]);
+                        "  --marketplace D  Windows Marketplace stand-in (net/market.h): cabinets in D, names under\n"
+                        "                   marketplace.windowsmobile.com to 10.0.2.4\n"
+                        "  --marketplace-host H  those names forward to H (HTTPS, or host:port for plain HTTP)\n"
+                        "  %s --mws-selftest [--probe] [--capture DIR]   the gateway without a guest\n"
+                        "  %s --market-selftest   the Marketplace stand-in without a guest\n", argv[0], argv[0], argv[0]);
         return 2;
     }
     MachineConfig cfg;
@@ -324,6 +330,8 @@ int main(int argc, char **argv) {
     bool escargot = false;                // --escargot: escargotHostRules() after the --host-map rules
     std::string mwsDir;                   // --mws: Windows Live Mobile gateway, capture folder
     bool mws = false, mwsFake = false;    // --mws-fake: fake MSNP server instead of Escargot
+    std::string marketDir;                // --marketplace: cabinet folder for the Marketplace stand-in
+    std::string marketHost;               // --marketplace-host: server that holds the cabinets
     struct Tap { double t; int x, y; };
     std::vector<Tap> taps;
     struct Drag { double t; int x0, y0, x1, y1; };
@@ -415,6 +423,8 @@ int main(int argc, char **argv) {
         else if (a == "--escargot") escargot = true;  // the app's "Windows Live Messenger via Escargot"
         else if (a == "--mws") { mws = true; mwsDir = next(); }
         else if (a == "--mws-fake") mwsFake = true;
+        else if (a == "--marketplace") marketDir = next();
+        else if (a == "--marketplace-host") marketHost = next();
         else if (a == "--tap") {  // T:x,y  pen down at T seconds, up a quarter second later
             std::string v = next();
             size_t c = v.find(':'), k = v.find(',');
@@ -614,6 +624,7 @@ int main(int argc, char **argv) {
             if (logged++ < 20) LOGI("net: guest sent %zu bytes, type %02x%02x", n, f[12], f[13]);
             userNet.fromGuest(f, n);
         };
+        std::vector<LocalDispatch::Route> localRoutes;
         if (mws) {
             std::vector<HostRule> gw = MwsGateway::hostRules();
             hostRules.insert(hostRules.end(), gw.begin(), gw.end());
@@ -625,7 +636,18 @@ int main(int argc, char **argv) {
             }
             auto gw2 = std::make_shared<MwsGateway>(gc);
             if (!tlsDir.empty()) gw2->setStateDir(tlsDir);
-            setLocalService(gw2);
+            for (const HostRule &r : gw) localRoutes.push_back({r.pattern, gw2});
+        }
+        if (!marketDir.empty()) {
+            std::vector<HostRule> mr = Marketplace::hostRules();
+            hostRules.insert(hostRules.end(), mr.begin(), mr.end());
+            auto market = std::make_shared<Marketplace>(Marketplace::Config{marketDir, "", marketHost});
+            for (const HostRule &r : mr) localRoutes.push_back({r.pattern, market});
+        }
+        if (!localRoutes.empty()) {
+            auto hub = std::make_shared<LocalDispatch>();
+            hub->setRoutes(std::move(localRoutes));
+            setLocalService(hub);
         }
         if (escargot) {
             std::vector<HostRule> esc = escargotHostRules();

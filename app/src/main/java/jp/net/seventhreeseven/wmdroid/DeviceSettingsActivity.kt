@@ -47,6 +47,7 @@ class DeviceSettingsActivity : SettingsPage() {
             if (e.page != page) {
                 page = e.page
                 section(page)
+                if (page == "Display") note("Incognito hides the skin and fills the window now. The guest's pixel size follows the phone on the next boot or restore.")
                 if (catalogue.any { it.page == page && it.restart })
                     note("Changes here apply with the button at the bottom: Windows Mobile restarts.")
             }
@@ -81,6 +82,9 @@ class DeviceSettingsActivity : SettingsPage() {
                         settings.requestWidget(value.removePrefix("widget ").trim())
                         android.widget.Toast.makeText(this, "Installs the next time Windows Mobile is on screen",
                             android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    else if (value.startsWith("install ")) {
+                        settings.requestInstall(value.removePrefix("install ").trim())
                     }
                     else GuestSettings.screenFor(this, value)?.let { startActivity(it) }
                 }

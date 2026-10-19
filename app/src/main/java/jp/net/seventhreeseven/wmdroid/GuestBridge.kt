@@ -70,6 +70,9 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         fun onGuestLauncher(command: String) {}
         /** The answer to a certificate warning: "<id> yes|no|timeout" (SecureProxy). */
         fun onGuestTls(line: String) {}
+
+        /** Write the session before a helper update replaces the running Windows Mobile programs. */
+        fun onCheckpoint() {}
     }
 
     private val root = File(ctx.filesDir, "overlay")
@@ -118,6 +121,9 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             val asset = if (cf2) "${name}2003.exe" else "$name.exe"
             programs.add(asset to "$name.exe")
         }
+        // Discord is a CF 3.5 program (Windows Mobile 6 and later). It speaks HTTPS itself;
+        // the secure web proxy is the only host help it uses.
+        if (!cf2) programs.add("Discord.exe" to "Discord.exe")
         if (cf2) programs.add("NETCFv2.wce4.ARMV4.cab" to "NETCFv2.wce4.ARMV4.cab")
         else {
             programs.add("NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab")
@@ -365,6 +371,16 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         if (line.isEmpty()) return
         lastHeard = android.os.SystemClock.uptimeMillis()
         if (line == "alive") return  // watchdog pulse while a command is slow; not a command result
+        // Settings > Installers on an older settings page sends "install discord" here. The helper
+        // copies the program and shows the result inside Windows Mobile.
+        if (line.startsWith("result install ")) {
+            val answer = line.removePrefix("result install ").trim()
+            // This helper does not know the command yet. Keep the request and hand over to the
+            // copy on the card; its hello runs the install.
+            if (answer == "unknown") { updateHelper(); return }
+            installPending = null
+            return
+        }
         if (line.startsWith("result ")) return  // command-pipe reply; the helper already did the work
         if (line == "sync") { listener.onGuestSync(); return }
         Log.i(TAG, "guest: $line")
@@ -374,16 +390,18 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
                 val sum = Regex("""sum=([0-9a-f]{8})""").find(line)?.groupValues?.get(1)
                 if (sum != helperSum) {
                     Log.i(TAG, "guest helper is outdated ($sum != $helperSum): updating")
-                    send("update")
+                    updateHelper()
                     return
                 }
                 syncTimeZone(force = true)
                 helloSeen = true
                 listener.onGuestHello()
+                // A tap that arrived while the helper was handing over to this build.
+                installPending?.let { send("install $it") }
             }
             line == "result $helloSeq unknown" -> {
                 Log.i(TAG, "guest helper predates the hello command: updating")
-                send("update")
+                updateHelper()
             }
             line == "open settings" -> listener.onOpenSettings()
             line == "open storage" -> listener.onOpenStorage()
@@ -427,8 +445,26 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
                 val kv = line.removePrefix("set ").split('=', limit = 2)
                 if (kv.size == 2) applySetting(kv[0], kv[1])
             }
+            // The settings page inside Windows Mobile asked to install a program (Helper.InstallApp).
+            // An older page cannot do that itself, so the helper running now does.
+            line.startsWith("install ") -> {
+                val which = line.removePrefix("install ").trim()
+                if (which.isNotEmpty()) {
+                    installPending = which
+                    send("install $which")
+                }
+            }
         }
     }
+
+    /** Snapshot first, then hand Windows Mobile the newer helper. */
+    private fun updateHelper() {
+        listener.onCheckpoint()
+        send("update")
+    }
+
+    /** "install discord" sent before this helper was up. Cleared when it answers. */
+    private var installPending: String? = null
 
     private fun applySetting(key: String, value: String) {
         // The WMDroid settings app in Windows Mobile (GuestSettings catalogue).

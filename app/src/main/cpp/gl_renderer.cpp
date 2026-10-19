@@ -144,7 +144,8 @@ uniform sampler2D light;    // backlight brightness (stored / 1.5)
 uniform sampler2D wearMap;  // r: scratches, a: finger grease
 uniform vec2 texSize;
 uniform vec2 outSize;
-uniform float landscape;
+uniform float landscape;   // the guest buffer itself is landscape, shown upright
+uniform float turn;        // quarter turns clockwise the frame is shown at (1 = open fold)
 // The panel.
 uniform float gap, notch, pentile;
 uniform float desat, gammaBase, gammaView, crush;
@@ -198,8 +199,14 @@ void main() {
     vec2 base = floor(texel - 0.5) + 0.5;
     vec2 f = clamp((texel - base - 0.5) * scale + 0.5, 0.0, 1.0);
     vec3 t = texture2D(tex, (base + f) / texSize).rgb;
-    // The panel in its own upright frame (the backlight's LEDs sit along its bottom edge).
-    vec2 bp = landscape > 0.5 ? vec2(uv.y, 1.0 - uv.x) : uv;
+    // The panel's upright frame: backlight LEDs along the bottom edge of the screen as it is
+    // held. A landscape guest buffer, or the open fold's quarter turn, swings that frame round.
+    vec2 bp = uv;
+    float turned = 0.0;   // 90° or 270°: guest x runs down the screen, so the grid swaps axes
+    if (turn > 2.5) { bp = vec2(uv.y, 1.0 - uv.x); turned = 1.0; }
+    else if (turn > 1.5) bp = vec2(1.0 - uv.x, 1.0 - uv.y);
+    else if (turn > 0.5) { bp = vec2(1.0 - uv.y, uv.x); turned = 1.0; }
+    else if (landscape > 0.5) bp = vec2(uv.y, 1.0 - uv.x);
     vec2 ip = floor(texel);
 
     // Dead pixels stay black; a stuck one has a subpixel always on.
@@ -233,11 +240,14 @@ void main() {
     c *= 1.0 + muraK * (hash(ip) - 0.5) * 0.14 * (1.0 - 0.7 * y);
 
     // Pixel grid: the gaps between the electrodes, and the subpixels once a guest pixel is big
-    // enough on the phone to show them.
+    // enough on the phone to show them. Unfolded, guest x is the screen's vertical, so the
+    // stripes (which run across x) are taken on the other axis and stay upright on the panel.
     vec2 fr = fract(texel);
     vec2 hw = 0.5 / scale;
+    vec2 sc = scale;
+    if (turned > 0.5) { fr = fr.yx; hw = hw.yx; sc = scale.yx; }
     float g = gap;
-    float sub = clamp(g * 10.0, 0.0, 1.0) * clamp((scale.x - 2.0) / 3.0, 0.0, 1.0);
+    float sub = clamp(g * 10.0, 0.0, 1.0) * clamp((sc.x - 2.0) / 3.0, 0.0, 1.0);
     vec3 mx;
     if (pentile > 0.5) {
         // PenTile RGBG: every pixel has a small green and either a red or a blue (twice the green's
@@ -252,7 +262,7 @@ void main() {
     }
     vec3 mask = mx * lit(fr.y, hw.y, g);
     // TFT: the transistor takes a corner of every subpixel.
-    float nk = notch * clamp((scale.x - 3.0) / 2.0, 0.0, 1.0);
+    float nk = notch * clamp((sc.x - 3.0) / 2.0, 0.0, 1.0);
     mask *= 1.0 - 0.8 * nk * cov(fr.y, hw.y, 0.74, 1.0 - g) * cov(fract(fr.x * 3.0), hw.x * 3.0, 0.0, 0.35);
     // The eye adapts to the darker grid somewhat; give half of the lost light back.
     mask *= mix(1.0, 1.0 / ((1.0 - 2.0 * g) * (1.0 - 2.0 * g)), 0.5);
@@ -784,7 +794,9 @@ void GlRenderer::realismUniforms(GLuint p, int w, int h, uint64_t now) {
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, wearTex ? wearTex : lightTex);
     glUniform1i(glGetUniformLocation(p, "wearMap"), 2);
-    glUniform1f(glGetUniformLocation(p, "landscape"), w > h ? 1.f : 0.f);
+    int q = rotation.load() & 3;
+    glUniform1f(glGetUniformLocation(p, "turn"), (float)q);
+    glUniform1f(glGetUniformLocation(p, "landscape"), q == 0 && w > h ? 1.f : 0.f);
     glUniform1f(glGetUniformLocation(p, "gap"), gap);
     glUniform1f(glGetUniformLocation(p, "notch"), notch);
     glUniform1f(glGetUniformLocation(p, "pentile"), pentile);

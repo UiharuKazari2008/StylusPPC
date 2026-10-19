@@ -6,12 +6,15 @@
 // address as target). UserNet hands a plain TCP connection to that address straight to the service; a
 // connection to a secure web proxy port goes through the proxy first, which terminates the guest's TLS
 // (certificate for the original name, as for any site) and hands the service the decrypted stream.
-// Header-only; a process has at most one local service (the latest set).
+// A process has at most one local service (the latest set). LocalDispatch is that one service when
+// more than one stand-in is on (Windows Live and Windows Marketplace share 10.0.2.4).
 #pragma once
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace wm {
 
@@ -47,5 +50,25 @@ inline std::shared_ptr<LocalService> localService() {
     std::lock_guard<std::mutex> lk(localsvc_detail::mu());
     return localsvc_detail::slot();
 }
+
+/**
+ * Routes one local-service connection by host name. `pattern` is a HostRule pattern: "host.example"
+ * or ".example" (that name and every name under it). HTTPS arrives with the HTTP Host already chosen
+ * by the secure web proxy. Plain HTTP on port 80 peeks the Host header, because every stand-in shares
+ * 10.0.2.4 and the newest DNS name can belong to the other service.
+ */
+class LocalDispatch : public LocalService {
+public:
+    struct Route {
+        std::string pattern;
+        std::shared_ptr<LocalService> service;
+    };
+    void setRoutes(std::vector<Route> routes);
+    void serve(int fd, uint16_t port, const std::string &host, bool tls) override;
+
+private:
+    std::mutex mu;
+    std::vector<Route> routes;
+};
 
 }  // namespace wm

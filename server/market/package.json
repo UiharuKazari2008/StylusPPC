@@ -1,0 +1,15 @@
+{
+  "name": "wmdroid-market",
+  "version": "1.0.0",
+  "description": "Windows Marketplace for Mobile stand-in: cabinets and the catalog the Windows Mobile client still calls",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

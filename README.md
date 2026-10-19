@@ -183,6 +183,7 @@ A lower Memory setting shortens only the top block. The 32 MB storage stripe sta
 | HTC HD2 apps from a ROM you own (Teeter, Flashlight, [`docs/research-hd2-port.md`](docs/research-hd2-port.md)) | 🟡 new in 1.0.6. Teeter plays; Flashlight uses the phone's LED. Other packages install and are untested |
 | Adobe Flash Lite (SWF and Flash in Internet Explorer) | ✅ already in the 6.5 and 6.5.3 Professional images |
 | Today plugins: weather, InfraWAN room count (classic Today, not Titanium) | ✅ new in 1.0.6. Installed from PocketStylus settings, not at first boot |
+| Discord: direct messages, server channels, files and images (`guest/Discord`) | ✅ Windows Mobile 6 and later. The phone makes every request; Secure Web Proxy finishes TLS |
 
 ---
 
@@ -246,6 +247,8 @@ Each section below expands to show how the feature works.
 <details>
 <summary><b>Display: phone-shaped screens, rotation and screen-off</b></summary>
 
+- **Incognito mode** (Display, on Android and in Windows Mobile's PocketStylus settings) gives the guest the whole window. It hides the skin, keys, dock, LED, hinge and performance overlay, and leaves those saved settings alone. Android's bars stay hidden and can be shown for a moment by swiping an edge. Turn it off in PocketStylus settings, or in Android's Device Settings (the Menu key opens them).
+- The window fills immediately, including when the phone folds or the guest rotates. The picture already on screen is scaled to fill; Windows Mobile is not resized until the next boot or restore. That boot uses the phone's full aspect and ignores the saved screen size and dock resize. Those choices are kept and come back on the boot after Incognito is turned off. Original 6.5 Professional still stops at 800 pixels tall, and Standard keeps its fixed sizes; the picture scales to fill either way.
 - Windows Mobile reads its screen size from the bootloader's arguments, which PocketStylus writes. Each release boots at your phone's own shape (for example 480×854) even when Microsoft only shipped 480×640 or 480×800 images. Original 6.5 Professional has no Titanium layout above 480×800, so the phone shape and an explicit 854 stay at 800.
 - **Auto-rotate** follows the accelerometer, with delay and sensitivity sliders. The helper turns Windows Mobile with `ChangeDisplaySettingsEx`, and the wallpaper stays put.
 - **Lock Android on screen off:** when Windows Mobile turns its display off, the phone locks too, using a device-admin lock. Opening the app or unlocking the phone wakes Windows Mobile again, with the power button if it was in standby.
@@ -300,6 +303,7 @@ Each section below expands to show how the feature works.
 - **Storage card:** a DE folder-share device mounts a phone folder (or several chosen folders, overlaid into one card root) as `\Storage Card`. Folders are managed from the Storage Card page in Windows Mobile's settings, using a folder browser for the phone's storage.
 - **Modern HTTPS (Secure Web Proxy):** IE Mobile and other programs only speak SSL 3.0 / TLS 1.0, which today's sites refuse. With the setting on, PocketStylus installs its own certificate authority in Windows Mobile (made on the phone, never leaves it) and terminates the guest's old TLS, then connects onwards with modern TLS (BoringSSL) and checks the real site's certificate. A bad certificate shows a Windows Mobile "Security Warning" with Yes/No: Yes allows that site's exact certificate for the session. See `docs/research-tls-proxy.md`.
 - **Windows Live Messenger via Escargot:** Microsoft's Messenger and Passport names lead to [Escargot](https://escargot.chat) instead, for classic MSN Messenger clients. The built-in Windows Live client (6.5.3, 6.1.4) speaks Microsoft's mobile gateway protocol, so PocketStylus answers it with its own gateway, which signs in to Escargot over MSNP (sign-in works; contacts and chat are next). See `docs/research-escargot.md`.
+- **Windows Marketplace:** Microsoft closed Marketplace for Mobile in 2012. With the setting on (it is, by default), those server names stay on the phone and the cabinets come from **Marketplace Server** (default `market.stylus.737.jp.net`, the host in `server/market`). Internet Explorer can browse and install from `http://marketplace.windowsmobile.com/`. The built-in Marketplace program reads the same catalog, and it also needs Secure Web Proxy, because it used HTTPS. Signing in to that program is still Windows Live, which is not recreated here. If the server does not answer, the cabinets in `\Storage Card\Marketplace` are used instead. A `Name.cab.ini` beside a cabinet sets its title, publisher, version and summary. Nothing is fetched from Microsoft. See `docs/research-marketplace.md`.
 - **GPS:** the phone's location as an NMEA receiver (GGA, GSA, GSV and RMC once a second). Windows Mobile 6.5.3 and 5.0 read it on COM1. On 6.1.4 and the original 6.5, COM1 is the radio, so the same sentences go to COM4. Location is used only while a program has that port open.
 - **CAB drop:** while Windows Mobile is open, `python tools/cab-drop.py` on a PC on the same network finds the phone and writes one cabinet onto `\Storage Card` (port 7377). PocketStylus does not install the cabinet; it only places the file.
 </details>
@@ -402,6 +406,16 @@ A later PocketStylus update replaces a plugin that is already installed. It does
 </details>
 
 <details>
+<summary><b>Discord</b></summary>
+
+Settings → **Installers** → **Install Discord** puts it in Start → Programs (`guest/Discord`). It runs inside Windows Mobile and talks to Discord itself: your direct messages, server text and announcement channels, and sending a message with a file or an image. Received images can be previewed; other files can be saved to My Documents.
+
+Sign in with your account token. It is kept in the phone's Application Data. While a conversation is open the phone asks for new messages every few seconds.
+
+Turn on **Secure Web Proxy** first. Windows Mobile's TLS is too old for Discord, and this program does not move the requests onto Android: WinInet on the phone opens HTTPS, and the proxy accepts that handshake and completes a modern one.
+</details>
+
+<details>
 <summary><b>HTC HD2 apps, including Teeter</b></summary>
 
 PocketStylus ships no HTC software. Settings → **HTC HD2 apps** opens an HD2 ROM you own (`RUU_signed.nbh`, an `os.nb`, or an IMGFS dump) and lists packages that contain a program. **Teeter** and **Flashlight** are the ones that are known to run. Flashlight's own library needs a Qualcomm chip, so the helper installs a small replacement that drives the phone's camera LED. The rest are marked untested.
@@ -448,18 +462,19 @@ Device settings are per OS, except those about the phone itself, which every OS 
 
 | Page | Settings |
 |---|---|
-| **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android |
+| **Display** | Incognito mode (full screen) · Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android |
 | **Realism** | Display Panel (clean / TN TFT / passive-matrix CSTN / AMOLED) · Pixel Grid · Colour and Contrast · Crosstalk / Load Effects · Backlight Unevenness · Ghosting / Smear · Viewing Angle (tilt) · Cold Slows the Screen · Resistive Touch Layer · Press Ripple · Screen Wear · Sunlight Glare (light sensor) · Dead / Stuck Pixels · Screen Tearing · Backlight Fade · HDR Screen and Key Backlights (Android 14+) · Limit CPU Speed · CPU Speed (MHz) |
 | **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Style (glass / flat / bubbled / metallic) · Key Opacity · Key Outline · Key Glyph · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
 | **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Lock Button Closes App · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
 | **Power** | Disable Battery Optimization (until Android allows it) · Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
 | **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts |
-| **Network** | Secure Web Proxy (modern HTTPS) · Windows Live Messenger via Escargot |
+| **Network** | Secure Web Proxy (modern HTTPS) · Windows Live Messenger via Escargot · Windows Marketplace · Marketplace Server |
 | **Dock** | Show Android App Dock · Disable Dock in Unfolded Mode · Resize Screen for Dock · Position (auto / top / bottom / very bottom, or the skin's Dock rectangle) · Number of Apps (4–8) · Dock Apps · Icon Size · Padding · Background Opacity · Background Blur |
 | **Phone** | Phone Calls in Windows Mobile · Use Phone's Ringer · Call Audio (earpiece / speaker / headset / Bluetooth) · Ring Windows Mobile in the Background · Text Messages · Defer Incoming SMS · Load Messages · My Phone Number · Use Windows Mobile's Call Screen |
 | **Contacts** | Sync Contacts · Sync Calendar · Prompt before Accepting Changes from Device · Sync Now |
 | **Infrared** | When Windows Mobile Uses Infrared (ask / Bluetooth LE / InfraWAN / off) · Stay Reachable · This Phone's Name · InfraWAN Server, Room, User, Token · Allow Nearby Devices · Test InfraWAN Connection |
 | **Today** | Install Weather · Install InfraWAN |
+| **Installers** | Install Discord (Windows Mobile 6 and later) |
 | **Device** | Screen resolution (phone shape / 480×854 / 480×800 / 480×640 / 480×480, or the Standard sizes; restarts WM, keeps storage) · Memory (96–256 MB) · Screen DPI · Storage Card (mode, root, folders) |
 
 Other pages in the Android Settings screen (used when Windows Mobile itself cannot be opened):
@@ -525,8 +540,10 @@ guest/Sensor/     HTC SEN0: G-sensor driver
 guest/DdShim/     DirectDraw caps wrapper HTC games check for
 guest/Today/      InfraWAN Today plugin
 guest/Weather/    weather Today plugin
+guest/Discord/    Discord client for WM 6+ (DMs, servers, files); HTTPS via the secure web proxy
 guest/*/          small guest programs (Send via Bluetooth, GPS test, InfraLobby)
 server/infrawan/  InfraWAN relay for infrared beams (Node.js, no dependencies)
+server/market/    Windows Marketplace cabinets and catalog (Node.js, no dependencies)
 tools/            build scripts, skin designer, ROM scanner, image pusher, CAB drop
 docs/             research notes: hardware, status bar, themes, calls, camera, GPS, Bluetooth, HD2, …
 ```

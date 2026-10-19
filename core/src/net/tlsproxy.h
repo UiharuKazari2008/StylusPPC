@@ -109,6 +109,6 @@ const HostRule *findHostRule(const std::vector<HostRule> *rules, const std::stri
  * `timeoutMs` passed). Empty with `err` set on failure. Without TLS support it always fails.
  */
 std::string httpsExchange(const std::string &host, uint16_t port, const std::string &request, std::string *err,
-                          int timeoutMs = 20000);
+                          int timeoutMs = 20000, size_t maxBytes = 8u << 20);
 
 }  // namespace wm

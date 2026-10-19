@@ -70,6 +70,33 @@ object StorageBridge {
         }
     }
 
+    /** Host path of \Storage Card\Marketplace, where the Marketplace stand-in reads cabinets. */
+    fun marketplacePath(ctx: Context, settings: Settings): String {
+        val root = mounts(ctx, settings).firstOrNull()?.second ?: privateDir(ctx).path
+        return File(root, "Marketplace").path
+    }
+
+    /** Creates the cabinet folder and a short note, once. */
+    fun prepareMarketplace(dir: File) {
+        if (!dir.isDirectory && !dir.mkdirs()) return
+        val note = File(dir, "README.txt")
+        if (note.exists()) return
+        note.writeText(
+            "Cabinets here are used when Marketplace Server in settings is empty or does not answer.\n" +
+                "Installers normally come from that server. Copy a .cab here for a local one. Optional notes go in Name.cab.ini:\n" +
+                "\n" +
+                "title=My Program\n" +
+                "publisher=Me\n" +
+                "version=1.0\n" +
+                "summary=What it does\n" +
+                "\n" +
+                "A picture named Name.png is the icon. Turn the service on under Settings, Network,\n" +
+                "Windows Marketplace. Internet Explorer installs from http://marketplace.windowsmobile.com/.\n" +
+                "The Marketplace program lists the same cabinets and also needs Secure Web Proxy.\n" +
+                "These are your cabinets. The old Microsoft store is not contacted.\n"
+        )
+    }
+
     /** Maps a folder picked with ACTION_OPEN_DOCUMENT_TREE to a file path on primary storage. */
     fun treeUriToPath(uri: Uri): String? {
         val id = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return null

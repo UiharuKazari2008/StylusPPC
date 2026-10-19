@@ -7,6 +7,7 @@
 #include "net/usernet.h"
 #include "net/revival.h"  // Escargot host rules
 #include "net/mwsgate.h"  // Windows Live Mobile gateway (with the Escargot setting)
+#include "net/market.h"   // Windows Marketplace stand-in (cabinets on the storage card)
 #include <jni.h>
 #include <atomic>
 #include <cstring>
@@ -846,32 +847,96 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setTlsPr
     s->net.setTlsProxy(dir ? tlsProxyFor(env, dir) : nullptr);
 }
 
+// Windows Live (Escargot) and Windows Marketplace are both local services on 10.0.2.4. One dispatch
+// owns the slot so turning one on does not drop the other. Redacted captures sit next to the proxy CA.
+static std::mutex g_netSvcMu;
+static bool g_escargotOn = false;
+static std::string g_marketDir;
+static std::string g_marketHost;
+static std::shared_ptr<MwsGateway> g_mws;
+static std::shared_ptr<Marketplace> g_market;
+
+static void applyNetServices(Session *s) {
+    if (!s) return;
+    std::lock_guard<std::mutex> lk(g_netSvcMu);
+    std::vector<HostRule> rules;
+    std::vector<LocalDispatch::Route> routes;
+    if (g_escargotOn) {
+        if (!g_mws) g_mws = std::make_shared<MwsGateway>(MwsGateway::Config{});  // kept: signed-in users
+        {
+            std::lock_guard<std::mutex> tl(g_tlsMu);
+            if (g_tls && !g_tls->dir().empty()) {
+                g_mws->setCaptureDir(g_tls->dir() + "/mws-capture");
+                g_mws->setStateDir(g_tls->dir());
+            }
+        }
+        for (const HostRule &r : MwsGateway::hostRules()) {
+            rules.push_back(r);
+            routes.push_back({r.pattern, g_mws});
+        }
+        std::vector<HostRule> esc = escargotHostRules();
+        rules.insert(rules.end(), esc.begin(), esc.end());
+    }
+    if (!g_marketDir.empty()) {
+        if (!g_market) g_market = std::make_shared<Marketplace>(Marketplace::Config{g_marketDir, "", g_marketHost});
+        else {
+            g_market->setCatalogDir(g_marketDir);
+            g_market->setUpstream(g_marketHost);
+        }
+        {
+            std::lock_guard<std::mutex> tl(g_tlsMu);
+            if (g_tls && !g_tls->dir().empty()) g_market->setCaptureDir(g_tls->dir() + "/market-capture");
+        }
+        for (const HostRule &r : Marketplace::hostRules()) {
+            rules.push_back(r);
+            routes.push_back({r.pattern, g_market});
+        }
+    }
+    if (routes.empty()) {
+        setLocalService(nullptr);
+    } else {
+        auto hub = std::make_shared<LocalDispatch>();
+        hub->setRoutes(std::move(routes));
+        setLocalService(hub);
+    }
+    s->net.setHostRules(rules);
+}
+
 // "Windows Live Messenger via Escargot": Microsoft's Messenger / Passport names answer with Escargot's
 // servers (net/revival.h, docs/research-escargot.md). HTTPS to them needs the secure web proxy too.
 // It also turns on the Windows Live Mobile gateway (net/mwsgate.h, prototype) for the Windows Live
-// client built into WM 6.1.4 / 6.5.3; its redacted capture goes next to the proxy's CA (mws-capture).
+// client built into WM 6.1.4 / 6.5.3.
 JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setEscargot(JNIEnv *, jobject, jlong h, jboolean on) {
     Session *s = S(h);
     if (!s) return;
-    std::vector<HostRule> rules;
-    if (on) {
-        rules = MwsGateway::hostRules();
-        std::vector<HostRule> esc = escargotHostRules();
-        rules.insert(rules.end(), esc.begin(), esc.end());
-        static std::shared_ptr<MwsGateway> gateway;  // one per process; kept across sessions (signed-in users)
-        if (!gateway) gateway = std::make_shared<MwsGateway>(MwsGateway::Config{});
-        {
-            std::lock_guard<std::mutex> lk(g_tlsMu);  // the proxy may come up after this call: set it each time
-            if (g_tls && !g_tls->dir().empty()) {
-                gateway->setCaptureDir(g_tls->dir() + "/mws-capture");
-                gateway->setStateDir(g_tls->dir());
-            }
-        }
-        setLocalService(gateway);
-    } else {
-        setLocalService(nullptr);
+    {
+        std::lock_guard<std::mutex> lk(g_netSvcMu);
+        g_escargotOn = on;
     }
-    s->net.setHostRules(rules);
+    applyNetServices(s);
+}
+
+// Windows Marketplace (net/market.h). dir is the cabinet folder used when host is empty or down;
+// null turns the stand-in off. host is the Marketplace server (HTTPS), empty for the folder only.
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setMarketplace(JNIEnv *env, jobject, jlong h, jstring dir, jstring host) {
+    Session *s = S(h);
+    if (!s) return;
+    auto take = [&](jstring js) {
+        if (!js) return std::string();
+        const char *d = env->GetStringUTFChars(js, nullptr);
+        if (!d) return std::string();
+        std::string out = d;
+        env->ReleaseStringUTFChars(js, d);
+        return out;
+    };
+    std::string path = take(dir);
+    std::string up = take(host);
+    {
+        std::lock_guard<std::mutex> lk(g_netSvcMu);
+        g_marketDir = std::move(path);
+        g_marketHost = std::move(up);
+    }
+    applyNetServices(s);
 }
 
 static std::shared_ptr<TlsProxy> currentTlsProxy() {

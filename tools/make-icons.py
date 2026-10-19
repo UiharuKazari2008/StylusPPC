@@ -91,6 +91,19 @@ def send(s):
     return img
 
 
+def discord(s):
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    glossy_tile(img, s, (150, 168, 242), (70, 78, 176))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([s * 0.22, s * 0.30, s * 0.78, s * 0.62], int(s * 0.08), fill=(255, 255, 255, 245))
+    d.polygon([(s * 0.34, s * 0.60), (s * 0.30, s * 0.74), (s * 0.48, s * 0.60)], fill=(255, 255, 255, 245))
+    for x in (0.38, 0.50, 0.62):
+        r = s * 0.04
+        cy = s * 0.46
+        d.ellipse([s * x - r, cy - r, s * x + r, cy + r], fill=(78, 90, 196, 255))
+    return img
+
+
 def lobby(s):
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     glossy_tile(img, s, (210, 120, 70), (120, 48, 36))
@@ -149,3 +162,5 @@ if __name__ == "__main__":
     write_ico(os.path.join(ROOT, "guest", "SendBluetooth", "app.ico"), send)
     os.makedirs(os.path.join(ROOT, "guest", "InfraLobby"), exist_ok=True)
     write_ico(os.path.join(ROOT, "guest", "InfraLobby", "app.ico"), lobby)
+    os.makedirs(os.path.join(ROOT, "guest", "Discord"), exist_ok=True)
+    write_ico(os.path.join(ROOT, "guest", "Discord", "app.ico"), discord)

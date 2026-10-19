@@ -392,6 +392,12 @@ class SettingsForm : Form
             MessageBox.Show(text, "PocketStylus");
             return;
         }
+        if (command.StartsWith("install "))
+        {
+            try { Helper.InstallApp(command.Substring(8)); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "PocketStylus"); }
+            return;
+        }
         Helper.Send(command);
     }
 

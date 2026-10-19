@@ -130,6 +130,13 @@ object NativeBridge {
     external fun setTlsProxy(handle: Long, dir: String?)
     /** Messenger / Passport names answer with Escargot's servers (core/src/net/revival.h, docs/research-escargot.md). */
     external fun setEscargot(handle: Long, on: Boolean)
+
+    /**
+     * Windows Marketplace stand-in (core/src/net/market.h). [dir] is the cabinet folder used when [host]
+     * is empty or does not answer; null turns the stand-in off. [host] is the Marketplace server.
+     * The built-in client also needs the secure web proxy, because Marketplace used HTTPS.
+     */
+    external fun setMarketplace(handle: Long, dir: String?, host: String?)
     /** Certificate warnings waiting for the user, each "<id> <seconds> <host>\n<message>"; polling also tells the proxy someone answers. */
     external fun tlsPrompts(): Array<String>
     /** The user's answer to warning [id]: [allow] continues to that site with that certificate for this session. */

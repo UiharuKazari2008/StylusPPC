@@ -310,17 +310,13 @@ static class Helper
         CopyProgram("GpsTest.exe", true);
         string lobby = CopyProgram("InfraLobby.exe");
         if (lobby != null) Shortcut(@"\Windows\Start Menu\Programs\InfraLobby.lnk", "\"" + lobby + "\"");
+        // Discord is optional (Settings > Installers). Replace the copy already in \Windows
+        // only when the card has a different file, and close it first so the new one can load.
+        RefreshInstalled("Discord.exe");
         try { DropLeftover(); } catch (Exception) { }
-        // Today items are not installed or replaced here. Settings > Today (the "widget" command)
-        // is the only way one is added. Copies that were injected before that button existed are
-        // removed once, and a later helper start leaves whatever the user installed.
-        bool stripped = false;
-        try { stripped = ClearInjectedWidgets(); } catch (Exception e) { Log("today " + e.Message); }
-        if (stripped)
-        {
-            EndNamed("shell32.exe");
-            try { EnsureShell(); } catch (Exception) { }
-        }
+        // Today items are not installed or replaced here. Settings > Today (the "widget"
+        // command) is the only way one is added, and a helper start leaves the ones the user
+        // turned on or off.
         // Text messages on WM 6.5.3 (Sms.cs): MAPIdotnet's native half and its stream types.
         CopyProgram("MAPIlib.dll");
         CopyProgram("OpenNETCF.dll");
@@ -333,8 +329,7 @@ static class Helper
     }
 
     // Retired Today plugins (notes, pins, search, and the old weather DLLs).
-    // SkyToday.dll and InfraToday4.dll are the optional widgets. DropLeftover does not touch them;
-    // ClearInjectedWidgets removes the copies that were injected before the install buttons existed.
+    // SkyToday.dll and InfraToday4.dll are the optional widgets. DropLeftover does not touch them.
     static bool TrashDllName(string path)
     {
         string n = Path.GetFileName(path).ToLower();
@@ -419,102 +414,15 @@ static class Helper
     }
 
     // Removes the retired Today plugins. The shell is left running: ending it here kept Today from
-    // coming back. InfraWAN and Weather are handled by ClearInjectedWidgets, once.
+    // coming back. Which items are on is the user's choice in Settings > Today.
     static void DropLeftover()
     {
         bool keys = DropTodayKeys();
         int files = DropPluginFiles();
-        try
-        {
-            using (RegistryKey live = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Today\Items\Windows Live Search", true))
-            {
-                object on = live == null ? null : live.GetValue("Enabled");
-                if (live != null && !(on is int && (int)on == 1)) live.SetValue("Enabled", 1);
-            }
-        }
-        catch (Exception) { }
         if (keys || files > 0)
         {
             Log("today: removed leftover items");
             RegFlushKey(HKLM);
-        }
-    }
-
-    static readonly UIntPtr HKCU = new UIntPtr(0x80000001u);
-
-    static bool WidgetsOptIn()
-    {
-        try
-        {
-            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\WMDroid"))
-            {
-                object v = k == null ? null : k.GetValue("TodayOptIn");
-                return v is int && (int)v == 1;
-            }
-        }
-        catch (Exception) { return false; }
-    }
-
-    // The Weather and InfraWAN items shipped before there was an install button. Today still lists
-    // them, and their DLLs (and the .old copies a replace leaves behind) are what breaks the screen.
-    // Once, remove the items and the files. After this, only the settings button adds one.
-    static bool ClearInjectedWidgets()
-    {
-        if (WidgetsOptIn()) return false;
-        bool removed = false;
-        if (DeleteKey(@"Software\Microsoft\Today\Items\Weather")) removed = true;
-        if (DeleteKey(@"Software\Microsoft\Today\Items\InfraWAN")) removed = true;
-        foreach (string path in new string[] {
-            @"\Windows\SkyToday.dll", @"\Windows\SkyToday.dll.old", @"\Windows\SkyToday.dll.dead",
-            @"\Windows\InfraToday.dll", @"\Windows\InfraToday.dll.old",
-            @"\Windows\InfraToday4.dll", @"\Windows\InfraToday4.dll.old", @"\Windows\InfraToday4.dll.dead" })
-        {
-            if (RemoveTodayFile(path)) removed = true;
-        }
-        bool gone = true;
-        foreach (string path in new string[] {
-            @"\Windows\SkyToday.dll", @"\Windows\InfraToday.dll", @"\Windows\InfraToday4.dll" })
-            if (File.Exists(path)) gone = false;
-        using (RegistryKey w = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Today\Items\Weather"))
-            if (w != null) gone = false;
-        using (RegistryKey i = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Today\Items\InfraWAN"))
-            if (i != null) gone = false;
-        if (gone)
-        {
-            try
-            {
-                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"Software\WMDroid"))
-                    if (k != null) k.SetValue("TodayOptIn", 1, RegistryValueKind.DWord);
-                RegFlushKey(HKCU);
-            }
-            catch (Exception e) { Log("today opt-in " + e.Message); }
-        }
-        if (removed)
-        {
-            Log("today: removed the injected widgets");
-            RegFlushKey(HKLM);
-        }
-        return removed;
-    }
-
-    static bool RemoveTodayFile(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return false;
-            File.Delete(path);
-            return true;
-        }
-        catch (Exception)
-        {
-            try
-            {
-                string dead = path + ".away";
-                if (File.Exists(dead)) File.Delete(dead);
-                File.Move(path, dead);
-                return true;
-            }
-            catch (Exception) { return false; }
         }
     }
 
@@ -565,6 +473,92 @@ static class Helper
         else return "bad args";
         if (changed) EndNamed("shell32.exe");
         return changed ? "installed " + name : "same " + name;
+    }
+
+    /** "install discord": Settings > Installers. Copies the program and adds the Start menu entry. */
+    public static string InstallApp(string which)
+    {
+        which = which == null ? "" : which.Trim().ToLower();
+        if (which != "discord")
+        {
+            InstallNote("That program is not available.");
+            return "bad args";
+        }
+        string src = Path.Combine(Card + @"\2577", "Discord.exe");
+        string installed = @"\Windows\Discord.exe";
+        bool had = File.Exists(installed);
+        if (had && File.Exists(src) && !SameBytes(src, installed))
+        {
+            EndNamed("Discord.exe");
+            Thread.Sleep(400);
+        }
+        string dst = CopyProgram("Discord.exe");
+        if (dst == null)
+        {
+            Log("install discord: not on the card");
+            InstallNote("That program is not on the storage card.");
+            return "missing";
+        }
+        Shortcut(@"\Windows\Start Menu\Programs\Discord.lnk", "\"" + dst + "\"");
+        Log("install discord: " + (had ? "same" : "new"));
+        string text = had
+            ? "Discord is already in Start > Programs. This is the current copy."
+            : "Discord is in Start > Programs. Turn on Secure Web Proxy before you sign in.";
+        InstallNote(text);
+        return had ? "same Discord" : "installed Discord";
+    }
+
+    static void InstallNote(string text)
+    {
+        // Not on the mailbox thread. A dialog there looks like a stuck command, and the
+        // watchdog then reinstalls the helper while the phone is idle.
+        Thread note = new Thread(delegate
+        {
+            try { MessageBox.Show(text, "PocketStylus"); }
+            catch (Exception e) { Log("install note " + e.Message); }
+        });
+        note.IsBackground = true;
+        note.Start();
+    }
+
+    static void RefreshInstalled(string name)
+    {
+        string src = Path.Combine(Card + @"\2577", name);
+        string dst = Path.Combine(@"\Windows", name);
+        if (!File.Exists(src) || !File.Exists(dst) || SameBytes(src, dst)) return;
+        EndNamed(name);
+        Thread.Sleep(400);
+        CopyProgram(name, true);
+    }
+
+    static bool SameBytes(string a, string b)
+    {
+        try
+        {
+            byte[] ba = FileBytes(a);
+            byte[] bb = FileBytes(b);
+            if (ba == null || bb == null || ba.Length != bb.Length) return false;
+            for (int i = 0; i < ba.Length; i++) if (ba[i] != bb[i]) return false;
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    static byte[] FileBytes(string path)
+    {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            if (fs.Length > 8 * 1024 * 1024) return null;
+            byte[] b = new byte[fs.Length];
+            int got = 0;
+            while (got < b.Length)
+            {
+                int n = fs.Read(b, got, b.Length - got);
+                if (n <= 0) break;
+                got += n;
+            }
+            return got == b.Length ? b : null;
+        }
     }
 
     public static void SettingsEntry(string exe)
@@ -931,6 +925,7 @@ static class Helper
             case "received": return Bluetooth.Received(rest);
             case "irda": return Irda.Command(rest);  // infrared transport choice (Irda.cs)
             case "widget": return InstallWidget(rest);  // Today item the user asked for (Today.cs, Weather.cs)
+            case "install": return InstallApp(rest);  // Settings > Installers (Discord)
             case "clip": case "ime": case "type": return InputSync.Command(verb.ToLower(), rest);  // clipboard sync, phone keyboard (InputSync.cs)
             case "media": return AudioClass.Command(rest);  // play / pause / next / prev / stop (AudioClass.cs)
             case "vol": return AudioClass.SetVolumes(rest);  // phone media / ringtone / notification volume (AudioClass.cs)

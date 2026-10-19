@@ -71,7 +71,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         set(v) {
             if (field == v) return
             field = v
-            foldKeyboard.visibility = if (v != null) VISIBLE else GONE
+            foldKeyboard.visibility = if (v != null && !incognito) VISIBLE else GONE
             if (v == null) foldKeyboard.releaseAll()
             updateHinge()
             requestLayout(); invalidate(); keysView.invalidate()
@@ -603,8 +603,8 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             val r = RectF(it.x * pw, it.y * ph, (it.x + it.w) * pw, (it.y + it.h) * ph)
             when (it.type) {
                 "screen" -> {
-                    // Guest aspect, pinned to the top of the skin's screen place. The unused
-                    // bottom of that place is the dock's row; the picture is not stretched to fill it.
+                    // Guest aspect, inside the skin's screen place. A shorter picture stays at the
+                    // top of that place; the spare strip below it is the dock's. Not stretched.
                     var w = r.width()
                     var h = w * ratio
                     if (h > r.height() * 1.02f) { h = r.height(); w = h / ratio }
@@ -641,7 +641,28 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
                 }
             }
         }
+        // The upper half starts at the top of the window. A screen place that begins lower
+        // (the built-in one sits at 6% and ends past the hinge) draws 480×800 across the fold.
+        if (fold && !foldMax) pinUnfoldedScreen(pw, ph)
         if (fold) fitKeyboard()
+    }
+
+    /**
+     * Keeps the open-phone picture in the upper screen: top on the top edge, bottom above the
+     * hinge. Shorter than that gap, it keeps its size and only moves up. Taller, it shrinks,
+     * same aspect, still centred in its place.
+     */
+    private fun pinUnfoldedScreen(pw: Int, ph: Int) {
+        if (screenRect.isEmpty || ph <= 0) return
+        val hinge = foldCrease?.top?.takeIf { it in 1 until ph } ?: ph / 2
+        var h = screenRect.height()
+        var w = screenRect.width()
+        if (h > hinge) {
+            w = (w * hinge.toFloat() / h).toInt().coerceAtLeast(1)
+            h = hinge
+        }
+        val left = (screenRect.centerX() - w / 2).coerceIn(0, (pw - w).coerceAtLeast(0))
+        screenRect.set(left, 0, left + w, h)
     }
 
     /**
@@ -884,7 +905,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     }.apply { visibility = GONE }
 
     private fun updateHinge() {
-        hingeView.visibility = if (hingeOn && foldCrease != null && !foldMax) VISIBLE else GONE
+        hingeView.visibility = if (!incognito && hingeOn && foldCrease != null && !foldMax) VISIBLE else GONE
         hingeView.invalidate()
     }
 
@@ -980,10 +1001,29 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         addView(foldKeyboard, LayoutParams(1, 1))
         addView(hingeView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         LIGHTS.forEachIndexed { i, l -> l.copyInto(lightDev[i]) }
+        WindowsGlyph.onReady = { keysView.post { keysView.invalidate(); foldKeyboard.invalidate() } }
     }
 
     /** Where the display sits in this view (which fills the window). */
     fun displayRect() = Rect(screenRect)
+
+    /**
+     * Presentation only: the display fills this view and the skin, keys, dock, light and hinge
+     * are hidden. The saved layout preferences are not changed.
+     */
+    var incognito = false
+        set(v) {
+            if (field == v) return
+            releaseAll()
+            foldKeyboard.releaseAll()
+            if (v) foldKeyboard.hideIme()
+            field = v
+            keysView.visibility = if (v) GONE else VISIBLE
+            foldKeyboard.visibility = if (!v && foldCrease != null) VISIBLE else GONE
+            updateHinge()
+            requestLayout()
+            invalidate()
+        }
 
     fun setGuestSize(w: Int, h: Int) {
         if (w == guestW && h == guestH) return
@@ -1020,7 +1060,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         computeLayout(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec))
         // (computeLayout keeps the old rects for an empty size: carve only freshly placed ones)
-        if (MeasureSpec.getSize(widthMeasureSpec) > 0 && MeasureSpec.getSize(heightMeasureSpec) > 0)
+        if (!incognito && MeasureSpec.getSize(widthMeasureSpec) > 0 && MeasureSpec.getSize(heightMeasureSpec) > 0)
             carveDock(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec))
         // The display's place goes in its layout params, so the frame layout puts it there in one
         // pass (moving a SurfaceView twice per layout costs a compositor transaction each time).
@@ -1060,6 +1100,18 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         dockArea.setEmpty()
         ledRect.setEmpty()
         decor.clear()
+        if (incognito) {
+            screenRect.set(0, 0, pw, ph)
+            topBar.setEmpty()
+            keys.forEach { it.rect.setEmpty() }
+            dpad.setEmpty()
+            lockKey.rect.setEmpty()
+            lockTouch.setEmpty()
+            specKeys.clear()
+            specActive = false
+            foldSkin.keyboard.setEmpty()
+            return
+        }
         val sl = specLayout()
         specActive = sl != null
         if (sl != null) { layoutSpec(sl, pw, ph); return }
@@ -1149,7 +1201,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         (!wallpaperOn || backdropOpacity >= 0.5f)
 
     override fun onDraw(canvas: Canvas) {
-        drawBackdrop(canvas)
+        if (incognito) canvas.drawColor(Color.BLACK) else drawBackdrop(canvas)
     }
 
     private fun drawBackdrop(c: Canvas) {
@@ -1530,53 +1582,9 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         } }
     }
 
-    /** The Start key's mark: the waving Windows flag (the user's outline, a 2000 x 1860 box), in the mark colour. */
+    /** The Windows key: four squares until WindowsGlyph has traced the ROM's own flag. */
     private fun drawWindowsFlag(c: Canvas, cx: Float, cy: Float, size: Float) {
-        // Scaled into a reused path rather than by the canvas, so the backlight's glow shader and
-        // halo (glyph()) stay in key coordinates.
-        val k = size / 1860f
-        flagMatrix.setScale(k, k)
-        flagMatrix.postTranslate(cx - 1000f * k, cy - 930f * k)
-        windowsLogo.transform(flagMatrix, flagPath)
-        paint.style = Paint.Style.FILL
-        c.drawPath(flagPath, paint)
-    }
-
-    private val flagPath = Path()
-    private val flagMatrix = Matrix()
-
-    private val windowsLogo = Path().apply {
-        // Top left pane.
-        moveTo(415f, 85f)
-        cubicTo(640f, -30f, 900f, -60f, 1157f, 130f)
-        lineTo(965f, 787f)
-        cubicTo(830f, 700f, 640f, 640f, 600f, 655f)
-        cubicTo(470f, 665f, 340f, 700f, 224f, 746f)
-        close()
-        // Top right pane.
-        moveTo(1258f, 200f)
-        cubicTo(1400f, 300f, 1520f, 330f, 1625f, 330f)
-        cubicTo(1760f, 330f, 1880f, 290f, 1999f, 242f)
-        lineTo(1809f, 900f)
-        cubicTo(1680f, 960f, 1560f, 990f, 1420f, 993f)
-        cubicTo(1290f, 995f, 1150f, 930f, 1067f, 852f)
-        close()
-        // Bottom left pane.
-        moveTo(190f, 862f)
-        cubicTo(300f, 810f, 430f, 775f, 550f, 775f)
-        cubicTo(680f, 775f, 820f, 830f, 933f, 907f)
-        lineTo(740f, 1570f)
-        cubicTo(620f, 1490f, 480f, 1435f, 380f, 1443f)
-        cubicTo(250f, 1450f, 100f, 1470f, 0f, 1525f)
-        close()
-        // Bottom right pane.
-        moveTo(1034f, 971f)
-        cubicTo(1150f, 1050f, 1280f, 1100f, 1370f, 1100f)
-        cubicTo(1520f, 1100f, 1640f, 1070f, 1775f, 1016f)
-        lineTo(1585f, 1785f)
-        cubicTo(1460f, 1840f, 1330f, 1860f, 1210f, 1860f)
-        cubicTo(1030f, 1860f, 910f, 1740f, 844f, 1628f)
-        close()
+        WindowsGlyph.draw(c, paint, cx, cy, size)
     }
 
     /** The D-pad: one glass pad (as wide and tall as the skin drew it), a centre button, and arrows. */
@@ -1956,6 +1964,7 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (incognito) return false
         if (dockTouch(e)) return true
         val idx = e.actionIndex
         when (e.actionMasked) {
