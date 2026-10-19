@@ -11,6 +11,8 @@ $refs = 'mscorlib','System','System.Core','System.Drawing','System.Windows.Forms
     ForEach-Object { "/r:$(Join-Path $cf "$_.dll")" }
 # Each folder under guest\ is one program: Helper -> WMDroid.exe (the helper), others by folder name.
 foreach ($dir in Get-ChildItem (Join-Path $root 'guest') -Directory) {
+    # Discord is withheld: do not put Discord.exe back into the APK.
+    if ($dir.Name -eq 'Discord') { continue }
     $name = if ($dir.Name -eq 'Helper') { 'WMDroid' } else { $dir.Name }
     $exe = Join-Path (Split-Path $out) "$name.exe"
     $src = @(Get-ChildItem $dir.FullName -Filter *.cs | ForEach-Object FullName)

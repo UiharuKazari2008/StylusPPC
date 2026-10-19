@@ -1263,7 +1263,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         val which = settings.installRequest
         if (which.isEmpty()) return
         settings.installRequest = ""
-        for (w in which.split(' ')) if (w.isNotEmpty()) guest.send("install $w")
+        for (w in which.split(' ')) if (w.isNotEmpty() && w != "discord") guest.send("install $w")
     }
 
     /** Suspend from the power menu: don't wake the display until the app has been opened again. */

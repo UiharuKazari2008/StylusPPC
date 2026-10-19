@@ -183,7 +183,7 @@ A lower Memory setting shortens only the top block. The 32 MB storage stripe sta
 | HTC HD2 apps from a ROM you own (Teeter, Flashlight, [`docs/research-hd2-port.md`](docs/research-hd2-port.md)) | 🟡 new in 1.0.6. Teeter plays; Flashlight uses the phone's LED. Other packages install and are untested |
 | Adobe Flash Lite (SWF and Flash in Internet Explorer) | ✅ already in the 6.5 and 6.5.3 Professional images |
 | Today plugins: weather, InfraWAN room count (classic Today, not Titanium) | ✅ new in 1.0.6. Installed from PocketStylus settings, not at first boot |
-| Discord: direct messages, server channels, files and images (`guest/Discord`) | ✅ Windows Mobile 6 and later. The phone makes every request; Secure Web Proxy finishes TLS |
+| Discord | Withheld. Not copied onto the phone, and Settings has no installer for it |
 
 ---
 
@@ -406,16 +406,6 @@ A later PocketStylus update replaces a plugin that is already installed. It does
 </details>
 
 <details>
-<summary><b>Discord</b></summary>
-
-Settings → **Installers** → **Install Discord** puts it in Start → Programs (`guest/Discord`). It runs inside Windows Mobile and talks to Discord itself: your direct messages, server text and announcement channels, and sending a message with a file or an image. Received images can be previewed; other files can be saved to My Documents.
-
-Sign in with your account token. It is kept in the phone's Application Data. While a conversation is open the phone asks for new messages every few seconds.
-
-Turn on **Secure Web Proxy** first. Windows Mobile's TLS is too old for Discord, and this program does not move the requests onto Android: WinInet on the phone opens HTTPS, and the proxy accepts that handshake and completes a modern one.
-</details>
-
-<details>
 <summary><b>HTC HD2 apps, including Teeter</b></summary>
 
 PocketStylus ships no HTC software. Settings → **HTC HD2 apps** opens an HD2 ROM you own (`RUU_signed.nbh`, an `os.nb`, or an IMGFS dump) and lists packages that contain a program. **Teeter** and **Flashlight** are the ones that are known to run. Flashlight's own library needs a Qualcomm chip, so the helper installs a small replacement that drives the phone's camera LED. The rest are marked untested.
@@ -474,7 +464,6 @@ Device settings are per OS, except those about the phone itself, which every OS 
 | **Contacts** | Sync Contacts · Sync Calendar · Prompt before Accepting Changes from Device · Sync Now |
 | **Infrared** | When Windows Mobile Uses Infrared (ask / Bluetooth LE / InfraWAN / off) · Stay Reachable · This Phone's Name · InfraWAN Server, Room, User, Token · Allow Nearby Devices · Test InfraWAN Connection |
 | **Today** | Install Weather · Install InfraWAN |
-| **Installers** | Install Discord (Windows Mobile 6 and later) |
 | **Device** | Screen resolution (phone shape / 480×854 / 480×800 / 480×640 / 480×480, or the Standard sizes; restarts WM, keeps storage) · Memory (96–256 MB) · Screen DPI · Storage Card (mode, root, folders) |
 
 Other pages in the Android Settings screen (used when Windows Mobile itself cannot be opened):
@@ -540,7 +529,7 @@ guest/Sensor/     HTC SEN0: G-sensor driver
 guest/DdShim/     DirectDraw caps wrapper HTC games check for
 guest/Today/      InfraWAN Today plugin
 guest/Weather/    weather Today plugin
-guest/Discord/    Discord client for WM 6+ (DMs, servers, files); HTTPS via the secure web proxy
+guest/Discord/    withheld; not built into the APK and not installed
 guest/*/          small guest programs (Send via Bluetooth, GPS test, InfraLobby)
 server/infrawan/  InfraWAN relay for infrared beams (Node.js, no dependencies)
 server/market/    Windows Marketplace cabinets and catalog (Node.js, no dependencies)

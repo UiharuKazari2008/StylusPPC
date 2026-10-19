@@ -121,9 +121,6 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             val asset = if (cf2) "${name}2003.exe" else "$name.exe"
             programs.add(asset to "$name.exe")
         }
-        // Discord is a CF 3.5 program (Windows Mobile 6 and later). It speaks HTTPS itself;
-        // the secure web proxy is the only host help it uses.
-        if (!cf2) programs.add("Discord.exe" to "Discord.exe")
         if (cf2) programs.add("NETCFv2.wce4.ARMV4.cab" to "NETCFv2.wce4.ARMV4.cab")
         else {
             programs.add("NETCFv35.wm.armv4i.cab" to "NETCFv35.wm.armv4i.cab")
@@ -145,6 +142,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             File(autorunDir, "OpenNETCF.dll").delete()
         } else File(autorunDir, "NETCFv2.wce4.ARMV4.cab").delete()
         File(autorunDir, "WmpHook.dll").delete()  // the player plug-in is no longer shipped
+        File(autorunDir, "Discord.exe").delete()  // withheld; drop a copy an older build left on the card
         writeState()
         // A restored session already has its helper running and won't say hello by itself: ask, so an
         // outdated helper is noticed (one too old to know "hello" answers "unknown").
@@ -371,8 +369,7 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
         if (line.isEmpty()) return
         lastHeard = android.os.SystemClock.uptimeMillis()
         if (line == "alive") return  // watchdog pulse while a command is slow; not a command result
-        // Settings > Installers on an older settings page sends "install discord" here. The helper
-        // copies the program and shows the result inside Windows Mobile.
+        // An older settings page can still answer "result install …". Discord is not copied back.
         if (line.startsWith("result install ")) {
             val answer = line.removePrefix("result install ").trim()
             // This helper does not know the command yet. Keep the request and hand over to the
@@ -449,7 +446,8 @@ class GuestBridge(private val ctx: Context, private val settings: Settings, priv
             // An older page cannot do that itself, so the helper running now does.
             line.startsWith("install ") -> {
                 val which = line.removePrefix("install ").trim()
-                if (which.isNotEmpty()) {
+                // Discord is withheld. The helper removes it on update; do not copy it back.
+                if (which.isNotEmpty() && which != "discord") {
                     installPending = which
                     send("install $which")
                 }

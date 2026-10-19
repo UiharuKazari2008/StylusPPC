@@ -310,9 +310,8 @@ static class Helper
         CopyProgram("GpsTest.exe", true);
         string lobby = CopyProgram("InfraLobby.exe");
         if (lobby != null) Shortcut(@"\Windows\Start Menu\Programs\InfraLobby.lnk", "\"" + lobby + "\"");
-        // Discord is optional (Settings > Installers). Replace the copy already in \Windows
-        // only when the card has a different file, and close it first so the new one can load.
-        RefreshInstalled("Discord.exe");
+        // Discord is withheld. Take it out of Start and \Windows on every install that still has it.
+        RemoveDiscord();
         try { DropLeftover(); } catch (Exception) { }
         // Today items are not installed or replaced here. Settings > Today (the "widget"
         // command) is the only way one is added, and a helper start leaves the ones the user
@@ -475,37 +474,43 @@ static class Helper
         return changed ? "installed " + name : "same " + name;
     }
 
-    /** "install discord": Settings > Installers. Copies the program and adds the Start menu entry. */
+    /** "install …": Settings used to offer Discord here. That installer is gone. */
     public static string InstallApp(string which)
     {
         which = which == null ? "" : which.Trim().ToLower();
-        if (which != "discord")
+        if (which == "discord")
         {
-            InstallNote("That program is not available.");
-            return "bad args";
+            bool had = DiscordPresent();
+            RemoveDiscord();
+            InstallNote(had ? "Discord has been removed." : "Discord is not available.");
+            return "removed Discord";
         }
-        string src = Path.Combine(Card + @"\2577", "Discord.exe");
-        string installed = @"\Windows\Discord.exe";
-        bool had = File.Exists(installed);
-        if (had && File.Exists(src) && !SameBytes(src, installed))
+        InstallNote("That program is not available.");
+        return "bad args";
+    }
+
+    static bool DiscordPresent()
+    {
+        if (File.Exists(@"\Windows\Discord.exe")) return true;
+        if (File.Exists(@"\Windows\Start Menu\Programs\Discord.lnk")) return true;
+        return File.Exists(Path.Combine(Card + @"\2577", "Discord.exe"));
+    }
+
+    /** Close Discord and delete the program, its Start menu entry, and the card copy. */
+    static void RemoveDiscord()
+    {
+        bool open = File.Exists(@"\Windows\Discord.exe");
+        EndNamed("Discord.exe");
+        if (open) Thread.Sleep(400);
+        foreach (string path in new string[] {
+            @"\Windows\Discord.exe",
+            @"\Windows\Discord.exe.old",
+            @"\Windows\Start Menu\Programs\Discord.lnk",
+            Path.Combine(Card + @"\2577", "Discord.exe") })
         {
-            EndNamed("Discord.exe");
-            Thread.Sleep(400);
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (Exception e) { Log("remove discord " + e.Message); }
         }
-        string dst = CopyProgram("Discord.exe");
-        if (dst == null)
-        {
-            Log("install discord: not on the card");
-            InstallNote("That program is not on the storage card.");
-            return "missing";
-        }
-        Shortcut(@"\Windows\Start Menu\Programs\Discord.lnk", "\"" + dst + "\"");
-        Log("install discord: " + (had ? "same" : "new"));
-        string text = had
-            ? "Discord is already in Start > Programs. This is the current copy."
-            : "Discord is in Start > Programs. Turn on Secure Web Proxy before you sign in.";
-        InstallNote(text);
-        return had ? "same Discord" : "installed Discord";
     }
 
     static void InstallNote(string text)
@@ -689,6 +694,8 @@ static class Helper
             if (Marshal.GetLastWin32Error() == 183) { Log("takeover: the old helper still runs"); return; }
         }
         if (takeover) Log("serving (took over)");
+        // A restored session can still have Discord in \Windows. The installer is gone, so drop it here too.
+        try { RemoveDiscord(); } catch (Exception e) { Log("remove discord " + e.Message); }
         // Watchdog: a step that never returns (a driver call, a window that stopped answering) would
         // leave the app's commands waiting. A slow command is given three minutes and a pulse, so a
         // slowed guest is not restarted and the storage card stays in. A wedged loop still restarts
