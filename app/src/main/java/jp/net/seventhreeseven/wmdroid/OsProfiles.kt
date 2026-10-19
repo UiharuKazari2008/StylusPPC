@@ -20,7 +20,8 @@ data class OsProfile(
     val archiveFolder: String,
     val variants: List<ImageVariant>,
     val armv5: Boolean = true,
-    val defaultMemMB: Int = 128,
+    /** What a stored Memory of 0 boots. The board's ceiling; a ROM that already has saves keeps its own size (GuestStates). */
+    val defaultMemMB: Int = 256,
     /**
      * Smallest Memory setting offered. Every image keeps its storage volume in the first 32 MB of
      * the RAM extension, so 64 MB boots with "Storage memory critically low"; 96 MB works where
@@ -89,7 +90,6 @@ object OsProfiles {
                 // instead when it is installed (GuestStates.resolve).
                 ImageVariant("wvga", "WVGA 480×800", "PPC_USA_GSM_WVGA_VR.BIN", 480, 800),
             ),
-            defaultMemMB = 256,
             minMemMB = 128,  // at 96 MB only ~3 MB program memory is left with a few programs open
         ),
         OsProfile(
@@ -126,7 +126,6 @@ object OsProfiles {
                 // any resolution (Settings > Device > Screen resolution).
                 ImageVariant("vga", "VGA 480×640", "PPC_USA_GSM_VGA_VR.BIN", 480, 640),
             ),
-            defaultMemMB = 128,
             minMemMB = 128,  // at 96 MB the helper (.NET CF) crashes
             coldBootKeepsStorage = false,
         ),

@@ -4,35 +4,54 @@ import android.app.Activity
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.text.DateFormat
+import java.util.Date
 
 /**
- * Saved states are kept per configuration: states/<profile>-<variant>-<MB>-<W>x<H>. Windows Mobile's
- * internal storage (files, registry, installed programs) lives in those states, so a Memory or
- * Screen resolution change used to boot an empty system.
+ * One saved state per ROM image: states/<profile>-<variant>. Windows Mobile's internal storage
+ * (files, registry, installed programs) lives in that snapshot's RAM. Screen size, and on WM 6 the
+ * memory size, are read again at boot (NativeBridge.adoptState), so changing them restarts Windows
+ * Mobile into the same state. WM 5 clears its storage volume on a cold boot, so its folder also
+ * names the memory size and only a screen change carries storage (a warm restart). A different
+ * image (a Standard size served by another ROM) still starts fresh. Checked in the CLI for 6.5.3
+ * Pro/Standard, 6.1.4 and 5.0.
  *
- * Now a configuration without a state of its own starts from the one last run when that is the
- * same image (NativeBridge.adoptState: the core restores RAM and flash and Windows Mobile boots
- * again at the new size; its storage volume is the first 32 MB of the RAM extension, so any size
- * from 96 MB keeps it). WM 5 clears that volume on a cold boot, so there only screen changes carry
- * it (a warm restart, OsProfile.coldBootKeepsStorage). When it is not possible (WM 5 memory, a
- * Standard screen size served by another image) or the target has a state of its own, the user is
- * asked first ([confirm]); checked in the CLI for 6.5.3 Pro/Standard, 6.1.4 and 5.0.
+ * Older builds kept a folder per memory and resolution (states/<profile>-<variant>-<MB>-<W>x<H>).
+ * The first start after the update asks once which of those to keep ([needsChoice], StateKeepActivity).
  */
 object GuestStates {
     private const val TAG = "WMDroidStates"
     /** Smallest memory size a state can move to: the 64 MB bank plus the 32 MB storage volume (snapshot.cpp). */
     const val ADOPT_MIN_MB = 96
+    /** Set once the per-size folders have been folded into one folder per ROM. */
+    private const val UNIFIED = "state.unified"
 
     data class Target(val profile: OsProfile, val variant: ImageVariant, val file: File, val w: Int, val h: Int, val mem: Int) {
-        val dirName get() = "${profile.id}-${variant.id}-$mem-${w}x$h"
+        /** WM 6 shares one folder across memory sizes. WM 5 keeps a folder per memory size. */
+        val dirName get() = if (profile.coldBootKeepsStorage) "${profile.id}-${variant.id}" else "${profile.id}-${variant.id}-$mem"
+    }
+
+    /** A state folder from before one-folder-per-ROM, named <profile>-<variant>-<MB>-<W>x<H>. */
+    data class SavedVersion(val dir: File, val mem: Int, val w: Int, val h: Int, val modified: Long, val resumed: Boolean) {
+        fun describe(): String {
+            val whenText = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(modified))
+            val kind = if (resumed) "last session" else "first boot"
+            return "$mem MB · ${w}×$h · $kind · $whenText"
+        }
+    }
+
+    /** One ROM image and the per-size states saved for it. */
+    data class RomSaves(val profile: OsProfile, val variant: ImageVariant, val versions: List<SavedVersion>) {
+        val key get() = "${profile.id}-${variant.id}"
+        fun dirName(mem: Int) = if (profile.coldBootKeepsStorage) key else "$key-$mem"
     }
 
     /** What applying a configuration does to Windows Mobile's internal storage. */
     enum class Change {
-        NONE,    // same configuration, or nothing saved that could be lost
-        CARRY,   // the new configuration starts from the current state: storage carried over
-        RETURN,  // the new configuration has a saved state of its own and returns to it
-        FRESH,   // the new configuration boots a new system
+        NONE,    // same state folder, or nothing saved that could be lost
+        CARRY,   // the new folder starts from the current state: storage carried over
+        RETURN,  // the new folder has a saved state of its own and returns to it
+        FRESH,   // the new folder boots a new system
     }
 
     /** The phone's display aspect the emulator screen last used (EmulatorActivity), for [resolve] elsewhere. */
@@ -41,6 +60,13 @@ object GuestStates {
     fun statesDir(ctx: Context) = File(ctx.filesDir, "states")
 
     private fun hasState(dir: File) = File(dir, EmulatorActivity.RESUME).exists() || File(dir, EmulatorActivity.BOOT).exists()
+
+    private fun global(ctx: Context) = ctx.getSharedPreferences("wmdroid", Context.MODE_PRIVATE)
+
+    private fun osPrefs(ctx: Context, profileId: String) =
+        ctx.getSharedPreferences("wmdroid.os.$profileId", Context.MODE_PRIVATE)
+
+    private fun unified(ctx: Context) = global(ctx).getBoolean(UNIFIED, false)
 
     /**
      * The configuration [settings] boot: release, image, screen and memory. [screenRes] and [memMB]
@@ -126,8 +152,8 @@ object GuestStates {
     fun confirm(activity: Activity, change: Change, apply: () -> Unit, cancel: () -> Unit) {
         Log.i(TAG, "settings change: $change")
         val message = when (change) {
-            Change.FRESH -> "This configuration starts fresh: the files, settings and programs in Windows Mobile's " +
-                "internal storage are not carried over to it. " +
+            Change.FRESH -> "Windows Mobile starts fresh: the files, settings and programs in its " +
+                "internal storage are not carried over. " +
                 "The storage card is not affected, and switching back returns to the current state."
             Change.RETURN -> "Windows Mobile returns to the state saved when it last ran with this setting. Changes " +
                 "made since then to files, settings and programs in internal storage stay with the current " +
@@ -142,4 +168,139 @@ object GuestStates {
             .setOnCancelListener { cancel() }
             .show()
     }
+
+    /** True when an update left a ROM with more than one saved version and the user has not picked yet. */
+    fun needsChoice(ctx: Context) = !unified(ctx) && legacyRoms(ctx).any { it.versions.size > 1 }
+
+    /**
+     * Folds per-size folders into one per ROM when every ROM has a single version, and pins the RAM
+     * size of ROMs that already exist so only a new install or a new ROM starts at the maximum.
+     */
+    fun settleQuiet(ctx: Context) {
+        if (unified(ctx) || needsChoice(ctx)) return
+        keep(ctx, emptyMap())
+    }
+
+    /** Per-size state folders, grouped by ROM image, newest version first. */
+    fun legacyRoms(ctx: Context): List<RomSaves> {
+        val versions = linkedMapOf<String, MutableList<SavedVersion>>()
+        val roms = linkedMapOf<String, Pair<OsProfile, ImageVariant>>()
+        val dirs = statesDir(ctx).listFiles()?.filter { it.isDirectory } ?: return emptyList()
+        for (dir in dirs.sortedBy { it.name }) {
+            val parsed = parseLegacy(dir) ?: continue
+            val (profile, variant, version) = parsed
+            val key = "${profile.id}-${variant.id}"
+            roms[key] = profile to variant
+            versions.getOrPut(key) { mutableListOf() }.add(version)
+        }
+        return roms.map { (key, rom) ->
+            RomSaves(rom.first, rom.second, versions[key].orEmpty().sortedByDescending { it.modified })
+        }
+    }
+
+    /** The version [rom] should offer first: the folder this OS last booted, else the newest. */
+    fun preferredIndex(ctx: Context, rom: RomSaves): Int {
+        val last = osPrefs(ctx, rom.profile.id).getString("state.last", "") ?: ""
+        val i = rom.versions.indexOfFirst { it.dir.name == last }
+        return if (i >= 0) i else 0
+    }
+
+    /**
+     * Keeps [picks] (ROM key to the legacy folder name) and, for a ROM with one version, that version.
+     * Removes the other per-size folders. False when a ROM with several versions has no pick.
+     */
+    fun keep(ctx: Context, picks: Map<String, String>): Boolean {
+        val roms = legacyRoms(ctx)
+        if (roms.any { it.versions.size > 1 && picks[it.key] == null }) return false
+        val g = global(ctx)
+        val currentProfile = g.getString("profile", null)
+        val currentVariant = g.getString("variant", null)
+        val keptMem = HashMap<String, Int>()
+        for (rom in roms) {
+            val chosen = rom.versions.firstOrNull { it.dir.name == picks[rom.key] } ?: rom.versions.singleOrNull() ?: continue
+            val dest = File(statesDir(ctx), rom.dirName(chosen.mem))
+            if (!moveDir(chosen.dir, dest)) return false
+            for (other in rom.versions)
+                if (other.dir.exists() && other.dir.absolutePath != dest.absolutePath) other.dir.deleteRecursively()
+            val prefs = osPrefs(ctx, rom.profile.id)
+            val last = prefs.getString("state.last", "") ?: ""
+            if (rom.versions.any { it.dir.name == last }) prefs.edit().putString("state.last", dest.name).apply()
+            val current = rom.profile.id == currentProfile && rom.variant.id == currentVariant
+            if (current || !keptMem.containsKey(rom.profile.id)) keptMem[rom.profile.id] = chosen.mem
+            Log.i(TAG, "kept ${chosen.dir.name} as ${dest.name}")
+        }
+        pinExistingRam(ctx, keptMem)
+        g.edit().putBoolean(UNIFIED, true).apply()
+        return true
+    }
+
+    /**
+     * Memory and screen stored in a snapshot header (snapshot.cpp: mem, then width, then height,
+     * after four little-endian words). Null when the file is shorter than that header.
+     */
+    fun snapshotConfig(file: File): Triple<Int, Int, Int>? {
+        val buf = ByteArray(28)
+        val n = file.inputStream().use { it.read(buf) }
+        if (n < 28) return null
+        fun u32(o: Int) = (buf[o].toInt() and 0xff) or ((buf[o + 1].toInt() and 0xff) shl 8) or
+            ((buf[o + 2].toInt() and 0xff) shl 16) or ((buf[o + 3].toInt() and 0xff) shl 24)
+        return Triple(u32(16), u32(20), u32(24))
+    }
+
+    private val LEGACY_NAME = Regex("""^(.+)-(\d+)-(\d+)x(\d+)$""")
+
+    private fun parseLegacy(dir: File): Triple<OsProfile, ImageVariant, SavedVersion>? {
+        val m = LEGACY_NAME.matchEntire(dir.name) ?: return null
+        val prefix = m.groupValues[1]
+        val profile = OsProfiles.all.sortedByDescending { it.id.length }
+            .firstOrNull { prefix.startsWith("${it.id}-") } ?: return null
+        val variant = profile.variants.firstOrNull { it.id == prefix.removePrefix("${profile.id}-") } ?: return null
+        val resume = File(dir, EmulatorActivity.RESUME)
+        val boot = File(dir, EmulatorActivity.BOOT)
+        val file = when {
+            resume.isFile -> resume
+            boot.isFile -> boot
+            else -> return null
+        }
+        val version = SavedVersion(dir, m.groupValues[2].toInt(), m.groupValues[3].toInt(), m.groupValues[4].toInt(),
+            file.lastModified(), resume.isFile)
+        return Triple(profile, variant, version)
+    }
+
+    /** Move a per-size folder onto its ROM's folder. A rename stays on the same filesystem. */
+    private fun moveDir(from: File, dest: File): Boolean {
+        if (from.absolutePath == dest.absolutePath) return hasState(dest)
+        dest.parentFile?.mkdirs()
+        if (!dest.exists() && from.renameTo(dest)) return hasState(dest)
+        if (!dest.exists()) dest.mkdirs()
+        for (f in from.listFiles().orEmpty())
+            if (f.isFile) f.copyTo(File(dest, f.name), overwrite = true)
+        if (!hasState(dest)) return false
+        from.deleteRecursively()
+        return true
+    }
+
+    /**
+     * A ROM that already has settings or saves keeps the RAM it was using. Memory left at 0 (the old
+     * "default", 128 MB except 6.5.3 Professional at 256) is written down so the new default of 256 MB
+     * applies only to a new install and to a ROM opened for the first time. WM 5 takes the memory of
+     * the version that was kept, because a different size would boot without that storage.
+     */
+    private fun pinExistingRam(ctx: Context, keptMem: Map<String, Int>) {
+        for (profile in OsProfiles.all) {
+            val p = osPrefs(ctx, profile.id)
+            if (!p.getBoolean("os.seeded", false) && !keptMem.containsKey(profile.id)) continue
+            val current = if (p.contains("memMB")) p.getInt("memMB", 0) else 0
+            val kept = keptMem[profile.id]
+            if (!profile.coldBootKeepsStorage && kept != null) {
+                p.edit().putInt("memMB", kept).apply()
+                continue
+            }
+            if (current >= profile.minMemMB) continue
+            p.edit().putInt("memMB", kept ?: previousDefaultMem(profile)).apply()
+        }
+    }
+
+    /** The Memory a stored 0 meant before new ROMs started at 256 MB. */
+    private fun previousDefaultMem(profile: OsProfile) = if (profile.id == "wm653pro") 256 else 128
 }

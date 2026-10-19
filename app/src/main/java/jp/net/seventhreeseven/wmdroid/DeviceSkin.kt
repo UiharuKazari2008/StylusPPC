@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorSpace
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -811,6 +812,9 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     /** The keys are drawn in their own layer above the display so the shine can animate cheaply. */
     private val keysView = object : View(ctx) {
         override fun onDraw(c: Canvas) {
+            // Skin plates (the top bar) sit above the guest screen. Keys are drawn after, so the
+            // lock and the LED stay on top of the bar. Listed under the screen, a plate is covered.
+            drawDecor(c)
             drawAlertLight(c)
             drawDock(c)
             if (specActive) {
@@ -1189,20 +1193,27 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         }
         paint.alpha = 255
         paint.shader = null
+    }
+
+    /** Rectangles and logos from the skin. Drawn above the guest screen and under the keys. */
+    private fun drawDecor(c: Canvas) {
+        val p = paint
+        p.shader = null
+        p.alpha = 255
         for (d in decor) {
             if (d.image != null) {
                 decorClip.reset()
                 decorClip.addRoundRect(d.rect, d.radius, d.radius, Path.Direction.CW)
                 c.save()
                 c.clipPath(decorClip)
-                c.drawBitmap(d.image, null, d.rect, paint)
+                c.drawBitmap(d.image, null, d.rect, p)
                 c.restore()
             } else {
-                paint.color = d.color
-                c.drawRoundRect(d.rect, d.radius, d.radius, paint)
+                p.color = d.color
+                c.drawRoundRect(d.rect, d.radius, d.radius, p)
             }
         }
-        paint.shader = null
+        p.shader = null
     }
 
     private class Decor(val rect: RectF, val radius: Float, val color: Int, val image: Bitmap?)
@@ -1709,6 +1720,28 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
     private var blFadeFrom = 0L
     /** The glyphs' inner glow: a unit radial gradient placed per glyph by [glowMatrix]; rebuilt on a colour change. */
     private var glowShader: RadialGradient? = null
+
+    /**
+     * HDR: how many times brighter than the UI's white the lit glyphs shine (1 = SDR). The window
+     * must be in HDR colour mode (EmulatorActivity.applyHdr); extended-sRGB colours above 1.0 then
+     * use the panel's headroom, so the backlights are the brightest things on screen.
+     */
+    var keyHdrGain = 1f
+        set(v) {
+            if (v == field) return
+            field = v
+            glowShader = null
+            redrawKeys()
+        }
+    private val hdrKeys get() = keyHdrGain > 1.01f && android.os.Build.VERSION.SDK_INT >= 29
+
+    /** [rgb] at [alpha], [keyHdrGain] times as bright (linear) as SDR, in extended sRGB. */
+    @androidx.annotation.RequiresApi(29)
+    private fun hdr(rgb: Int, alpha: Float): Long {
+        val k = Math.pow(keyHdrGain.toDouble(), 1 / 2.2).toFloat()
+        return Color.pack((rgb shr 16 and 255) / 255f * k, (rgb shr 8 and 255) / 255f * k, (rgb and 255) / 255f * k,
+            alpha.coerceIn(0f, 1f), ColorSpace.get(ColorSpace.Named.EXTENDED_SRGB))
+    }
     private val glowMatrix = Matrix()
     // Hotspot offset towards the LEDs for the glyph being drawn, in glyph radii (set by keyGlow).
     private var glowHotX = 0f
@@ -1835,6 +1868,9 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
         // A hot core fading to the backlight's colour, darker at the rim the dirtier it is.
         val core = mix(c, 0xFFFFFF, 0.6f)
         val rim = mix(c, 0, 0.15f + 0.45f * backlightDirt)
+        if (hdrKeys && android.os.Build.VERSION.SDK_INT >= 29)
+            return RadialGradient(0f, 0f, 1f, longArrayOf(hdr(core, 1f), hdr(c, 1f), hdr(rim, 1f)),
+                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP).also { glowShader = it }
         return RadialGradient(0f, 0f, 1f, intArrayOf(core, Color.rgb(c shr 16 and 255, c shr 8 and 255, c and 255), rim),
             floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP).also { glowShader = it }
     }
@@ -1860,8 +1896,14 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             val wide = ((glow * 0xB0).toInt().coerceIn(0, 255) shl 24) or backlightRgb
             paint.color = ((glow * 0x30).toInt().coerceIn(0, 255) shl 24) or backlightRgb
             labelPaint.color = paint.color
-            paint.setShadowLayer(maxOf(1f, gr * 0.9f), 0f, 0f, wide)
-            labelPaint.setShadowLayer(maxOf(1f, gr * 0.9f), 0f, 0f, wide)
+            if (hdrKeys && android.os.Build.VERSION.SDK_INT >= 29) {
+                val wideHdr = hdr(backlightRgb, glow * 0xB0 / 255f)
+                paint.setShadowLayer(maxOf(1f, gr * 0.9f), 0f, 0f, wideHdr)
+                labelPaint.setShadowLayer(maxOf(1f, gr * 0.9f), 0f, 0f, wideHdr)
+            } else {
+                paint.setShadowLayer(maxOf(1f, gr * 0.9f), 0f, 0f, wide)
+                labelPaint.setShadowLayer(maxOf(1f, gr * 0.9f), 0f, 0f, wide)
+            }
             glowPass = true
             draw()
             glowPass = false
@@ -1870,11 +1912,17 @@ class SkinLayout(ctx: Context, private val screen: View, private val onKey: (vk:
             paint.shader = shader
             paint.color = Color.WHITE
             paint.alpha = a
-            paint.setShadowLayer(hr, 0f, 0f, halo)
             labelPaint.shader = shader
             labelPaint.color = Color.WHITE
             labelPaint.alpha = a
-            labelPaint.setShadowLayer(hr, 0f, 0f, halo)
+            if (hdrKeys && android.os.Build.VERSION.SDK_INT >= 29) {
+                val haloHdr = hdr(backlightRgb, glow * 0xD8 / 255f)
+                paint.setShadowLayer(hr, 0f, 0f, haloHdr)
+                labelPaint.setShadowLayer(hr, 0f, 0f, haloHdr)
+            } else {
+                paint.setShadowLayer(hr, 0f, 0f, halo)
+                labelPaint.setShadowLayer(hr, 0f, 0f, halo)
+            }
             glowPass = true
             draw()
             glowPass = false

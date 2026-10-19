@@ -24,7 +24,7 @@ class Settings(ctx: Context) {
         get() = g.getString("variant", null)
         set(v) = g.edit().putString("variant", v).apply()
 
-    /** 0 = profile default. */
+    /** 0 = the release's default, which is the board's maximum (OsProfile.defaultMemMB). */
     var memMB: Int
         get() = p.getInt("memMB", 0)
         set(v) = p.edit().putInt("memMB", v).apply()
@@ -99,10 +99,12 @@ class Settings(ctx: Context) {
      */
     val cpuMipsCap: Int get() = if (cpuLimitOn) (cpuMhz * 7 + 5) / 10 else 0
 
-    /** Passive-matrix (CSTN) LCD look on the screen, with each effect's strength 0..100. */
-    var lcdOn: Boolean
-        get() = p.getBoolean("screen.lcd", false)
-        set(v) = p.edit().putBoolean("screen.lcd", v).apply()
+    // ---- Realism (GlRenderer::Realism): the panel, its traits and the layers in front, 0..100 ----
+
+    /** The panel drawn: "off" (clean), "tn" (TFT LCD), "stn" (passive-matrix CSTN) or "amoled". */
+    var panel: String
+        get() = p.getString("screen.panel", null) ?: if (p.getBoolean("screen.lcd", false)) "stn" else "off"
+        set(v) = p.edit().putString("screen.panel", v).apply()
     var lcdGrid: Int
         get() = p.getInt("screen.lcd.grid", 50)
         set(v) = p.edit().putInt("screen.lcd.grid", v).apply()
@@ -118,6 +120,58 @@ class Settings(ctx: Context) {
     var lcdGhost: Int
         get() = p.getInt("screen.lcd.ghost", 60)
         set(v) = p.edit().putInt("screen.lcd.ghost", v).apply()
+    /** How much the picture changes as the phone tilts (the viewing angle). */
+    var lcdAngle: Int
+        get() = p.getInt("screen.lcd.angle", 50)
+        set(v) = p.edit().putInt("screen.lcd.angle", v).apply()
+    /** A cold phone (battery temperature below 15 C) makes the liquid crystal slower. */
+    var lcdCold: Boolean
+        get() = p.getBoolean("screen.lcd.cold", false)
+        set(v) = p.edit().putBoolean("screen.lcd.cold", v).apply()
+    var touchLayer: Int
+        get() = p.getInt("screen.touchlayer", 0)
+        set(v) = p.edit().putInt("screen.touchlayer", v).apply()
+    var pressRipple: Int
+        get() = p.getInt("screen.ripple", 0)
+        set(v) = p.edit().putInt("screen.ripple", v).apply()
+    var screenWear: Int
+        get() = p.getInt("screen.wear", 0)
+        set(v) = p.edit().putInt("screen.wear", v).apply()
+    var sunGlare: Int
+        get() = p.getInt("screen.glare", 0)
+        set(v) = p.edit().putInt("screen.glare", v).apply()
+    var screenTear: Int
+        get() = p.getInt("screen.tear", 0)
+        set(v) = p.edit().putInt("screen.tear", v).apply()
+    /** Dead or stuck pixels, 0..8. */
+    var deadPixels: Int
+        get() = p.getInt("screen.dead", 0)
+        set(v) = p.edit().putInt("screen.dead", v).apply()
+    var backlightFade: Boolean
+        get() = p.getBoolean("screen.fade", false)
+        set(v) = p.edit().putBoolean("screen.fade", v).apply()
+    /** HDR: how far above the phone's UI white the screen and key backlights shine (0 = SDR). */
+    var hdrLevel: Int
+        get() = p.getInt("screen.hdr", 0)
+        set(v) = p.edit().putInt("screen.hdr", v).apply()
+    /** Peak brightness of the screen and key backlights, times SDR white (1 = off; up to 4). */
+    val hdrRatio: Float get() = 1f + 3f * hdrLevel.coerceIn(0, 100) / 100f
+
+    /** Where this phone's dead pixels, scratches and prints are: made once per install. */
+    val realismSeed: Int
+        get() = g.getInt("realism.seed", 0).takeIf { it != 0 }
+            ?: (java.util.Random().nextInt() or 1).also { g.edit().putInt("realism.seed", it).apply() }
+
+    /** The renderer's values (NativeBridge.setRealism, jni.cpp). */
+    fun realismValues(): IntArray = intArrayOf(
+        when (panel) { "tn" -> 1; "stn" -> 2; "amoled" -> 3; else -> 0 },
+        lcdGrid, lcdContrast, lcdCrosstalk, lcdBacklight, lcdGhost, lcdAngle, if (lcdCold) 1 else 0,
+        touchLayer, pressRipple, screenWear, sunGlare, screenTear, deadPixels, if (backlightFade) 1 else 0,
+        realismSeed, hdrLevel)
+
+    /** The phone's sensors are only needed for effects that react to the viewer or the room. */
+    val realismNeedsTilt: Boolean get() = (panel != "off" && lcdAngle > 0) || screenWear > 0 || sunGlare > 0
+    val realismNeedsLight: Boolean get() = sunGlare > 0
 
     /** Save the session when leaving the app and continue it on the next start. */
     var resumeSession: Boolean
@@ -582,7 +636,7 @@ class Settings(ctx: Context) {
         }
     }
 
-    fun effectiveMemMB(): Int = profile?.memFor(memMB) ?: if (memMB > 0) memMB else 128
+    fun effectiveMemMB(): Int = profile?.memFor(memMB) ?: if (memMB > 0) memMB else 256
 
     companion object {
         /**

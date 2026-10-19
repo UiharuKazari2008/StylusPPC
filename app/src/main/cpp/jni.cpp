@@ -123,7 +123,8 @@ struct Session {
     void render() {
         Lcd &lcd = *m->lcd;
         int w = lcd.width(), h = lcd.height();
-        if (!lcd.enabled() || w <= 1 || h <= 1) return;
+        if (!lcd.enabled()) { gl.drawOff(); return; }  // the backlight fading out, if on
+        if (w <= 1 || h <= 1) return;
         int bpp = lcd.bpp();
         uint32_t bytes = (uint32_t)w * h * (bpp / 8);
         bool wr;
@@ -160,6 +161,7 @@ struct Session {
                         if (e.down && !penDown) penDownNs = m->nowNs();
                         penDown = e.down;
                         m->touch(e.down, e.a, e.b);
+                        gl.touch(e.down, e.a, e.b);  // the resistive film and the press ripple
                     } else {
                         m->key(e.a, e.down);
                     }
@@ -490,11 +492,49 @@ JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setFilte
     if (s) s->gl.setFilter(f);
 }
 
-JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setLcdLook(JNIEnv *, jobject, jlong h, jboolean on,
-                                                                                   jint grid, jint contrast, jint crosstalk,
-                                                                                   jint backlight, jint ghost) {
+// Realism filters, in NativeBridge.setRealism's order: panel, grid, contrast, crosstalk, backlight,
+// ghost, angle, cold, touch layer, ripple, wear, glare, tear, dead pixels, fade, seed, HDR (0..100,
+// the screen's white from 1x to 4x SDR white). Strengths are 0..100.
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setRealism(JNIEnv *env, jobject, jlong h,
+                                                                                   jintArray values) {
     Session *s = S(h);
-    if (s) s->gl.setStn(on, grid, contrast, crosstalk, backlight, ghost);
+    if (!s || !values) return;
+    jint v[17] = {};
+    jsize n = env->GetArrayLength(values);
+    env->GetIntArrayRegion(values, 0, n < 17 ? n : 17, v);
+    auto k = [](jint x) { return (x < 0 ? 0 : x > 100 ? 100 : x) / 100.f; };
+    GlRenderer::Realism r;
+    r.panel = v[0] >= 0 && v[0] <= 3 ? v[0] : 0;
+    r.grid = k(v[1]);
+    r.contrast = k(v[2]);
+    r.crosstalk = k(v[3]);
+    r.backlight = k(v[4]);
+    r.ghost = k(v[5]);
+    r.angle = k(v[6]);
+    r.cold = v[7] != 0;
+    r.touchLayer = k(v[8]);
+    r.ripple = k(v[9]);
+    r.wear = k(v[10]);
+    r.glare = k(v[11]);
+    r.tear = k(v[12]);
+    r.dead = v[13] < 0 ? 0 : v[13] > 8 ? 8 : v[13];
+    r.fade = v[14] != 0;
+    r.seed = (uint32_t)v[15];
+    r.hdr = 1 + 3 * k(v[16]);
+    s->gl.setRealism(r);
+}
+
+JNIEXPORT void JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_setScreenSensors(JNIEnv *, jobject, jlong h,
+                                                                                         jfloat tiltX, jfloat tiltY,
+                                                                                         jfloat lux, jfloat tempC,
+                                                                                         jfloat brightness) {
+    Session *s = S(h);
+    if (s) s->gl.setSensors(tiltX, tiltY, lux, tempC, brightness);
+}
+
+JNIEXPORT jboolean JNICALL Java_jp_net_seventhreeseven_wmdroid_NativeBridge_hdrActive(JNIEnv *, jobject, jlong h) {
+    Session *s = S(h);
+    return s && s->gl.hdrActive();
 }
 
 // Guest audio reached the speaker within the last ms. The emulation thread uses the same clock

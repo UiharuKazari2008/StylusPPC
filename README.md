@@ -62,7 +62,7 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 | **Windows Mobile 6.5.3 Professional** | `PPC_USA_GSM_FWVGA_VR.BIN` (optional: `PPC_USA_GSM_WVGA_VR.BIN`) | Main target. Titanium home screen, FakeRIL radio, everything below works. The optional WVGA image is what 480×800 boots, so the Start button does not stick and HTC games fit. |
 | **Windows Mobile 6.5 Professional** | `PPC_USA_GSM_WVGA_VR.BIN` (optional: VGA, WQVGA, square, QVGA) | Original 6.5 (build 5.2.21234), before 6.5.3. Titanium home screen at 480×800. Its radio is the virtual GSM modem, the same path as 6.1.4. .NET CF 3.5 is installed on first boot. The phone shape stays at 480×800 (a taller screen, such as 852 or 854, has no Titanium layout). |
 | **Windows Mobile 6.1.4 Professional** | `PPC_USA_GSM_480x800.BIN` | .NET CF 3.5 is installed automatically on first boot. Its radio is PocketStylus's virtual GSM modem. |
-| **Windows Mobile 5.0 Pocket PC Phone** | `PPC_USA_GSM_VGA_VR.BIN` | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM (the default). |
+| **Windows Mobile 5.0 Pocket PC Phone** | `PPC_USA_GSM_VGA_VR.BIN` | Runs at your phone's full height. .NET CF 3.5 is installed automatically. Needs 128 MB of RAM or more. |
 | **Windows Mobile 6.5.3 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_WVGA_VR.bin`) | Keypad edition: soft keys, D-pad, Talk/End and digits on the skin or the phone's own keys. The WVGA image is sharper, but its call screen draws garbled. |
 | **Windows Mobile 6.5 Standard** | `SP_USA_GSM_QVGA_VR.bin` (optional: `SP_USA_GSM_320x320_VR.bin`) | Original 6.5 keypad edition. The QVGA image is landscape 320×240; the other is 320×320. Calls go through the virtual GSM modem. The home screen draws, then its items disappear and leave the wallpaper. |
 | **Windows Mobile 6.1.4 Standard** | `SP_USA_GSM_QVGA_VR.bin` | Calls through the virtual GSM modem. .NET CF 3.5 is installed automatically. |
@@ -73,6 +73,55 @@ Every feature below was verified by booting real ROMs, both in the app and in a 
 Each Professional release needs just one image: the board tells Windows Mobile its screen size at boot, so Device Settings → **Screen resolution** runs it at your phone's shape (default), 480×854, 480×800, 480×640 or 480×480. Standard releases offer their own sizes (240×320, 320×320, 320×240, and more where an image allows). Each release keeps its own saved sessions and device settings, so you can switch between them without losing anything.
 
 **Professional or Standard?** "Professional" (Pocket PC) is the touchscreen edition. "Standard" (Smartphone) has no touchscreen and is driven entirely by the keypad: the keypad skin, the phone's hardware keys (for example on an Android flip phone), or taps on the screen (soft-key bar taps press the soft keys, swipes move the D-pad, other taps press Action). 6.5 is the original release (Titanium, virtual GSM modem); 6.5.3 is the later Developer Tool Kit (FakeRIL). Very minor releases (6.0, 6.1, 5.0 MSFP) were dropped in favour of the newest build in each family. 2003 is the Second Edition Device Emulator images, which are ARMv4.
+
+---
+
+## How Windows Mobile and these ROMs work
+
+These files are the images Microsoft built for the Windows Mobile Device Emulator. Each one is a complete phone operating system for a pretend Samsung board: the kernel, the shell and the programs Microsoft shipped in ROM. PocketStylus boots that image as it was released. Your files are not in the ROM file. They appear after Windows Mobile has started.
+
+**Internal storage is a region of RAM.** On every one of these images the kernel sets aside the first 32 MB of extra memory as the storage volume, about 31 MB, shown in Settings as Storage. Installed programs, documents and the registry, once Windows Mobile has written it out, live there. The ROM file stays the original operating system. Because that volume is ordinary guest RAM, the saved session (`resume.wms`) has to include the machine's memory. That file is the copy of internal storage. The storage card is a different thing: a folder on the Android phone, shared in as `\Storage Card`. Resets, resolution changes and switching ROMs leave the card alone.
+
+At the 256 MB a new ROM starts with, the board looks like this. Higher addresses are at the top. The three RAM blocks are one continuous region starting at `0x30000000`; only the labels change.
+
+```
+0x40000000 ┌────────────────────────────────────────────┐
+           │                                            │
+           │                                            │
+           │  program memory · 160 MB                   │
+           │  shrinks from the top when Memory is lower │
+           │                                            │
+0x36000000 ├────────────────────────────────────────────┤
+           │  internal storage · 32 MB, files, programs │
+0x34000000 ├────────────────────────────────────────────┤
+           │  base RAM · 64 MB                          │
+           │  kernel, running programs, boot arguments  │
+0x30000000 └────────────────────────────────────────────┘
+
+0x06000000 ┌────────────────────────────────────────────┐
+           │  NOR flash · ROM image (WM 6, 6.1, 6.5)    │
+           │  operating system, left as shipped         │
+0x00000000 └────────────────────────────────────────────┘
+
+           ┌────────────────────────────────────────────┐
+           │  storage card · outside this map           │
+           │  a folder on the Android phone             │
+           └────────────────────────────────────────────┘
+```
+
+The RAM blocks are drawn to scale (one row is 32 MB). The flash and the storage card are separate and are not to that scale.
+
+A lower Memory setting shortens only the top block. The 32 MB storage stripe stays at `0x34000000`, which is why a Windows Mobile 6 snapshot can move to another size and keep its files. At 96 MB the extension is exactly that stripe, so almost no program memory is added. At 64 MB there is no stripe and Storage reports critically low. Windows Mobile 5 and 2003 Second Edition load their image into RAM rather than the flash bar above; their storage stripe is in the same place.
+
+**The screen size is read once, at boot.** PocketStylus writes the width and height into the bootloader arguments, and Windows Mobile builds its display and home screen from them as it starts. Changing Screen resolution restarts Windows Mobile. PocketStylus puts the previous memory back first, so the storage volume is still there when the new size takes effect. One ROM image keeps one internal storage. A resolution you used earlier is the same phone, not a second saved copy.
+
+**Windows Mobile 6 can take a new memory size. Windows Mobile 5 and 2003 Second Edition cannot.** A Windows Mobile 6 restart measures RAM again and leaves the storage volume in place, so files, installed programs and saved settings survive a new memory size or a new screen. Windows Mobile 5 and 2003 Second Edition erase that volume on any start they treat as a clean boot. A screen change keeps the files by restarting with the whole memory image and the same memory size. Changing memory on those releases starts empty and asks first. So does switching to a different image: another Standard size, or 6.5.3 Professional's WVGA image in place of the FWVGA one. Each of those is its own ROM, with its own storage. If an update finds several old saves for one ROM, from when each resolution kept its own, the first start asks once which version to keep.
+
+**A restart drops settings that were not written out yet**, the same as holding the reset on a real phone. Windows Mobile flushes the registry to the storage volume on its own schedule.
+
+**Professional images stretch. Standard images do not.** A Professional ROM is told its screen size at boot, so one file runs at the phone's shape, 480×854, 480×800, 480×640 or 480×480. Original 6.5 Professional has no home-screen layout above 480×800, so taller sizes stay at 800. A Standard ROM's home screen only covers the sizes that image was built for, which is why 240×320 and 480×800 are separate files.
+
+**256 MB is as much as Windows Mobile will use.** The board has a fixed 64 MB plus an extension the kernel probes in 1 MB steps, and the probe stops at 192 MB. A new install, and a ROM that has never had a memory size chosen, starts at 256 MB. 96 MB is left out where it fails: the Windows Mobile 5 helper crashes, and 6.5.3 Professional has almost no program memory left once a few apps are open. The sizes and what survived a move are recorded in `docs/research-de-hardware.md`.
 
 ---
 
@@ -179,8 +228,8 @@ Each section below expands to show how the feature works.
 - New device state is added as optional trailers after the flash section, so sessions saved by older builds keep loading.
 - **Power menu → Savepoint** writes a resume point without shutting down. **Reset** performs a real warm reboot: the host resets the CPU into the ROM's boot code with RAM intact, exactly as the OAL's `IOCTL_HAL_REBOOT` does. **Cold boot** discards the current release's saves only.
 - A hung guest (detected when the battery driver's polling stops while the CPU is busy) is never saved over a good session.
-- **Changing Memory or Screen resolution keeps internal storage.** Each combination has its own saves; the first time you pick a new one, it starts from the session you were just using and Windows Mobile boots again at the new size, with your files, programs and settings. WM 5 keeps storage across screen changes only (its storage doesn't survive a cold boot), so a WM 5 memory change, like a Standard screen size that uses a different image, asks first and says it starts fresh. Switching back returns to the earlier saves.
-- **Memory:** Windows Mobile finds at most 256 MB on this board (it probes 192 MB above the fixed 64 MB), so the choices are 96–256 MB in 32 MB steps, per release: 96 MB isn't offered where it fails (WM 5's helper crashes, WM 6.5.3 Pro runs out of program memory). See `docs/research-de-hardware.md`.
+- **Changing Memory or Screen resolution keeps internal storage.** One saved state per ROM image. Changing the screen, or the memory on Windows Mobile 6, restarts Windows Mobile and keeps files, programs and settings. WM 5 keeps storage across screen changes only (its storage doesn't survive a cold boot), so a WM 5 memory change, like a Standard screen size that uses a different image, asks first and starts fresh. The first start after this change asks, once per ROM, which saved version to keep when several exist.
+- **Memory:** Windows Mobile finds at most 256 MB on this board (it probes 192 MB above the fixed 64 MB), so the choices are 96–256 MB in 32 MB steps, per release: 96 MB isn't offered where it fails (WM 5's helper crashes, WM 6.5.3 Pro runs out of program memory). A new install, and a ROM that has never chosen a size, starts at 256 MB. See `docs/research-de-hardware.md`.
 </details>
 
 <details>
@@ -399,9 +448,10 @@ Device settings are per OS, except those about the phone itself, which every OS 
 
 | Page | Settings |
 |---|---|
-| **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android · Passive Matrix LCD Filter (Pixel Grid, Washed-Out Contrast, Crosstalk Streaks, Uneven Backlight, Ghosting sliders) |
+| **Display** | Performance overlay · Screen scaling (smooth / sharp / enhanced) · Auto-Rotate · Rotation Delay · Rotation Sensitivity · Backlight follows Android |
+| **Realism** | Display Panel (clean / TN TFT / passive-matrix CSTN / AMOLED) · Pixel Grid · Colour and Contrast · Crosstalk / Load Effects · Backlight Unevenness · Ghosting / Smear · Viewing Angle (tilt) · Cold Slows the Screen · Resistive Touch Layer · Press Ripple · Screen Wear · Sunlight Glare (light sensor) · Dead / Stuck Pixels · Screen Tearing · Backlight Fade · HDR Screen and Key Backlights (Android 14+) · Limit CPU Speed · CPU Speed (MHz) |
 | **Design** | Hardware Keys (slim 4 / full 6 + D-pad / none) · Shell Skin · Android Wallpaper under Skin · Android Wallpaper Blur · Skin Opacity · Sync Android's Color Theme · Sync Android's Wallpaper · Key Style (glass / flat / bubbled / metallic) · Key Opacity · Key Outline · Key Glyph · Key Blur · Key Color · Gyro Key Shine (Brightness, Width) · Key Backlights (Intensity, Timeout, Color, Dirtiness) · Slide Out Keyboard (Foldables) · Keyboard Layout · Network Indicator Type (GSM / CDMA) · Mid-Display Hinge (Style, Thickness, Location, Opacity) · Use Android IME over Device IME |
-| **Hardware** | Limit CPU Speed · CPU Speed (MHz) · Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Lock Button Closes App · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
+| **Hardware** | Camera (off / rear / front) · 2009 Filter (Intensity) · GPS · Receive Bluetooth Files · Sync Clipboard · Volume Boost · Phone Volume Up/Down keys · Lock Button Closes App · Buttons 1–4 (Start, App Launch 1, App Launch 2, OK) |
 | **Power** | Disable Battery Optimization (until Android allows it) · Lock Android on Screen Off · Lock Device when Android Screen's Off · Lock when Device closes · Hibernation · Run in Background (unrestricted / suspend / hibernate, after a timer) |
 | **Launcher** | Use as Phone Launcher · Home Goes To (Today / Start) · Show Android Apps Folder · Hidden Apps · Pinned Shortcuts |
 | **Network** | Secure Web Proxy (modern HTTPS) · Windows Live Messenger via Escargot |

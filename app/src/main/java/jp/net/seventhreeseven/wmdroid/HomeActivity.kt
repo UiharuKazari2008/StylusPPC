@@ -34,13 +34,18 @@ class HomeActivity : Activity() {
 
     private fun route() {
         val s = Settings(this)
+        GuestStates.settleQuiet(this)
         val p = s.profile
         val v = s.variant
         val ready = p != null && v != null && ImageStore.find(this, p, v) != null
-        val i = if (ready) Intent(this, EmulatorActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra(EmulatorActivity.EXTRA_HOME, true)
-        else Intent(this, SetupActivity::class.java)
+        val i = when {
+            GuestStates.needsChoice(this) -> Intent(this, StateKeepActivity::class.java)
+                .putExtra(EmulatorActivity.EXTRA_HOME, true)
+            ready -> Intent(this, EmulatorActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(EmulatorActivity.EXTRA_HOME, true)
+            else -> Intent(this, SetupActivity::class.java)
+        }
         startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         finish()
         @Suppress("DEPRECATION") overridePendingTransition(0, 0)

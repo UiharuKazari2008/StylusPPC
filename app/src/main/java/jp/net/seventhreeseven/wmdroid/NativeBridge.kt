@@ -15,8 +15,16 @@ object NativeBridge {
     external fun setSurface(handle: Long, surface: Surface?)
     /** Upscaling filter: 0 smooth, 1 sharp pixels, 2 enhanced (bicubic). */
     external fun setFilter(handle: Long, filter: Int)
-    /** Passive-matrix LCD look (replaces the filter while on); each effect 0..100. */
-    external fun setLcdLook(handle: Long, on: Boolean, grid: Int, contrast: Int, crosstalk: Int, backlight: Int, ghost: Int)
+    /** Realism filters (replace the scaling filter while any is on): [Settings.realismValues]. */
+    external fun setRealism(handle: Long, values: IntArray)
+    /**
+     * What the realism filters react to: the viewer's position from the resting pose (-1..1, + =
+     * from the right / from above), room light in lux (0 = unknown), the phone's temperature in C
+     * and its screen brightness 0..1.
+     */
+    external fun setScreenSensors(handle: Long, tiltX: Float, tiltY: Float, lux: Float, tempC: Float, brightness: Float)
+    /** The screen's surface is extended-range (HDR), so its brightness can be lifted above the UI's. */
+    external fun hdrActive(handle: Long): Boolean
     external fun setRotation(handle: Long, quarterTurns: Int)
     /** Ask for the fastest CPU for [ms] (a rotation or layout change is about to redraw everything). */
     external fun boost(handle: Long, ms: Int)

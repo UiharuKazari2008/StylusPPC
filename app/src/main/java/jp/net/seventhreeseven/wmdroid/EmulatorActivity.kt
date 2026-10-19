@@ -68,6 +68,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     private val phone by lazy { PhoneStatus(this) }
     private val gps by lazy { GpsBridge(this) { handle } }
     private val camera by lazy { CameraBridge(this, settings) { handle } }  // camera bridge
+    private val screenSensors by lazy {
+        ScreenSensors(this) { tx, ty, lux, t, b -> if (handle != 0L) NativeBridge.setScreenSensors(handle, tx, ty, lux, t, b) }
+    }
+    private var hdrApplied = false
+    private var hdrRatioApplied = 1f
     private val motion by lazy { MotionBridge(this, { handle }) { using -> onMotionUse(using) } }  // G-sensor for HTC apps
     // Infrared beams over Bluetooth LE / InfraWAN (InfraredBridge.kt, docs/research-irda.md)
     private val irda by lazy { InfraredBridge(this, { handle }) { if (::guest.isInitialized) guest else null } }
@@ -135,9 +140,17 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             finish()
             return
         }
-        running = java.lang.ref.WeakReference(this)
         settings = Settings(this)
         settings.migrate()
+        GuestStates.settleQuiet(this)
+        if (GuestStates.needsChoice(this)) {
+            duplicate = true  // onCreate returned before set-up; later lifecycle must not touch it
+            startActivity(Intent(this, StateKeepActivity::class.java)
+                .putExtra(EXTRA_HOME, intent.getBooleanExtra(EXTRA_HOME, false)))
+            finish()
+            return
+        }
+        running = java.lang.ref.WeakReference(this)
         CardDrop.start(this)  // PC drop window can put a CAB on the storage card
         guest = GuestBridge(this, settings, this)
         // Status and the clipboard/keyboard watch are one line each and need no answer. They go on the
@@ -291,15 +304,20 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             finish()
             return
         }
-        boot(t.profile, t.variant, t.file, t.w, t.h)
+        boot(t)
     }
 
-    private fun boot(profile: OsProfile, variant: ImageVariant, file: File, w: Int, h: Int) {
+    private fun boot(t: GuestStates.Target) {
+        val profile = t.profile
+        val variant = t.variant
+        val file = t.file
+        val w = t.w
+        val h = t.h
         Log.i(TAG, "screen ${w}x$h (${settings.screenRes}, image ${variant.width}x${variant.height})")
         guestW = w
         guestH = h
-        val mem = settings.effectiveMemMB()
-        val dir = File(filesDir, "states/${profile.id}-${variant.id}-$mem-${w}x$h").apply { mkdirs() }
+        val mem = t.mem
+        val dir = File(GuestStates.statesDir(this), t.dirName).apply { mkdirs() }
         snapshotDir = dir
 
         fun create(): Long {
@@ -308,7 +326,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
                 val mounts = StorageBridge.mounts(this, settings)
                 NativeBridge.setShareMounts(hd, mounts.map { it.first }.toTypedArray(), mounts.map { it.second }.toTypedArray())
                 NativeBridge.setFilter(hd, settings.screenFilter)
-                applyLcdLook(hd)
+                applyRealism(hd)
                 NativeBridge.setSpeedLimit(hd, settings.cpuMipsCap)
                 NativeBridge.setRotation(hd, if (foldGuest) 1 else 0)
                 NativeBridge.setAudioGain(hd, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
@@ -331,28 +349,40 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             add(File(dir, BOOT))
         }
         var restored = false
+        var adopted = false
         for (snap in candidates) {
-            if (!snap.exists()) continue
-            if (NativeBridge.loadState(handle, snap.path)) {
+            if (!snap.exists() || handle == 0L) continue
+            val cfg = GuestStates.snapshotConfig(snap)
+            val same = cfg != null && cfg.first == mem && cfg.second == w && cfg.third == h
+            if (same && NativeBridge.loadState(handle, snap.path)) {
                 Log.i(TAG, "restored ${snap.name}")
                 booting = !NativeBridge.bootComplete(handle)
                 alignRotationPending = true
                 restored = true
                 break
             }
-            snap.delete()
+            // A different screen or memory: restore on this fresh machine and let Windows Mobile boot
+            // again. A failed loadState has already written the machine, so adopt only runs first.
+            if (!same && NativeBridge.adoptState(handle, snap.path, profile.coldBootKeepsStorage)) {
+                Log.i(TAG, "adopted ${snap.name} at ${mem}MB ${w}x$h")
+                booting = true
+                alignRotationPending = true
+                restored = true
+                adopted = true
+                break
+            }
             NativeBridge.destroy(handle)  // a failed restore leaves the machine half-written
             handle = create()
+            snap.delete()
         }
-        // A new Memory or Screen resolution setting: no state of its own yet, so start from the
-        // configuration last run (same image; WM 5: same memory): Windows Mobile boots again at the new
-        // size with its internal storage (files, settings, programs) kept.
-        if (candidates.none { it.exists() }) {
-            GuestStates.migrationSource(this, settings, GuestStates.Target(profile, variant, file, w, h, mem))?.let { src ->
+        if (!restored && handle != 0L) {
+            GuestStates.migrationSource(this, settings, t)?.let { src ->
                 if (NativeBridge.adoptState(handle, src.path, profile.coldBootKeepsStorage)) {
                     Log.i(TAG, "started from ${src.parentFile?.name}/${src.name}")
                     booting = true
                     alignRotationPending = true
+                    restored = true
+                    adopted = true
                 } else {
                     NativeBridge.destroy(handle)
                     handle = create()
@@ -364,7 +394,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         bootedMemMB = settings.memMB
         // An install keeps this session and soft-resets it, the same as the power menu's Reset.
         // The saved snapshots stay: deleting them is what made the next start boot the empty image.
-        if (restored && noteAppUpdate(dir)) {
+        // Adopt already reboots, so the update stamp is written without a second reset.
+        if (restored && noteAppUpdate(dir) && !adopted) {
             Log.i(TAG, "app updated: soft-resetting Windows Mobile")
             NativeBridge.softReset(handle)
             resumeSaved = false
@@ -852,6 +883,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onStart() {
         super.onStart()
+        if (duplicate) return
         foreground = true
         ownUi = false
         lockSent = false
@@ -874,6 +906,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun onResume() {
         super.onResume()
+        if (duplicate) return
         if (returnUntil != 0L) {
             val due = returnUntil
             if (SystemClock.uptimeMillis() < due) {
@@ -932,6 +965,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
             alignRotation()
         }
         if (settings.keyShine) skin.startTilt()
+        if (handle != 0L) applyRealism(handle)  // sensors back on
         wallpaperChecked = false
         contentResolver.registerContentObserver(
             android.provider.Settings.System.getUriFor(android.provider.Settings.System.SCREEN_BRIGHTNESS), false, brightnessObserver)
@@ -1012,6 +1046,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     override fun onGuestLauncher(command: String) = openLauncherPage(command)
 
     override fun onPause() {
+        if (duplicate) { super.onPause(); return }
         ui.removeCallbacks(tick)
         powerMenu.close()
         rotation.stop()
@@ -1019,6 +1054,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         camera.stop()
         motion.stop()
         skin.stopTilt()
+        screenSensors.stop()
         skin.releaseAll()
         status.stop()
         calls.pause()
@@ -1076,6 +1112,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     override fun onStop() {
+        if (duplicate) { super.onStop(); return }
         if (callShown) { callShown = false; showWhenLocked(false) }
         layoutTracker.removeWindowLayoutInfoListener(layoutListener)
         foreground = false
@@ -1730,7 +1767,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         restartAsked = true
         GuestStates.confirm(this, change, apply = {
             restartAsked = false
-            Toast.makeText(this, if (change == GuestStates.Change.CARRY) "Restarting Windows Mobile at the new setting; " +
+            val carries = change == GuestStates.Change.CARRY || change == GuestStates.Change.NONE
+            Toast.makeText(this, if (carries) "Restarting Windows Mobile at the new setting; " +
                 "your files and programs come along" else "Restarting Windows Mobile to apply the change", Toast.LENGTH_SHORT).show()
             recreate()
         }, cancel = {
@@ -1742,9 +1780,45 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
     }
 
     /** A setting changed from inside Windows Mobile: apply everything that can change live. */
-    /** The passive-matrix LCD look and its effect strengths (GlRenderer::setStn). */
-    private fun applyLcdLook(h: Long) = NativeBridge.setLcdLook(h, settings.lcdOn, settings.lcdGrid,
-        settings.lcdContrast, settings.lcdCrosstalk, settings.lcdBacklight, settings.lcdGhost)
+    /**
+     * The Realism page: the panel and its layers (GlRenderer::Realism), the sensors they react to,
+     * and HDR, which lifts the guest screen and the key backlights above the rest of the UI.
+     */
+    private fun applyRealism(h: Long) {
+        NativeBridge.setRealism(h, settings.realismValues())
+        val any = settings.panel != "off" || settings.touchLayer > 0 || settings.pressRipple > 0 ||
+            settings.screenWear > 0 || settings.sunGlare > 0 || settings.screenTear > 0 ||
+            settings.deadPixels > 0 || settings.backlightFade
+        screenSensors.update(foreground && any, settings.realismNeedsTilt, settings.realismNeedsLight)
+        applyHdr()
+    }
+
+    /**
+     * HDR (Android 14+): the window renders extended range so the key backlights can glow above
+     * SDR white, and the screen's own surface (FP16 scRGB, see gl_renderer) is allowed the same
+     * headroom. Off, both go back to SDR.
+     */
+    private fun applyHdr() {
+        if (Build.VERSION.SDK_INT < 34) return
+        val ratio = settings.hdrRatio
+        val on = ratio > 1.01f
+        if (on == hdrApplied && ratio == hdrRatioApplied) return
+        hdrApplied = on
+        hdrRatioApplied = ratio
+        window.colorMode = if (on) android.content.pm.ActivityInfo.COLOR_MODE_HDR else android.content.pm.ActivityInfo.COLOR_MODE_DEFAULT
+        if (Build.VERSION.SDK_INT >= 35) window.desiredHdrHeadroom = if (on) ratio * 1.3f else 0f
+        skin.keyHdrGain = ratio
+        applySurfaceHdr()
+    }
+
+    /** The screen's brightest content is the backlight's hot spots, about 1.3 x its white. */
+    private fun applySurfaceHdr() {
+        if (Build.VERSION.SDK_INT < 34 || !::surface.isInitialized) return
+        val sc = surface.surfaceControl ?: return
+        if (!sc.isValid) return
+        val r = if (hdrApplied) hdrRatioApplied * 1.3f else 1f
+        android.view.SurfaceControl.Transaction().setExtendedRangeBrightness(sc, r, r).apply()
+    }
 
     private fun applyLiveSettings() {
         skin.keysOn = settings.keysOn
@@ -1777,7 +1851,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
         if (autoRotate && foreground && !foldGuest && !motion.inUse) rotation.start() else rotation.stop()
         if (handle != 0L) {
             NativeBridge.setFilter(handle, settings.screenFilter)
-            applyLcdLook(handle)
+            applyRealism(handle)
             NativeBridge.setSpeedLimit(handle, settings.cpuMipsCap)
             NativeBridge.setAudioGain(handle, Math.pow(10.0, settings.audioBoostDb / 20.0).toFloat())
             // WM's Buttons 1-4: choices WM must store (Keymap.HwButtons), only when they changed.
@@ -2462,6 +2536,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, GuestBridg
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (handle != 0L) NativeBridge.setSurface(handle, holder.surface)
+        applySurfaceHdr()
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}

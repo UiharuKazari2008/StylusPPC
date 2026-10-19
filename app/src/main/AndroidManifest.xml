@@ -107,6 +107,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".SetupActivity" android:exported="false" />
+        <activity android:name=".StateKeepActivity" android:exported="false" android:label="Saved states" />
         <!-- PocketStylus as the phone's home app (Settings > Launcher): brings the one emulator forward
              (HomeActivity.kt). Its own task, so the emulator's task stays an ordinary one. -->
         <activity
